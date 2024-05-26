@@ -1,0 +1,27 @@
+PATH
+  remote: .
+  specs:
+    quickjs (0.1.0)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    power_assert (2.0.3)
+    rake (13.2.1)
+    rake-compiler (1.2.7)
+      rake
+    test-unit (3.6.2)
+      power_assert
+
+PLATFORMS
+  ruby
+  x86_64-darwin-23
+
+DEPENDENCIES
+  quickjs!
+  rake (~> 13.0)
+  rake-compiler
+  test-unit (~> 3.0)
+
+BUNDLED WITH
+   2.5.9
