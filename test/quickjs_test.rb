@@ -9,7 +9,8 @@ class QuickjsTest < Test::Unit::TestCase
     end
   end
 
-  test "something useful" do
-    assert_equal(::Quickjs.say_hi, "Hello!")
+  test "support returning integer" do
+    assert_equal(::Quickjs.evalCode("2+3"), 5)
+    assert_equal(::Quickjs.evalCode("const func = () => 8; func();"), 8)
   end
 end

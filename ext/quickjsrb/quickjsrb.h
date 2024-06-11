@@ -1,6 +1,14 @@
-#ifndef QUICKJS_H
-#define QUICKJS_H 1
+#ifndef QUICKJSRB_H
+#define QUICKJSRB_H 1
 
 #include "ruby.h"
 
-#endif /* QUICKJS_H */
+#include "quickjs.h"
+#include "quickjs-libc.h"
+
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+
+#endif /* QUICKJSRB_H */
