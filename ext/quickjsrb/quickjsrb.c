@@ -25,7 +25,10 @@ VALUE rb_module_eval_js_code(VALUE klass, VALUE r_code)
 
   VALUE result;
   int r = 0;
-  if (JS_IsNumber(res)) {
+  if (JS_IsException(res)) {
+    rb_raise(rb_eRuntimeError, "Something happened by evaluating as JavaScript code");
+    result = Qnil;
+  } else if (JS_IsNumber(res)) {
     JS_ToInt32(ctx, &r, res);
     result = INT2NUM(r);
   } else if (JS_IsString(res)) {
@@ -34,7 +37,7 @@ VALUE rb_module_eval_js_code(VALUE klass, VALUE r_code)
     result = rb_str_new2(msg);
   } else if (JS_IsBool(res)) {
     result = JS_ToBool(ctx, res) > 0 ? Qtrue : Qfalse;
-  } else if (JS_IsNull(res) || JS_IsUndefined(res) || JS_IsException(res)) {
+  } else if (JS_IsNull(res) || JS_IsUndefined(res)) {
     result = Qnil;
   } else {
     result = Qnil;

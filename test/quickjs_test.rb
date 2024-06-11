@@ -9,6 +9,10 @@ class QuickjsTest < Test::Unit::TestCase
     end
   end
 
+  test "throw an exception" do
+    assert_raise_with_message(RuntimeError, /Something/) { ::Quickjs.evalCode("}{") }
+  end
+
   test "support returning null" do
     assert_equal(::Quickjs.evalCode("null"), nil)
     assert_equal(::Quickjs.evalCode("const func = () => null; func();"), nil)
