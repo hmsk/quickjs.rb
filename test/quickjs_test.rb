@@ -18,6 +18,11 @@ class QuickjsTest < Test::Unit::TestCase
     assert_equal(::Quickjs.evalCode("const func = () => null; func();"), nil)
   end
 
+  test "support returning undefined" do
+    assert_equal(::Quickjs.evalCode("undefined"), Quickjs::Value::UNDEFINED)
+    assert_equal(::Quickjs.evalCode("const obj = {}; obj.key;"), Quickjs::Value::UNDEFINED)
+  end
+
   test "support returning string" do
     assert_equal(::Quickjs.evalCode("'1'"), "1")
     assert_equal(::Quickjs.evalCode("const func = () => 'hello'; func();"), "hello")

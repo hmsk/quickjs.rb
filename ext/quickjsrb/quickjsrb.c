@@ -1,6 +1,8 @@
 #include "quickjsrb.h"
 
 VALUE rb_mQuickjs;
+VALUE rb_mQuickjsValue;
+const char *undefinedId = "undefined";
 
 VALUE rb_module_eval_js_code(VALUE klass, VALUE r_code)
 {
@@ -37,7 +39,9 @@ VALUE rb_module_eval_js_code(VALUE klass, VALUE r_code)
     result = rb_str_new2(msg);
   } else if (JS_IsBool(res)) {
     result = JS_ToBool(ctx, res) > 0 ? Qtrue : Qfalse;
-  } else if (JS_IsNull(res) || JS_IsUndefined(res)) {
+  } else if (JS_IsUndefined(res)) {
+    result = ID2SYM(rb_intern(undefinedId));
+  } else if (JS_IsNull(res)) {
     result = Qnil;
   } else {
     result = Qnil;
@@ -54,4 +58,7 @@ Init_quickjsrb(void)
 {
   rb_mQuickjs = rb_define_module("Quickjs");
   rb_define_module_function(rb_mQuickjs, "evalCode", rb_module_eval_js_code, 1);
+
+  VALUE valueClass = rb_define_class_under(rb_mQuickjs, "Value", rb_cObject);
+  rb_define_const(valueClass, "UNDEFINED", ID2SYM(rb_intern(undefinedId)));
 }
