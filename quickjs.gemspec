@@ -24,7 +24,7 @@ Gem::Specification.new do |spec|
       (f == gemspec) ||
         f.start_with?(*%w[bin/ test/ spec/ features/ .git .github appveyor Gemfile])
     end
-  end
+  end + Dir['ext/quickjsrb/quickjs/*'].select { |f| f.end_with?(*%w[.c .h LICENSE]) }
   spec.require_paths = ['lib']
   spec.extensions = ['ext/quickjsrb/extconf.rb']
 end
