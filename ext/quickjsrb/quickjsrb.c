@@ -3,6 +3,7 @@
 VALUE rb_mQuickjs;
 VALUE rb_mQuickjsValue;
 const char *undefinedId = "undefined";
+const char *nanId = "NaN";
 
 VALUE rb_module_eval_js_code(VALUE klass, VALUE r_code)
 {
@@ -30,6 +31,8 @@ VALUE rb_module_eval_js_code(VALUE klass, VALUE r_code)
   if (JS_IsException(res)) {
     rb_raise(rb_eRuntimeError, "Something happened by evaluating as JavaScript code");
     result = Qnil;
+  } else if (JS_VALUE_IS_NAN(res)) {
+    result = ID2SYM(rb_intern(nanId));
   } else if (JS_IsNumber(res)) {
     JS_ToInt32(ctx, &r, res);
     result = INT2NUM(r);
@@ -61,4 +64,5 @@ Init_quickjsrb(void)
 
   VALUE valueClass = rb_define_class_under(rb_mQuickjs, "Value", rb_cObject);
   rb_define_const(valueClass, "UNDEFINED", ID2SYM(rb_intern(undefinedId)));
+  rb_define_const(valueClass, "NAN", ID2SYM(rb_intern(nanId)));
 }

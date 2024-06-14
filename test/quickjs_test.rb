@@ -23,11 +23,14 @@ class QuickjsTest < Test::Unit::TestCase
     assert_equal(::Quickjs.evalCode("const obj = {}; obj.key;"), Quickjs::Value::UNDEFINED)
   end
 
+  test "support returning NaN" do
+    assert_equal(::Quickjs.evalCode("Number('whatever')"), Quickjs::Value::NaN)
+  end
+
   test "support returning string" do
     assert_equal(::Quickjs.evalCode("'1'"), "1")
     assert_equal(::Quickjs.evalCode("const func = () => 'hello'; func();"), "hello")
   end
-
 
   test "support returning integer" do
     assert_equal(::Quickjs.evalCode("2+3"), 5)
