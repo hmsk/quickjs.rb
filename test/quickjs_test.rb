@@ -24,7 +24,7 @@ class QuickjsTest < Test::Unit::TestCase
   end
 
   test "support returning NaN" do
-    assert_equal(::Quickjs.evalCode("Number('whatever')"), Quickjs::Value::NaN)
+    assert_equal(::Quickjs.evalCode("Number('whatever')"), Quickjs::Value::NAN)
   end
 
   test "support returning string" do
@@ -42,5 +42,23 @@ class QuickjsTest < Test::Unit::TestCase
     assert_equal(::Quickjs.evalCode("true"), true)
     assert_equal(::Quickjs.evalCode("const func = () => 1 == 1; func();"), true)
     assert_equal(::Quickjs.evalCode("const func = () => 1 == 3; func();"), false)
+  end
+
+  class QuickjsTestFeatures < Test::Unit::TestCase
+    test "std is disabled" do
+      assert_equal(::Quickjs.evalCode("typeof std === 'undefined'"), true)
+    end
+
+    test "os is disabled" do
+      assert_equal(::Quickjs.evalCode("typeof os === 'undefined'"), true)
+    end
+
+    test "std can be enabled" do
+      assert_equal(::Quickjs.evalCode("!!std.urlGet", { features: [::Quickjs::FEATURE_STD] }), true)
+    end
+
+    test "os can be enabled" do
+      assert_equal(::Quickjs.evalCode("!!os.kill", { features: [::Quickjs::FEATURE_OS] }), true)
+    end
   end
 end

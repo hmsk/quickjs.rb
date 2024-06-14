@@ -5,23 +5,45 @@ VALUE rb_mQuickjsValue;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
 
-VALUE rb_module_eval_js_code(VALUE klass, VALUE r_code)
-{
+VALUE rb_module_eval_js_code(
+  VALUE klass,
+  VALUE r_code,
+  VALUE r_memoryLimit,
+  VALUE r_maxStackSize,
+  VALUE r_enableStd,
+  VALUE r_enableOs
+) {
   JSRuntime *rt = JS_NewRuntime();
   JSContext *ctx = JS_NewContext(rt);
 
-  JS_SetMemoryLimit(rt, 0x4000000);
-  JS_SetMaxStackSize(rt, 0x10000);
+  JS_SetMemoryLimit(rt, NUM2UINT(r_memoryLimit));
+  JS_SetMaxStackSize(rt, NUM2UINT(r_maxStackSize));
+
   JS_AddIntrinsicBigFloat(ctx);
   JS_AddIntrinsicBigDecimal(ctx);
   JS_AddIntrinsicOperators(ctx);
-  JS_EnableBignumExt(ctx, 1);
+  JS_EnableBignumExt(ctx, TRUE);
+
   JS_SetModuleLoaderFunc(rt, NULL, js_module_loader, NULL);
   js_std_add_helpers(ctx, 0, NULL);
 
   js_std_init_handlers(rt);
-  js_init_module_std(ctx, "std");
-  js_init_module_os(ctx, "os");
+  if (r_enableStd == Qtrue) {
+    js_init_module_std(ctx, "std");
+    const char *enableStd = "import * as std from 'std';\n"
+        "globalThis.std = std;\n";
+    JSValue stdEval = JS_Eval(ctx, enableStd, strlen(enableStd), "<code>", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(ctx, stdEval);
+  }
+
+  if (r_enableOs == Qtrue) {
+    js_init_module_os(ctx, "os");
+
+    const char *enableOs = "import * as os from 'os';\n"
+        "globalThis.os = os;\n";
+    JSValue osEval = JS_Eval(ctx, enableOs, strlen(enableOs), "<code>", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(ctx, osEval);
+  }
 
   char *code = StringValueCStr(r_code);
   JSValue res = JS_Eval(ctx, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL);
@@ -50,6 +72,8 @@ VALUE rb_module_eval_js_code(VALUE klass, VALUE r_code)
     result = Qnil;
   }
   JS_FreeValue(ctx, res);
+
+  js_std_free_handlers(rt);
   JS_FreeContext(ctx);
   JS_FreeRuntime(rt);
 
@@ -60,7 +84,7 @@ RUBY_FUNC_EXPORTED void
 Init_quickjsrb(void)
 {
   rb_mQuickjs = rb_define_module("Quickjs");
-  rb_define_module_function(rb_mQuickjs, "evalCode", rb_module_eval_js_code, 1);
+  rb_define_module_function(rb_mQuickjs, "_evalCode", rb_module_eval_js_code, 5);
 
   VALUE valueClass = rb_define_class_under(rb_mQuickjs, "Value", rb_cObject);
   rb_define_const(valueClass, "UNDEFINED", ID2SYM(rb_intern(undefinedId)));
