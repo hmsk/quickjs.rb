@@ -53,6 +53,19 @@ VALUE rb_module_eval_js_code(
   if (JS_IsException(res)) {
     rb_raise(rb_eRuntimeError, "Something happened by evaluating as JavaScript code");
     result = Qnil;
+  } else if (JS_IsObject(res)) {
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue jsonClass = JS_GetPropertyStr(ctx, global, "JSON");
+    JSValue stringifyFunc = JS_GetPropertyStr(ctx, jsonClass, "stringify");
+    JSValue strigified = JS_Call(ctx, stringifyFunc, jsonClass, 1, &res);
+
+    const char *msg = JS_ToCString(ctx, strigified);
+    result = rb_str_new2(msg);
+
+    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, strigified);
+    JS_FreeValue(ctx, stringifyFunc);
+    JS_FreeValue(ctx, jsonClass);
   } else if (JS_VALUE_IS_NAN(res)) {
     result = ID2SYM(rb_intern(nanId));
   } else if (JS_IsNumber(res)) {

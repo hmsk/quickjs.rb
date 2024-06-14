@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "json"
 
 class QuickjsTest < Test::Unit::TestCase
   test "VERSION" do
@@ -42,6 +43,10 @@ class QuickjsTest < Test::Unit::TestCase
     assert_equal(::Quickjs.evalCode("true"), true)
     assert_equal(::Quickjs.evalCode("const func = () => 1 == 1; func();"), true)
     assert_equal(::Quickjs.evalCode("const func = () => 1 == 3; func();"), false)
+  end
+
+  test "support returning plain object" do
+    assert_equal(::Quickjs.evalCode("const func = () => ({ a: '1' }); func();"), JSON.dump({ a: '1' }))
   end
 
   class QuickjsTestFeatures < Test::Unit::TestCase
