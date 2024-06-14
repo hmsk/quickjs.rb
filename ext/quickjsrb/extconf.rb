@@ -42,4 +42,4 @@ abort('could not find quickjs-libc.h') unless find_header('quickjs-libc.h')
 append_cflags('-fvisibility=hidden')
 $warnflags = ''
 
-create_makefile('quickjsrb/quickjsrb')
+create_makefile('quickjs/quickjsrb')
