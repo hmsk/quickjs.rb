@@ -45,8 +45,10 @@ class QuickjsTest < Test::Unit::TestCase
     assert_equal(::Quickjs.evalCode("const func = () => 1 == 3; func();"), false)
   end
 
-  test "support returning plain object" do
-    assert_equal(::Quickjs.evalCode("const func = () => ({ a: '1' }); func();"), JSON.dump({ a: '1' }))
+  test "support returning plain object/array" do
+    assert_equal(::Quickjs.evalCode("const func = () => ({ a: '1', b: 1 }); func();"), { 'a' => '1', 'b' => 1 })
+    assert_equal(::Quickjs.evalCode("const func = () => ({ funcCantRemain: () => {} }); func();"), {})
+    assert_equal(::Quickjs.evalCode("[1,2,3]"), [1,2,3])
   end
 
   class QuickjsTestFeatures < Test::Unit::TestCase

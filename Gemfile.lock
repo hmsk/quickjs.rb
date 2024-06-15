@@ -2,10 +2,12 @@ PATH
   remote: .
   specs:
     quickjs (0.1.2)
+      json
 
 GEM
   remote: https://rubygems.org/
   specs:
+    json (2.7.2)
     power_assert (2.0.3)
     rake (13.2.1)
     rake-compiler (1.2.7)

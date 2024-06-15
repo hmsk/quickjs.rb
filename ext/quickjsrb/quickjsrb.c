@@ -60,7 +60,9 @@ VALUE rb_module_eval_js_code(
     JSValue strigified = JS_Call(ctx, stringifyFunc, jsonClass, 1, &res);
 
     const char *msg = JS_ToCString(ctx, strigified);
-    result = rb_str_new2(msg);
+    VALUE rbString = rb_str_new2(msg);
+    VALUE rb_cJson = rb_const_get(rb_cClass, rb_intern("JSON"));
+    result = rb_funcall(rb_cJson, rb_intern("parse"), 1, rbString);
 
     JS_FreeValue(ctx, global);
     JS_FreeValue(ctx, strigified);
