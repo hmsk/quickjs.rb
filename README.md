@@ -2,6 +2,10 @@
 
 A Ruby wrapper for [QuickJS](https://bellard.org/quickjs) to run JavaScript codes via Ruby with a smaller footprint.
 
+![Gem Version](https://img.shields.io/gem/v/quickjs?style=for-the-badge)
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/hmsk/quickjs.rb/main?style=for-the-badge)
+
+
 ## Installation
 
 ```
@@ -21,10 +25,10 @@ require 'quickjs'
 
 Quickjs.evalCode('const fn = (n, pow) => n ** pow; fn(2,8);') # => 256
 Quickjs.evalCode('const fn = (name) => `Hi, ${name}!`; fn("Itadori");') # => "Hi, Itadori!
-Quickjs.evalCode("const isOne = (n) => 1 === n; func(1);") #=> true (TruleClass)
+Quickjs.evalCode("const isOne = (n) => 1 === n; func(1);") #=> true (TrueClass)
 Quickjs.evalCode("const isOne = (n) => 1 === n; func(3);") #=> false (FalseClass)
 
-# If the result returns 'object' for typeof, consumes it via JSON.stringify (JS) -> JSON.parse (Ruby)
+# When code returns 'object' for `typeof`, the result is converted via JSON.stringify (JS) -> JSON.parse (Ruby)
 Quickjs.evalCode("[1,2,3]") #=> [1, 2, 3] (Array)
 Quickjs.evalCode("({ a: '1', b: 1 })") #=> { 'a' => '1', 'b' => 1 } (Hash)
 
