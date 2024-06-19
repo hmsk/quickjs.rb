@@ -5,6 +5,61 @@ VALUE rb_mQuickjsValue;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
 
+VALUE to_rb_value (JSValue res, JSContext *ctx) {
+  switch(JS_VALUE_GET_NORM_TAG(res)) {
+  case JS_TAG_INT: {
+    int int_res = 0;
+    JS_ToInt32(ctx, &int_res, res);
+    return INT2NUM(int_res);
+  }
+  case JS_TAG_FLOAT64: {
+    if (JS_VALUE_IS_NAN(res)) {
+      return ID2SYM(rb_intern(nanId));
+    }
+    double double_res;
+    JS_ToFloat64(ctx, &double_res, res);
+    return DBL2NUM(double_res);
+  }
+  case JS_TAG_BOOL: {
+    return JS_ToBool(ctx, res) > 0 ? Qtrue : Qfalse;
+  }
+  case JS_TAG_STRING: {
+    JSValue maybeString = JS_ToString(ctx, res);
+    const char *msg = JS_ToCString(ctx, maybeString);
+    return rb_str_new2(msg);
+  }
+  case JS_TAG_OBJECT: {
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue jsonClass = JS_GetPropertyStr(ctx, global, "JSON");
+    JSValue stringifyFunc = JS_GetPropertyStr(ctx, jsonClass, "stringify");
+    JSValue strigified = JS_Call(ctx, stringifyFunc, jsonClass, 1, &res);
+
+    const char *msg = JS_ToCString(ctx, strigified);
+    VALUE rbString = rb_str_new2(msg);
+
+    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, strigified);
+    JS_FreeValue(ctx, stringifyFunc);
+    JS_FreeValue(ctx, jsonClass);
+
+    return rb_funcall(rb_const_get(rb_cClass, rb_intern("JSON")), rb_intern("parse"), 1, rbString);
+  }
+  case JS_TAG_NULL:
+    return Qnil;
+  case JS_TAG_UNDEFINED:
+    return ID2SYM(rb_intern(undefinedId));
+  case JS_TAG_EXCEPTION:
+    rb_raise(rb_eRuntimeError, "Something happened by evaluating as JavaScript code");
+    return Qnil;
+  case JS_TAG_BIG_INT:
+  case JS_TAG_BIG_FLOAT:
+  case JS_TAG_BIG_DECIMAL:
+  case JS_TAG_SYMBOL:
+  default:
+    return Qnil;
+  }
+}
+
 VALUE rb_module_eval_js_code(
   VALUE klass,
   VALUE r_code,
@@ -46,55 +101,10 @@ VALUE rb_module_eval_js_code(
   }
 
   char *code = StringValueCStr(r_code);
-  JSValue res = JS_Eval(ctx, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL);
+  JSValue codeResult = JS_Eval(ctx, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL);
+  VALUE result = to_rb_value(codeResult, ctx);
 
-  VALUE result;
-  if (JS_IsException(res)) {
-    rb_raise(rb_eRuntimeError, "Something happened by evaluating as JavaScript code");
-    result = Qnil;
-  } else if (JS_IsObject(res)) {
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue jsonClass = JS_GetPropertyStr(ctx, global, "JSON");
-    JSValue stringifyFunc = JS_GetPropertyStr(ctx, jsonClass, "stringify");
-    JSValue strigified = JS_Call(ctx, stringifyFunc, jsonClass, 1, &res);
-
-    const char *msg = JS_ToCString(ctx, strigified);
-    VALUE rbString = rb_str_new2(msg);
-    VALUE rb_cJson = rb_const_get(rb_cClass, rb_intern("JSON"));
-    result = rb_funcall(rb_cJson, rb_intern("parse"), 1, rbString);
-
-    JS_FreeValue(ctx, global);
-    JS_FreeValue(ctx, strigified);
-    JS_FreeValue(ctx, stringifyFunc);
-    JS_FreeValue(ctx, jsonClass);
-  } else if (JS_VALUE_IS_NAN(res)) {
-    result = ID2SYM(rb_intern(nanId));
-  } else if (JS_IsNumber(res)) {
-    int tag = JS_VALUE_GET_TAG(res);
-    if (JS_TAG_IS_FLOAT64(tag)) {
-      double double_res;
-      JS_ToFloat64(ctx, &double_res, res);
-      result = DBL2NUM(double_res);
-    } else {
-      int int_res;
-      JS_ToInt32(ctx, &int_res, res);
-      result = INT2NUM(int_res);
-    }
-  } else if (JS_IsString(res)) {
-    JSValue maybeString = JS_ToString(ctx, res);
-    const char *msg = JS_ToCString(ctx, maybeString);
-    result = rb_str_new2(msg);
-  } else if (JS_IsBool(res)) {
-    result = JS_ToBool(ctx, res) > 0 ? Qtrue : Qfalse;
-  } else if (JS_IsUndefined(res)) {
-    result = ID2SYM(rb_intern(undefinedId));
-  } else if (JS_IsNull(res)) {
-    result = Qnil;
-  } else {
-    result = Qnil;
-  }
-  JS_FreeValue(ctx, res);
-
+  JS_FreeValue(ctx, codeResult);
   js_std_free_handlers(rt);
   JS_FreeContext(ctx);
   JS_FreeRuntime(rt);
