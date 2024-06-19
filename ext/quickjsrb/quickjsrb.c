@@ -5,26 +5,26 @@ VALUE rb_mQuickjsValue;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
 
-VALUE to_rb_value (JSValue res, JSContext *ctx) {
-  switch(JS_VALUE_GET_NORM_TAG(res)) {
+VALUE to_rb_value (JSValue jsv, JSContext *ctx) {
+  switch(JS_VALUE_GET_NORM_TAG(jsv)) {
   case JS_TAG_INT: {
     int int_res = 0;
-    JS_ToInt32(ctx, &int_res, res);
+    JS_ToInt32(ctx, &int_res, jsv);
     return INT2NUM(int_res);
   }
   case JS_TAG_FLOAT64: {
-    if (JS_VALUE_IS_NAN(res)) {
+    if (JS_VALUE_IS_NAN(jsv)) {
       return ID2SYM(rb_intern(nanId));
     }
     double double_res;
-    JS_ToFloat64(ctx, &double_res, res);
+    JS_ToFloat64(ctx, &double_res, jsv);
     return DBL2NUM(double_res);
   }
   case JS_TAG_BOOL: {
-    return JS_ToBool(ctx, res) > 0 ? Qtrue : Qfalse;
+    return JS_ToBool(ctx, jsv) > 0 ? Qtrue : Qfalse;
   }
   case JS_TAG_STRING: {
-    JSValue maybeString = JS_ToString(ctx, res);
+    JSValue maybeString = JS_ToString(ctx, jsv);
     const char *msg = JS_ToCString(ctx, maybeString);
     return rb_str_new2(msg);
   }
@@ -32,7 +32,7 @@ VALUE to_rb_value (JSValue res, JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue jsonClass = JS_GetPropertyStr(ctx, global, "JSON");
     JSValue stringifyFunc = JS_GetPropertyStr(ctx, jsonClass, "stringify");
-    JSValue strigified = JS_Call(ctx, stringifyFunc, jsonClass, 1, &res);
+    JSValue strigified = JS_Call(ctx, stringifyFunc, jsonClass, 1, &jsv);
 
     const char *msg = JS_ToCString(ctx, strigified);
     VALUE rbString = rb_str_new2(msg);
