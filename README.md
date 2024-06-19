@@ -2,8 +2,7 @@
 
 A Ruby wrapper for [QuickJS](https://bellard.org/quickjs) to run JavaScript codes via Ruby with a smaller footprint.
 
-![Gem Version](https://img.shields.io/gem/v/quickjs?style=for-the-badge)
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/hmsk/quickjs.rb/main?style=for-the-badge)
+[![Gem Version](https://img.shields.io/gem/v/quickjs?style=for-the-badge)](https://rubygems.org/gems/quickjs) [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/hmsk/quickjs.rb/main?style=for-the-badge)](https://github.com/hmsk/quickjs.rb/actions/workflows/main.yml)
 
 
 ## Installation
