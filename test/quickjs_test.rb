@@ -74,4 +74,14 @@ class QuickjsTest < Test::Unit::TestCase
       assert_equal(::Quickjs.evalCode("!!os.kill", { features: [::Quickjs::MODULE_OS] }), true)
     end
   end
+
+  class QuickjsTestVm< Test::Unit::TestCase
+    test "VM maintains runtime and context" do
+      vm = Quickjs::VM.new
+      vm.evalCode('const a = { b: "c" };')
+      assert_equal(vm.evalCode('a.b'), "c")
+      vm.evalCode('a.b = "d"')
+      assert_equal(vm.evalCode('a.b'), "d")
+    end
+  end
 end

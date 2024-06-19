@@ -1,7 +1,6 @@
 #include "quickjsrb.h"
 
 VALUE rb_mQuickjs;
-VALUE rb_mQuickjsValue;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
 
@@ -122,6 +121,71 @@ VALUE rb_module_eval_js_code(
   return result;
 }
 
+struct qvmdata {
+  struct JSRuntime *runtime;
+  struct JSContext *context;
+};
+
+void qvm_free(void* data)
+{
+  free(data);
+}
+
+size_t qvm_size(const void* data)
+{
+  return sizeof(data);
+}
+
+static const rb_data_type_t qvm_type = {
+  .wrap_struct_name = "qvm",
+  .function = {
+    .dmark = NULL,
+    .dfree = qvm_free,
+    .dsize = qvm_size,
+  },
+  .data = NULL,
+  .flags = RUBY_TYPED_FREE_IMMEDIATELY,
+};
+
+VALUE qvm_alloc(VALUE self)
+{
+  struct qvmdata *data;
+
+  return TypedData_Make_Struct(self, struct qvmdata, &qvm_type, data);
+}
+
+VALUE qvm_m_initialize(VALUE self)
+{
+  struct qvmdata *data;
+  TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
+  data->runtime = JS_NewRuntime();
+  data->context = JS_NewContext(data->runtime);
+
+  JS_AddIntrinsicBigFloat(data->context);
+  JS_AddIntrinsicBigDecimal(data->context);
+  JS_AddIntrinsicOperators(data->context);
+  JS_EnableBignumExt(data->context, TRUE);
+  js_std_add_helpers(data->context, 0, NULL);
+
+  JS_SetModuleLoaderFunc(data->runtime, NULL, js_module_loader, NULL);
+  js_std_init_handlers(data->runtime);
+
+  return self;
+}
+
+VALUE qvm_m_evalCode(VALUE self, VALUE r_code)
+{
+  struct qvmdata *data;
+  TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
+
+  char *code = StringValueCStr(r_code);
+  JSValue codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL);
+  VALUE result = to_rb_value(codeResult, data->context);
+
+  JS_FreeValue(data->context, codeResult);
+  return result;
+}
+
 RUBY_FUNC_EXPORTED void
 Init_quickjsrb(void)
 {
@@ -131,4 +195,10 @@ Init_quickjsrb(void)
   VALUE valueClass = rb_define_class_under(rb_mQuickjs, "Value", rb_cObject);
   rb_define_const(valueClass, "UNDEFINED", ID2SYM(rb_intern(undefinedId)));
   rb_define_const(valueClass, "NAN", ID2SYM(rb_intern(nanId)));
+
+
+  VALUE vmClass = rb_define_class_under(rb_mQuickjs, "VM", rb_cObject);
+  rb_define_alloc_func(vmClass, qvm_alloc);
+  rb_define_method(vmClass, "initialize", qvm_m_initialize, 0);
+  rb_define_method(vmClass, "evalCode", qvm_m_evalCode, 1);
 }
