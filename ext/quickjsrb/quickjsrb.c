@@ -51,7 +51,17 @@ VALUE to_rb_value (JSValue jsv, JSContext *ctx) {
   case JS_TAG_EXCEPTION:
     rb_raise(rb_eRuntimeError, "Something happened by evaluating as JavaScript code");
     return Qnil;
-  case JS_TAG_BIG_INT:
+  case JS_TAG_BIG_INT: {
+    JSValue toStringFunc = JS_GetPropertyStr(ctx, jsv, "toString");
+    JSValue strigified = JS_Call(ctx, toStringFunc, jsv, 0, NULL);
+
+    const char *msg = JS_ToCString(ctx, strigified);
+    VALUE rbString = rb_str_new2(msg);
+    JS_FreeValue(ctx, strigified);
+    JS_FreeValue(ctx, toStringFunc);
+
+    return rb_funcall(rbString, rb_intern("to_i"), 0, NULL);
+  }
   case JS_TAG_BIG_FLOAT:
   case JS_TAG_BIG_DECIMAL:
   case JS_TAG_SYMBOL:

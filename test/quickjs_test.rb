@@ -36,6 +36,7 @@ class QuickjsTest < Test::Unit::TestCase
   test "support returning integer" do
     assert_equal(::Quickjs.evalCode("2+3"), 5)
     assert_equal(::Quickjs.evalCode("const func = () => 8; func();"), 8)
+    assert_equal(::Quickjs.evalCode("18014398509481982n"), 18014398509481982)
   end
 
   test "support returning float" do
