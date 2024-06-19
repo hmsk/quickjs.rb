@@ -61,11 +61,11 @@ class QuickjsTest < Test::Unit::TestCase
     end
 
     test "std can be enabled" do
-      assert_equal(::Quickjs.evalCode("!!std.urlGet", { features: [::Quickjs::FEATURE_STD] }), true)
+      assert_equal(::Quickjs.evalCode("!!std.urlGet", { features: [::Quickjs::MODULE_STD] }), true)
     end
 
     test "os can be enabled" do
-      assert_equal(::Quickjs.evalCode("!!os.kill", { features: [::Quickjs::FEATURE_OS] }), true)
+      assert_equal(::Quickjs.evalCode("!!os.kill", { features: [::Quickjs::MODULE_OS] }), true)
     end
   end
 end

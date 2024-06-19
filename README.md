@@ -36,6 +36,28 @@ Quickjs.evalCode('const obj = {}; obj.missingKey;') # => :undefined (Quickjs::Va
 Quickjs.evalCode("Number('whatever')") #=> :NaN (Quickjs::Value::NAN)
 ```
 
+#### Limit resources
+
+```rb
+# 1GB memory limit
+Quickjs.evalCode(code, { memoryLimit: 1024 ** 3 })
+
+# 1MB max stack size
+Quickjs.evalCode(code, { memoryLimit: 1024 ** 2 })
+```
+
+#### Enable built-in modules
+
+```rb
+# enable std module
+# https://bellard.org/quickjs/quickjs.html#std-module
+Quickjs.evalCode(code, { features: [Quickjs::MODULE_STD] })
+
+# enable os module
+# https://bellard.org/quickjs/quickjs.html#os-module
+Quickjs.evalCode(code, { features: [Quickjs::MODULE_OS] })
+```
+
 ## License
 
 Every file in `ext/quickjsrb/quickjs` is licensed under [the MIT License Copyright 2017-2021 by Fabrice Bellard and Charlie Goron](/ext/quickjsrb/quickjs/LICENSE).

@@ -5,8 +5,8 @@ require_relative "quickjs/version"
 require_relative "quickjs/quickjsrb"
 
 module Quickjs
-  FEATURE_STD = :std
-  FEATURE_OS = :os
+  MODULE_STD = :std
+  MODULE_OS = :os
 
   def evalCode(
     code,
@@ -21,8 +21,8 @@ module Quickjs
       code,
       opts[:memoryLimit] || 1024 * 1024 * 128,
       opts[:maxStackSize] || 1024 * 1024 * 4,
-      opts[:features].include?(Quickjs::FEATURE_STD),
-      opts[:features].include?(Quickjs::FEATURE_OS),
+      opts[:features].include?(Quickjs::MODULE_STD),
+      opts[:features].include?(Quickjs::MODULE_OS),
     )
   end
   module_function :evalCode
