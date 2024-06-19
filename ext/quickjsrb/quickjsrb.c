@@ -49,7 +49,6 @@ VALUE rb_module_eval_js_code(
   JSValue res = JS_Eval(ctx, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL);
 
   VALUE result;
-  int r = 0;
   if (JS_IsException(res)) {
     rb_raise(rb_eRuntimeError, "Something happened by evaluating as JavaScript code");
     result = Qnil;
@@ -71,8 +70,16 @@ VALUE rb_module_eval_js_code(
   } else if (JS_VALUE_IS_NAN(res)) {
     result = ID2SYM(rb_intern(nanId));
   } else if (JS_IsNumber(res)) {
-    JS_ToInt32(ctx, &r, res);
-    result = INT2NUM(r);
+    int tag = JS_VALUE_GET_TAG(res);
+    if (JS_TAG_IS_FLOAT64(tag)) {
+      double double_res;
+      JS_ToFloat64(ctx, &double_res, res);
+      result = DBL2NUM(double_res);
+    } else {
+      int int_res;
+      JS_ToInt32(ctx, &int_res, res);
+      result = INT2NUM(int_res);
+    }
   } else if (JS_IsString(res)) {
     JSValue maybeString = JS_ToString(ctx, res);
     const char *msg = JS_ToCString(ctx, maybeString);

@@ -38,6 +38,11 @@ class QuickjsTest < Test::Unit::TestCase
     assert_equal(::Quickjs.evalCode("const func = () => 8; func();"), 8)
   end
 
+  test "support returning float" do
+    assert_equal(::Quickjs.evalCode("1.0"), 1.0)
+    assert_equal(::Quickjs.evalCode("2 ** 0.5"), 1.4142135623730951)
+  end
+
   test "support returning boolean" do
     assert_equal(::Quickjs.evalCode("false"), false)
     assert_equal(::Quickjs.evalCode("true"), true)
