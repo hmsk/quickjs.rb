@@ -8,7 +8,7 @@ module Quickjs
   MODULE_STD = :std
   MODULE_OS = :os
 
-  def evalCode(
+  def eval_code(
     code,
     opts = {
       memoryLimit: nil,
@@ -17,7 +17,7 @@ module Quickjs
     }
   )
 
-    _evalCode(
+    _eval_code(
       code,
       opts[:memoryLimit] || 1024 * 1024 * 128,
       opts[:maxStackSize] || 1024 * 1024 * 4,
@@ -25,5 +25,5 @@ module Quickjs
       opts[:features].include?(Quickjs::MODULE_OS),
     )
   end
-  module_function :evalCode
+  module_function :eval_code
 end

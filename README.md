@@ -17,33 +17,33 @@ gem 'quickjs'
 
 ## Usage
 
-### `Quickjs.evalCode`: Evaluate JavaScript code
+### `Quickjs.eval_code`: Evaluate JavaScript code
 
 ```rb
 require 'quickjs'
 
-Quickjs.evalCode('const fn = (n, pow) => n ** pow; fn(2,8);') # => 256
-Quickjs.evalCode('const fn = (name) => `Hi, ${name}!`; fn("Itadori");') # => "Hi, Itadori!
-Quickjs.evalCode("const isOne = (n) => 1 === n; func(1);") #=> true (TrueClass)
-Quickjs.evalCode("const isOne = (n) => 1 === n; func(3);") #=> false (FalseClass)
+Quickjs.eval_code('const fn = (n, pow) => n ** pow; fn(2,8);') # => 256
+Quickjs.eval_code('const fn = (name) => `Hi, ${name}!`; fn("Itadori");') # => "Hi, Itadori!
+Quickjs.eval_code("const isOne = (n) => 1 === n; func(1);") #=> true (TrueClass)
+Quickjs.eval_code("const isOne = (n) => 1 === n; func(3);") #=> false (FalseClass)
 
 # When code returns 'object' for `typeof`, the result is converted via JSON.stringify (JS) -> JSON.parse (Ruby)
-Quickjs.evalCode("[1,2,3]") #=> [1, 2, 3] (Array)
-Quickjs.evalCode("({ a: '1', b: 1 })") #=> { 'a' => '1', 'b' => 1 } (Hash)
+Quickjs.eval_code("[1,2,3]") #=> [1, 2, 3] (Array)
+Quickjs.eval_code("({ a: '1', b: 1 })") #=> { 'a' => '1', 'b' => 1 } (Hash)
 
-Quickjs.evalCode("null") #=> nil
-Quickjs.evalCode('const obj = {}; obj.missingKey;') # => :undefined (Quickjs::Value::Undefined)
-Quickjs.evalCode("Number('whatever')") #=> :NaN (Quickjs::Value::NAN)
+Quickjs.eval_code("null") #=> nil
+Quickjs.eval_code('const obj = {}; obj.missingKey;') # => :undefined (Quickjs::Value::Undefined)
+Quickjs.eval_code("Number('whatever')") #=> :NaN (Quickjs::Value::NAN)
 ```
 
 #### Limit resources
 
 ```rb
 # 1GB memory limit
-Quickjs.evalCode(code, { memoryLimit: 1024 ** 3 })
+Quickjs.eval_code(code, { memoryLimit: 1024 ** 3 })
 
 # 1MB max stack size
-Quickjs.evalCode(code, { memoryLimit: 1024 ** 2 })
+Quickjs.eval_code(code, { memoryLimit: 1024 ** 2 })
 ```
 
 #### Enable built-in modules
@@ -51,11 +51,11 @@ Quickjs.evalCode(code, { memoryLimit: 1024 ** 2 })
 ```rb
 # enable std module
 # https://bellard.org/quickjs/quickjs.html#std-module
-Quickjs.evalCode(code, { features: [Quickjs::MODULE_STD] })
+Quickjs.eval_code(code, { features: [Quickjs::MODULE_STD] })
 
 # enable os module
 # https://bellard.org/quickjs/quickjs.html#os-module
-Quickjs.evalCode(code, { features: [Quickjs::MODULE_OS] })
+Quickjs.eval_code(code, { features: [Quickjs::MODULE_OS] })
 ```
 
 ## License

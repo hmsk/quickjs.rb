@@ -190,15 +190,14 @@ RUBY_FUNC_EXPORTED void
 Init_quickjsrb(void)
 {
   rb_mQuickjs = rb_define_module("Quickjs");
-  rb_define_module_function(rb_mQuickjs, "_evalCode", rb_module_eval_js_code, 5);
+  rb_define_module_function(rb_mQuickjs, "_eval_code", rb_module_eval_js_code, 5);
 
   VALUE valueClass = rb_define_class_under(rb_mQuickjs, "Value", rb_cObject);
   rb_define_const(valueClass, "UNDEFINED", ID2SYM(rb_intern(undefinedId)));
   rb_define_const(valueClass, "NAN", ID2SYM(rb_intern(nanId)));
 
-
   VALUE vmClass = rb_define_class_under(rb_mQuickjs, "VM", rb_cObject);
   rb_define_alloc_func(vmClass, qvm_alloc);
   rb_define_method(vmClass, "initialize", qvm_m_initialize, 0);
-  rb_define_method(vmClass, "evalCode", qvm_m_evalCode, 1);
+  rb_define_method(vmClass, "eval_code", qvm_m_evalCode, 1);
 }
