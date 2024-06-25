@@ -90,5 +90,13 @@ class QuickjsTest < Test::Unit::TestCase
       vm.dispose!
       assert_raise_with_message(RuntimeError, /disposed/) { vm.eval_code('a.b = "d"') }
     end
-  end
+
+    test "VM accepts some options" do
+      vm = Quickjs::VM.new(
+        memory_limit: 1024 * 1024,
+        max_stack_size: 1024 * 1024,
+      )
+      assert_equal(vm.eval_code('1+2'), 3)
+    end
+   end
 end

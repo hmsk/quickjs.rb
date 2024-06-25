@@ -3,6 +3,8 @@
 VALUE rb_mQuickjs;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
+const char *memoryLimitId = "memory_limit";
+const char *maxStackSizeId = "max_stack_size";
 
 VALUE to_rb_value (JSValue jsv, JSContext *ctx) {
   switch(JS_VALUE_GET_NORM_TAG(jsv)) {
@@ -154,13 +156,25 @@ VALUE qvm_alloc(VALUE self)
   return TypedData_Make_Struct(self, struct qvmdata, &qvm_type, data);
 }
 
-VALUE qvm_m_initialize(VALUE self)
+VALUE qvm_m_initialize(int argc, VALUE* argv, VALUE self)
 {
+  VALUE r_opts;
+  rb_scan_args(argc, argv, ":", &r_opts);
+  if (NIL_P(r_opts)) r_opts = rb_hash_new();
+
+  VALUE r_memoryLimit = rb_hash_aref(r_opts, ID2SYM(rb_intern(memoryLimitId)));
+  if (NIL_P(r_memoryLimit)) r_memoryLimit = UINT2NUM(1024 * 1024 * 128);
+  VALUE r_maxStackSize = rb_hash_aref(r_opts, ID2SYM(rb_intern(maxStackSizeId)));
+  if (NIL_P(r_maxStackSize)) r_maxStackSize = UINT2NUM(1024 * 1024 * 4);
+
   struct qvmdata *data;
   TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
   JSRuntime *runtime = JS_NewRuntime();
   data->context = JS_NewContext(runtime);
   data->alive = 1;
+
+  JS_SetMemoryLimit(runtime, NUM2UINT(r_memoryLimit));
+  JS_SetMaxStackSize(runtime, NUM2UINT(r_maxStackSize));
 
   JS_AddIntrinsicBigFloat(data->context);
   JS_AddIntrinsicBigDecimal(data->context);
@@ -217,7 +231,7 @@ Init_quickjsrb(void)
 
   VALUE vmClass = rb_define_class_under(rb_mQuickjs, "VM", rb_cObject);
   rb_define_alloc_func(vmClass, qvm_alloc);
-  rb_define_method(vmClass, "initialize", qvm_m_initialize, 0);
+  rb_define_method(vmClass, "initialize", qvm_m_initialize, -1);
   rb_define_method(vmClass, "eval_code", qvm_m_evalCode, 1);
   rb_define_method(vmClass, "dispose!", qvm_m_dispose, 0);
 }
