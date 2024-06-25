@@ -123,7 +123,7 @@ VALUE rb_module_eval_js_code(
 
 struct qvmdata {
   struct JSContext *context;
-  int alive;
+  char alive;
 };
 
 void qvm_free(void* data)
