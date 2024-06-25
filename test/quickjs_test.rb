@@ -83,5 +83,12 @@ class QuickjsTest < Test::Unit::TestCase
       vm.eval_code('a.b = "d"')
       assert_equal(vm.eval_code('a.b'), "d")
     end
+
+    test "VM doesn't eval codes anymore after disposing" do
+      vm = Quickjs::VM.new
+      vm.eval_code('const a = { b: "c" };')
+      vm.dispose!
+      assert_raise_with_message(RuntimeError, /disposed/) { vm.eval_code('a.b = "d"') }
+    end
   end
 end

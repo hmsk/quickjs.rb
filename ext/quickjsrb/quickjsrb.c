@@ -124,6 +124,7 @@ VALUE rb_module_eval_js_code(
 struct qvmdata {
   struct JSRuntime *runtime;
   struct JSContext *context;
+  int alive;
 };
 
 void qvm_free(void* data)
@@ -160,6 +161,7 @@ VALUE qvm_m_initialize(VALUE self)
   TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
   data->runtime = JS_NewRuntime();
   data->context = JS_NewContext(data->runtime);
+  data->alive = 1;
 
   JS_AddIntrinsicBigFloat(data->context);
   JS_AddIntrinsicBigDecimal(data->context);
@@ -178,12 +180,29 @@ VALUE qvm_m_evalCode(VALUE self, VALUE r_code)
   struct qvmdata *data;
   TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
 
+  if (data->alive < 1) {
+    rb_raise(rb_eRuntimeError, "Quickjs::VM was disposed");
+    return Qnil;
+  }
   char *code = StringValueCStr(r_code);
   JSValue codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL);
   VALUE result = to_rb_value(codeResult, data->context);
 
   JS_FreeValue(data->context, codeResult);
   return result;
+}
+
+VALUE qvm_m_dispose(VALUE self)
+{
+  struct qvmdata *data;
+  TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
+
+  js_std_free_handlers(data->runtime);
+  JS_FreeContext(data->context);
+  JS_FreeRuntime(data->runtime);
+  data->alive = 0;
+
+  return Qnil;
 }
 
 RUBY_FUNC_EXPORTED void
@@ -200,4 +219,5 @@ Init_quickjsrb(void)
   rb_define_alloc_func(vmClass, qvm_alloc);
   rb_define_method(vmClass, "initialize", qvm_m_initialize, 0);
   rb_define_method(vmClass, "eval_code", qvm_m_evalCode, 1);
+  rb_define_method(vmClass, "dispose!", qvm_m_dispose, 0);
 }
