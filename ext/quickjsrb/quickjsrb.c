@@ -122,7 +122,6 @@ VALUE rb_module_eval_js_code(
 }
 
 struct qvmdata {
-  struct JSRuntime *runtime;
   struct JSContext *context;
   int alive;
 };
@@ -159,8 +158,8 @@ VALUE qvm_m_initialize(VALUE self)
 {
   struct qvmdata *data;
   TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
-  data->runtime = JS_NewRuntime();
-  data->context = JS_NewContext(data->runtime);
+  JSRuntime *runtime = JS_NewRuntime();
+  data->context = JS_NewContext(runtime);
   data->alive = 1;
 
   JS_AddIntrinsicBigFloat(data->context);
@@ -169,8 +168,8 @@ VALUE qvm_m_initialize(VALUE self)
   JS_EnableBignumExt(data->context, TRUE);
   js_std_add_helpers(data->context, 0, NULL);
 
-  JS_SetModuleLoaderFunc(data->runtime, NULL, js_module_loader, NULL);
-  js_std_init_handlers(data->runtime);
+  JS_SetModuleLoaderFunc(runtime, NULL, js_module_loader, NULL);
+  js_std_init_handlers(runtime);
 
   return self;
 }
@@ -197,9 +196,10 @@ VALUE qvm_m_dispose(VALUE self)
   struct qvmdata *data;
   TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
 
-  js_std_free_handlers(data->runtime);
+  JSRuntime *runtime = JS_GetRuntime(data->context);
+  js_std_free_handlers(runtime);
   JS_FreeContext(data->context);
-  JS_FreeRuntime(data->runtime);
+  JS_FreeRuntime(runtime);
   data->alive = 0;
 
   return Qnil;
