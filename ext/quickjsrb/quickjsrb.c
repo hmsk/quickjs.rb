@@ -4,9 +4,6 @@ VALUE rb_mQuickjs;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
 
-const char *memoryLimitId = "memory_limit";
-const char *maxStackSizeId = "max_stack_size";
-
 const char *featureStdId = "feature_std";
 const char *featureOsId = "feature_os";
 
@@ -75,58 +72,6 @@ VALUE to_rb_value (JSValue jsv, JSContext *ctx) {
   }
 }
 
-VALUE rb_module_eval_js_code(
-  VALUE klass,
-  VALUE r_code,
-  VALUE r_memoryLimit,
-  VALUE r_maxStackSize,
-  VALUE r_enableStd,
-  VALUE r_enableOs
-) {
-  JSRuntime *rt = JS_NewRuntime();
-  JSContext *ctx = JS_NewContext(rt);
-
-  JS_SetMemoryLimit(rt, NUM2UINT(r_memoryLimit));
-  JS_SetMaxStackSize(rt, NUM2UINT(r_maxStackSize));
-
-  JS_AddIntrinsicBigFloat(ctx);
-  JS_AddIntrinsicBigDecimal(ctx);
-  JS_AddIntrinsicOperators(ctx);
-  JS_EnableBignumExt(ctx, TRUE);
-
-  JS_SetModuleLoaderFunc(rt, NULL, js_module_loader, NULL);
-  js_std_add_helpers(ctx, 0, NULL);
-
-  js_std_init_handlers(rt);
-  if (r_enableStd == Qtrue) {
-    js_init_module_std(ctx, "std");
-    const char *enableStd = "import * as std from 'std';\n"
-        "globalThis.std = std;\n";
-    JSValue stdEval = JS_Eval(ctx, enableStd, strlen(enableStd), "<code>", JS_EVAL_TYPE_MODULE);
-    JS_FreeValue(ctx, stdEval);
-  }
-
-  if (r_enableOs == Qtrue) {
-    js_init_module_os(ctx, "os");
-
-    const char *enableOs = "import * as os from 'os';\n"
-        "globalThis.os = os;\n";
-    JSValue osEval = JS_Eval(ctx, enableOs, strlen(enableOs), "<code>", JS_EVAL_TYPE_MODULE);
-    JS_FreeValue(ctx, osEval);
-  }
-
-  char *code = StringValueCStr(r_code);
-  JSValue codeResult = JS_Eval(ctx, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL);
-  VALUE result = to_rb_value(codeResult, ctx);
-
-  JS_FreeValue(ctx, codeResult);
-  js_std_free_handlers(rt);
-  JS_FreeContext(ctx);
-  JS_FreeRuntime(rt);
-
-  return result;
-}
-
 struct qvmdata {
   struct JSContext *context;
   char alive;
@@ -166,9 +111,9 @@ VALUE qvm_m_initialize(int argc, VALUE* argv, VALUE self)
   rb_scan_args(argc, argv, ":", &r_opts);
   if (NIL_P(r_opts)) r_opts = rb_hash_new();
 
-  VALUE r_memoryLimit = rb_hash_aref(r_opts, ID2SYM(rb_intern(memoryLimitId)));
+  VALUE r_memoryLimit = rb_hash_aref(r_opts, ID2SYM(rb_intern("memory_limit")));
   if (NIL_P(r_memoryLimit)) r_memoryLimit = UINT2NUM(1024 * 1024 * 128);
-  VALUE r_maxStackSize = rb_hash_aref(r_opts, ID2SYM(rb_intern(maxStackSizeId)));
+  VALUE r_maxStackSize = rb_hash_aref(r_opts, ID2SYM(rb_intern("max_stack_size")));
   if (NIL_P(r_maxStackSize)) r_maxStackSize = UINT2NUM(1024 * 1024 * 4);
   VALUE r_features = rb_hash_aref(r_opts, ID2SYM(rb_intern("features")));
   if (NIL_P(r_features)) r_features = rb_ary_new();
@@ -245,7 +190,8 @@ RUBY_FUNC_EXPORTED void
 Init_quickjsrb(void)
 {
   rb_mQuickjs = rb_define_module("Quickjs");
-  rb_define_module_function(rb_mQuickjs, "_eval_code", rb_module_eval_js_code, 5);
+  rb_define_const(rb_mQuickjs, "MODULE_STD", ID2SYM(rb_intern(featureStdId)));
+  rb_define_const(rb_mQuickjs, "MODULE_OS", ID2SYM(rb_intern(featureOsId)));
 
   VALUE valueClass = rb_define_class_under(rb_mQuickjs, "Value", rb_cObject);
   rb_define_const(valueClass, "UNDEFINED", ID2SYM(rb_intern(undefinedId)));
