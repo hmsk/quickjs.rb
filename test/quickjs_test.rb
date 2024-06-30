@@ -91,12 +91,36 @@ class QuickjsTest < Test::Unit::TestCase
       assert_raise_with_message(RuntimeError, /disposed/) { vm.eval_code('a.b = "d"') }
     end
 
-    test "VM accepts some options" do
+    test "VM accepts some options to constrain its resource" do
       vm = Quickjs::VM.new(
         memory_limit: 1024 * 1024,
         max_stack_size: 1024 * 1024,
       )
       assert_equal(vm.eval_code('1+2'), 3)
     end
-   end
+
+    test "VM does not enable std features" do
+      vm = Quickjs::VM.new
+      assert_equal(vm.eval_code("typeof std === 'undefined'"), true)
+    end
+
+    test "VM does not enable os features" do
+      vm = Quickjs::VM.new
+      assert_equal(vm.eval_code("typeof os === 'undefined'"), true)
+    end
+
+    test "VM enables std feature" do
+      vm = Quickjs::VM.new(
+        features: [:feature_std],
+      )
+      assert_equal(vm.eval_code("!!std.urlGet"), true)
+    end
+
+    test "VM enables os feoature" do
+      vm = Quickjs::VM.new(
+        features: [:feature_os],
+      )
+      assert_equal(vm.eval_code("!!os.kill"), true)
+    end
+  end
 end

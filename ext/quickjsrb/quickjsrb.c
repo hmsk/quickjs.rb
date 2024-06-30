@@ -3,8 +3,12 @@
 VALUE rb_mQuickjs;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
+
 const char *memoryLimitId = "memory_limit";
 const char *maxStackSizeId = "max_stack_size";
+
+const char *featureStdId = "feature_std";
+const char *featureOsId = "feature_os";
 
 VALUE to_rb_value (JSValue jsv, JSContext *ctx) {
   switch(JS_VALUE_GET_NORM_TAG(jsv)) {
@@ -166,6 +170,8 @@ VALUE qvm_m_initialize(int argc, VALUE* argv, VALUE self)
   if (NIL_P(r_memoryLimit)) r_memoryLimit = UINT2NUM(1024 * 1024 * 128);
   VALUE r_maxStackSize = rb_hash_aref(r_opts, ID2SYM(rb_intern(maxStackSizeId)));
   if (NIL_P(r_maxStackSize)) r_maxStackSize = UINT2NUM(1024 * 1024 * 4);
+  VALUE r_features = rb_hash_aref(r_opts, ID2SYM(rb_intern("features")));
+  if (NIL_P(r_features)) r_features = rb_ary_new();
 
   struct qvmdata *data;
   TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
@@ -184,6 +190,22 @@ VALUE qvm_m_initialize(int argc, VALUE* argv, VALUE self)
 
   JS_SetModuleLoaderFunc(runtime, NULL, js_module_loader, NULL);
   js_std_init_handlers(runtime);
+
+  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, ID2SYM(rb_intern(featureStdId))))) {
+    js_init_module_std(data->context, "std");
+    const char *enableStd = "import * as std from 'std';\n"
+        "globalThis.std = std;\n";
+    JSValue stdEval = JS_Eval(data->context, enableStd, strlen(enableStd), "<vm>", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(data->context, stdEval);
+  }
+
+  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, ID2SYM(rb_intern(featureOsId))))) {
+    js_init_module_os(data->context, "os");
+    const char *enableOs = "import * as os from 'os';\n"
+        "globalThis.os = os;\n";
+    JSValue osEval = JS_Eval(data->context, enableOs, strlen(enableOs), "<vm>", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(data->context, osEval);
+  }
 
   return self;
 }
