@@ -17,7 +17,7 @@ gem 'quickjs'
 
 ## Usage
 
-### `Quickjs.eval_code`: Evaluate JavaScript code
+### `Quickjs.eval_code`: Evaluate JavaScript code instantly
 
 ```rb
 require 'quickjs'
@@ -56,6 +56,40 @@ Quickjs.eval_code(code, { features: [Quickjs::MODULE_STD] })
 # enable os module
 # https://bellard.org/quickjs/quickjs.html#os-module
 Quickjs.eval_code(code, { features: [Quickjs::MODULE_OS] })
+```
+
+### Maintain a consistent VM/runtime
+
+```rb
+vm = Quickjs::VM.new
+vm.eval_code('const a = { b: "c" };')
+vm.eval_code('a.b;') #=> "c"
+vm.eval_code('a.b = "d";')
+vm.eval_code('a.b;') #=> "d"
+```
+
+#### Config VM
+
+```rb
+vm = Quickjs::VM.new(
+  memory_limit: 1024 * 1024,
+  max_stack_size: 1024 * 1024,
+)
+```
+
+```rb
+vm = Quickjs::VM.new(
+  features: [::Quickjs::MODULE_STD],
+)
+vm = Quickjs::VM.new(
+  features: [::Quickjs::MODULE_OS],
+)
+```
+
+#### Dispose VM explicitly
+
+```rb
+vm.dispose!
 ```
 
 ## License
