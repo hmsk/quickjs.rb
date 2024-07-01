@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "test_helper"
-require "json"
 
 class QuickjsTest < Test::Unit::TestCase
   test "VERSION" do
@@ -57,38 +56,47 @@ class QuickjsTest < Test::Unit::TestCase
     assert_equal(::Quickjs.eval_code("[1,2,3]"), [1,2,3])
   end
 
-  class QuickjsTestFeatures < Test::Unit::TestCase
-    test "std is disabled" do
-      assert_equal(::Quickjs.eval_code("typeof std === 'undefined'"), true)
-    end
+  test "std is disabled" do
+    assert_equal(::Quickjs.eval_code("typeof std === 'undefined'"), true)
+  end
 
-    test "os is disabled" do
-      assert_equal(::Quickjs.eval_code("typeof os === 'undefined'"), true)
-    end
+  test "os is disabled" do
+    assert_equal(::Quickjs.eval_code("typeof os === 'undefined'"), true)
+  end
 
-    test "std can be enabled" do
-      assert_equal(::Quickjs.eval_code("!!std.urlGet", { features: [::Quickjs::MODULE_STD] }), true)
-    end
+  test "std can be enabled" do
+    assert_equal(::Quickjs.eval_code("!!std.urlGet", { features: [::Quickjs::MODULE_STD] }), true)
+  end
 
-    test "os can be enabled" do
-      assert_equal(::Quickjs.eval_code("!!os.kill", { features: [::Quickjs::MODULE_OS] }), true)
-    end
+  test "os can be enabled" do
+    assert_equal(::Quickjs.eval_code("!!os.kill", { features: [::Quickjs::MODULE_OS] }), true)
   end
 
   class QuickjsTestVm < Test::Unit::TestCase
-    test "VM maintains runtime and context" do
-      vm = Quickjs::VM.new
-      vm.eval_code('const a = { b: "c" };')
-      assert_equal(vm.eval_code('a.b'), "c")
-      vm.eval_code('a.b = "d"')
-      assert_equal(vm.eval_code('a.b'), "d")
-    end
+    class WithPlainVM < QuickjsTestVm
+      setup { @vm = Quickjs::VM.new }
+      teardown { @vm = nil }
 
-    test "VM doesn't eval codes anymore after disposing" do
-      vm = Quickjs::VM.new
-      vm.eval_code('const a = { b: "c" };')
-      vm.dispose!
-      assert_raise_with_message(RuntimeError, /disposed/) { vm.eval_code('a.b = "d"') }
+      test "VM maintains runtime and context" do
+        @vm.eval_code('const a = { b: "c" };')
+        assert_equal(@vm.eval_code('a.b'), "c")
+        @vm.eval_code('a.b = "d"')
+        assert_equal(@vm.eval_code('a.b'), "d")
+      end
+
+      test "VM doesn't eval codes anymore after disposing" do
+        @vm.eval_code('const a = { b: "c" };')
+        @vm.dispose!
+        assert_raise_with_message(RuntimeError, /disposed/) { @vm.eval_code('a.b = "d"') }
+      end
+
+      test "VM does not enable std features as default" do
+        assert_equal(@vm.eval_code("typeof std === 'undefined'"), true)
+      end
+
+      test "VM does not enable os features as default" do
+        assert_equal(@vm.eval_code("typeof os === 'undefined'"), true)
+      end
     end
 
     test "VM accepts some options to constrain its resource" do
@@ -99,26 +107,16 @@ class QuickjsTest < Test::Unit::TestCase
       assert_equal(vm.eval_code('1+2'), 3)
     end
 
-    test "VM does not enable std features" do
-      vm = Quickjs::VM.new
-      assert_equal(vm.eval_code("typeof std === 'undefined'"), true)
-    end
-
-    test "VM does not enable os features" do
-      vm = Quickjs::VM.new
-      assert_equal(vm.eval_code("typeof os === 'undefined'"), true)
-    end
-
     test "VM enables std feature" do
       vm = Quickjs::VM.new(
-        features: [:feature_std],
+        features: [::Quickjs::MODULE_STD],
       )
       assert_equal(vm.eval_code("!!std.urlGet"), true)
     end
 
     test "VM enables os feoature" do
       vm = Quickjs::VM.new(
-        features: [:feature_os],
+        features: [::Quickjs::MODULE_OS],
       )
       assert_equal(vm.eval_code("!!os.kill"), true)
     end
