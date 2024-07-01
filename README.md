@@ -40,10 +40,10 @@ Quickjs.eval_code("Number('whatever')") #=> :NaN (Quickjs::Value::NAN)
 
 ```rb
 # 1GB memory limit
-Quickjs.eval_code(code, { memoryLimit: 1024 ** 3 })
+Quickjs.eval_code(code, { memory_limit: 1024 ** 3 })
 
 # 1MB max stack size
-Quickjs.eval_code(code, { memoryLimit: 1024 ** 2 })
+Quickjs.eval_code(code, { max_stack_size: 1024 ** 2 })
 ```
 
 #### Enable built-in modules
@@ -58,7 +58,7 @@ Quickjs.eval_code(code, { features: [Quickjs::MODULE_STD] })
 Quickjs.eval_code(code, { features: [Quickjs::MODULE_OS] })
 ```
 
-### Maintain a consistent VM/runtime
+### `Quickjs::VM`: Maintain a consistent VM/runtime
 
 ```rb
 vm = Quickjs::VM.new
@@ -72,15 +72,20 @@ vm.eval_code('a.b;') #=> "d"
 
 ```rb
 vm = Quickjs::VM.new(
-  memory_limit: 1024 * 1024,
-  max_stack_size: 1024 * 1024,
+  memory_limit: 1024 ** 3,
+  max_stack_size: 1024 ** 2,
 )
 ```
 
 ```rb
+# enable std module
+# https://bellard.org/quickjs/quickjs.html#std-module
 vm = Quickjs::VM.new(
   features: [::Quickjs::MODULE_STD],
 )
+
+# enable os module
+# https://bellard.org/quickjs/quickjs.html#os-module
 vm = Quickjs::VM.new(
   features: [::Quickjs::MODULE_OS],
 )
