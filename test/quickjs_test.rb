@@ -10,7 +10,7 @@ class QuickjsTest < Test::Unit::TestCase
   end
 
   test "throw an exception" do
-    assert_raise_with_message(RuntimeError, /Something/) { ::Quickjs.eval_code("}{") }
+    assert_raise_with_message(RuntimeError, /SyntaxError:/) { ::Quickjs.eval_code("}{") }
   end
 
   test "support returning null" do
@@ -61,8 +61,8 @@ class QuickjsTest < Test::Unit::TestCase
   end
 
   test "support returning Promise (rejected) with awaiting result automatically" do
-    assert_raise_with_message(RuntimeError, /Something/) do
-      ::Quickjs.eval_code("const promise = new Promise((res) => { throw('sad') });promise")
+    assert_raise_with_message(RuntimeError, /asynchronously sad/) do
+      ::Quickjs.eval_code("const promise = new Promise((res) => { throw 'asynchronously sad' });promise")
     end
   end
 

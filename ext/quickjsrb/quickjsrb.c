@@ -57,9 +57,28 @@ VALUE to_rb_value (JSValue jsv, JSContext *ctx) {
     return Qnil;
   case JS_TAG_UNDEFINED:
     return ID2SYM(rb_intern(undefinedId));
-  case JS_TAG_EXCEPTION:
-    rb_raise(rb_eRuntimeError, "Something happened by evaluating as JavaScript code");
+  case JS_TAG_EXCEPTION: {
+    JSValue exceptionVal = JS_GetException(ctx);
+    if (JS_IsError(ctx, exceptionVal)) {
+      JSValue jsErrorClassName = JS_GetPropertyStr(ctx, exceptionVal, "name");
+      const char *errorClassName = JS_ToCString(ctx, jsErrorClassName);
+
+      JSValue jsErrorClassMessage = JS_GetPropertyStr(ctx, exceptionVal, "message");
+      const char *errorClassMessage = JS_ToCString(ctx, jsErrorClassMessage);
+
+      JS_FreeValue(ctx, jsErrorClassMessage);
+      JS_FreeValue(ctx, jsErrorClassName);
+
+      rb_raise(rb_eRuntimeError, "%s: %s", errorClassName, errorClassMessage);
+    } else {
+      const char *errorMessage = JS_ToCString(ctx, exceptionVal);
+
+      rb_raise(rb_eRuntimeError, "%s", errorMessage);
+    }
+
+    JS_FreeValue(ctx, exceptionVal);
     return Qnil;
+  }
   case JS_TAG_BIG_INT: {
     JSValue toStringFunc = JS_GetPropertyStr(ctx, jsv, "toString");
     JSValue strigified = JS_Call(ctx, toStringFunc, jsv, 0, NULL);
