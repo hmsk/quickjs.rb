@@ -56,6 +56,16 @@ class QuickjsTest < Test::Unit::TestCase
     assert_equal(::Quickjs.eval_code("[1,2,3]"), [1,2,3])
   end
 
+  test "support returning Promise (resolved) with awaiting result automatically" do
+    assert_equal(::Quickjs.eval_code("const promise = new Promise((res) => { res('awaited yo') });promise"), "awaited yo")
+  end
+
+  test "support returning Promise (rejected) with awaiting result automatically" do
+    assert_raise_with_message(RuntimeError, /Something/) do
+      ::Quickjs.eval_code("const promise = new Promise((res) => { throw('sad') });promise")
+    end
+  end
+
   test "std is disabled" do
     assert_equal(::Quickjs.eval_code("typeof std === 'undefined'"), true)
   end

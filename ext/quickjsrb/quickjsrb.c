@@ -31,6 +31,13 @@ VALUE to_rb_value (JSValue jsv, JSContext *ctx) {
     return rb_str_new2(msg);
   }
   case JS_TAG_OBJECT: {
+    int promiseState = JS_PromiseState(ctx, jsv);
+    if (promiseState == JS_PROMISE_FULFILLED || promiseState == JS_PROMISE_PENDING) {
+      return to_rb_value(js_std_await(ctx, jsv), ctx);
+    } else if (promiseState == JS_PROMISE_REJECTED) {
+      return to_rb_value(JS_Throw(ctx, JS_PromiseResult(ctx, jsv)), ctx);
+    }
+
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue jsonClass = JS_GetPropertyStr(ctx, global, "JSON");
     JSValue stringifyFunc = JS_GetPropertyStr(ctx, jsonClass, "stringify");
