@@ -97,6 +97,17 @@ vm = Quickjs::VM.new(
 vm.dispose!
 ```
 
+#### Define a global function for JS
+
+```rb
+vm = Quickjs::VM.new
+vm.define_function("greetingTo") do |arg1|
+  ['Hello!', arg1].join(' ')
+end
+
+vm.eval_code("greetingTo('Rick')") #=> 'Hello! Rick'
+```
+
 ## License
 
 Every file in `ext/quickjsrb/quickjs` is licensed under [the MIT License Copyright 2017-2021 by Fabrice Bellard and Charlie Goron](/ext/quickjsrb/quickjs/LICENSE).
