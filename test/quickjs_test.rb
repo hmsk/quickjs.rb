@@ -130,5 +130,24 @@ class QuickjsTest < Test::Unit::TestCase
       )
       assert_equal(vm.eval_code("!!os.kill"), true)
     end
+
+    test "VM can run defined Ruby block with no args in JS" do
+      vm = Quickjs::VM.new
+      vm.define_function("callRuby") do
+        ['Message', 'from', 'Ruby'].join(' ')
+      end
+
+      assert_equal(vm.eval_code("callRuby()"), 'Message from Ruby')
+    end
+
+    # only supporting single string arg now
+    test "VM can run defined Ruby block with an arg in JS" do
+      vm = Quickjs::VM.new
+      vm.define_function("greetingTo") do |arg1|
+        ['Hello!', arg1].join(' ')
+      end
+
+      assert_equal(vm.eval_code("greetingTo('Rick')"), 'Hello! Rick')
+    end
   end
 end
