@@ -41,6 +41,62 @@ const char *nanId = "NaN";
 const char *featureStdId = "feature_std";
 const char *featureOsId = "feature_os";
 
+JSValue to_js_value(JSContext *ctx, VALUE r_value) {
+  switch (TYPE(r_value)) {
+    case T_NIL:
+      return JS_NULL;
+    case T_FIXNUM:
+    case T_FLOAT: {
+      VALUE r_str = rb_funcall(r_value, rb_intern("to_s"), 0, NULL);
+      char *str = StringValueCStr(r_str);
+      JSValue global = JS_GetGlobalObject(ctx);
+      JSValue numberClass = JS_GetPropertyStr(ctx, global, "Number");
+      JSValue j_str = JS_NewString(ctx, str);
+      JSValue stringified = JS_Call(ctx, numberClass, JS_UNDEFINED, 1, &j_str);
+      JS_FreeValue(ctx, global);
+      JS_FreeValue(ctx, numberClass);
+
+      return stringified;
+    }
+    case T_STRING: {
+      char *str = StringValueCStr(r_value);
+
+      return JS_NewString(ctx, str);
+    }
+    case T_SYMBOL: {
+      VALUE r_str = rb_funcall(r_value, rb_intern("to_s"), 0, NULL);
+      char *str = StringValueCStr(r_str);
+
+      return JS_NewString(ctx, str);
+    }
+    case T_TRUE:
+      return JS_TRUE;
+    case T_FALSE:
+      return JS_FALSE;
+    case T_HASH:
+    case T_ARRAY: {
+      VALUE r_json_str = rb_funcall(r_value, rb_intern("to_json"), 0, NULL);
+      char *str = StringValueCStr(r_json_str);
+      JSValue global = JS_GetGlobalObject(ctx);
+      JSValue jsonClass = JS_GetPropertyStr(ctx, global, "JSON");
+      JSValue parseFunc = JS_GetPropertyStr(ctx, jsonClass, "parse");
+      JSValue j_str = JS_NewString(ctx, str);
+      JSValue stringified = JS_Call(ctx, parseFunc, jsonClass, 1, &j_str);
+      JS_FreeValue(ctx, global);
+      JS_FreeValue(ctx, parseFunc);
+      JS_FreeValue(ctx, jsonClass);
+
+      return stringified;
+    }
+    default: {
+      VALUE r_inspect_str = rb_funcall(r_value, rb_intern("inspect"), 0, NULL);
+      char *str = StringValueCStr(r_inspect_str);
+
+      return JS_NewString(ctx, str);
+    }
+  }
+}
+
 VALUE to_rb_value(JSValue jsv, JSContext *ctx) {
   switch(JS_VALUE_GET_NORM_TAG(jsv)) {
   case JS_TAG_INT: {
@@ -144,8 +200,7 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   }
 
   VALUE r_result = rb_apply(proc, rb_intern("call"), to_rb_value(argv[1], ctx));
-  char *result = StringValueCStr(r_result);
-  return JS_NewString(ctx, result);
+  return to_js_value(ctx, r_result);
 }
 
 VALUE vm_m_initialize(int argc, VALUE* argv, VALUE self)

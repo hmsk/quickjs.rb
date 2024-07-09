@@ -124,56 +124,110 @@ class QuickjsTest < Test::Unit::TestCase
       assert_equal(vm.eval_code("!!std.urlGet"), true)
     end
 
-    test "VM enables os feoature" do
+    test "VM enables os feature" do
       vm = Quickjs::VM.new(
         features: [::Quickjs::MODULE_OS],
       )
       assert_equal(vm.eval_code("!!os.kill"), true)
     end
 
-    test "VM can run defined Ruby block with no args in JS" do
-      vm = Quickjs::VM.new
-      vm.define_function("callRuby") do
-        ['Message', 'from', 'Ruby'].join(' ')
+    class GlobalFunction < QuickjsTestVm
+      setup { @vm = Quickjs::VM.new }
+      teardown { @vm = nil }
+
+      test "define global function that accepts no args" do
+        @vm.define_function("callRuby") do
+          ['Message', 'from', 'Ruby'].join(' ')
+        end
+
+        assert_equal(@vm.eval_code("callRuby()"), 'Message from Ruby')
       end
 
-      assert_equal(vm.eval_code("callRuby()"), 'Message from Ruby')
-    end
+      test "define global function that accepts an arg" do
+        @vm.define_function("greetingTo") do |arg1|
+          ['Hello!', arg1].join(' ')
+        end
 
-    test "VM can run defined Ruby block with an arg in JS" do
-      vm = Quickjs::VM.new
-      vm.define_function("greetingTo") do |arg1|
-        ['Hello!', arg1].join(' ')
+        assert_equal(@vm.eval_code("greetingTo('Rick')"), 'Hello! Rick')
       end
 
-      assert_equal(vm.eval_code("greetingTo('Rick')"), 'Hello! Rick')
-    end
+      test "define global function that accepts two args" do
+        @vm.define_function("concat") do |arg1, arg2|
+          "#{arg1}#{arg2}"
+        end
 
-    test "VM can run defined Ruby block with two args in JS" do
-      vm = Quickjs::VM.new
-      vm.define_function("concat") do |arg1, arg2|
-        "#{arg1}#{arg2}"
+        assert_equal(@vm.eval_code("concat('Ri', 'ck')"), 'Rick')
       end
 
-      assert_equal(vm.eval_code("concat('Ri', 'ck')"), 'Rick')
-    end
+      test "define global function that accepts many args" do
+        @vm.define_function("buildCSV") do |arg1, arg2, arg3, arg4|
+          [arg1, arg2, arg3, arg4].join(' ')
+        end
 
-    test "VM can run defined Ruby block with many args in JS" do
-      vm = Quickjs::VM.new
-      vm.define_function("buildCSV") do |arg1, arg2, arg3, arg4|
-        [arg1, arg2, arg3, arg4].join(' ')
+        assert_equal(@vm.eval_code("buildCSV('R', 'i', 'c', 'k')"), 'R i c k')
       end
 
-      assert_equal(vm.eval_code("buildCSV('R', 'i', 'c', 'k')"), 'R i c k')
-    end
+      test "define global function that accepts many args including an optional one" do
+        @vm.define_function("callName") do |arg1, arg2, arg3, arg4, arg5 = 'Song'|
+          [arg1, arg2, arg3, arg4].join('') + ' ' + arg5
+        end
 
-    test "VM can run defined Ruby block with many args including an optional in JS" do
-      vm = Quickjs::VM.new
-      vm.define_function("callName") do |arg1, arg2, arg3, arg4, arg5 = 'Song'|
-        [arg1, arg2, arg3, arg4].join('') + ' ' + arg5
+        assert_equal(@vm.eval_code("callName('R', 'i', 'c', 'k')"), 'Rick Song')
       end
 
-      assert_equal(vm.eval_code("callName('R', 'i', 'c', 'k')"), 'Rick Song')
+      test "returns symbol as string" do
+        @vm.define_function("get_sym") { :symsym }
+
+        assert_equal(@vm.eval_code("get_sym() === 'symsym'"), true)
+      end
+
+      test "returns nil as null" do
+        @vm.define_function("get_nil") { nil }
+
+        assert_equal(@vm.eval_code("get_nil() === null"), true)
+      end
+
+      test "returns fixnum as number" do
+        @vm.define_function("get_fixnum") { 3 }
+
+        assert_equal(@vm.eval_code("get_fixnum() === 3"), true)
+      end
+
+      test "returns float as number" do
+        @vm.define_function("get_float") { 3.14 }
+
+        assert_equal(@vm.eval_code("get_float() === 3.14"), true)
+      end
+
+      test "returns true as is" do
+        @vm.define_function("get_true") { true }
+
+        assert_equal(@vm.eval_code("get_true() === true"), true)
+      end
+
+      test "returns false as is" do
+        @vm.define_function("get_false") { false }
+
+        assert_equal(@vm.eval_code("get_false() === false"), true)
+      end
+
+      test "returns array as is if serializable" do
+        @vm.define_function("get_array") { [1, '2'] }
+
+        assert_equal(@vm.eval_code("get_array()"), [1, '2'])
+      end
+
+      test "returns hash as is (ish) if serializable" do
+        @vm.define_function("get_obj") { { a: 1 } }
+
+        assert_equal(@vm.eval_code("get_obj()"), { 'a' => 1 })
+      end
+
+      test "returns inspected string for otherwise" do
+        @vm.define_function("get_class") { Class.new }
+
+        assert_match(/#<Class:/, @vm.eval_code("get_class()"))
+      end
     end
   end
 end
