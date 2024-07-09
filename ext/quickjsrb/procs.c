@@ -1,4 +1,4 @@
-#include "quickjsrb-runtime-state.h"
+#include "procs.h"
 
 unsigned int hash(const char *key) {
   unsigned long int value = 0;
@@ -8,7 +8,7 @@ unsigned int hash(const char *key) {
   for (; i < key_len; ++i) {
     value = value * 37 + key[i];
   }
-  return value % MAX_NUM_OF_PROC;
+  return value % MAX_NUM_OF_PROCS;
 }
 
 ProcEntry *create_proc_entry(const char *key, VALUE proc) {
@@ -21,8 +21,8 @@ ProcEntry *create_proc_entry(const char *key, VALUE proc) {
 
 ProcEntryMap *create_proc_entries() {
   ProcEntryMap *entryMap = malloc(sizeof(ProcEntryMap));
-  entryMap->entries = malloc(sizeof(ProcEntry *) * MAX_NUM_OF_PROC);
-  for (int i = 0; i < MAX_NUM_OF_PROC; ++i) {
+  entryMap->entries = malloc(sizeof(ProcEntry *) * MAX_NUM_OF_PROCS);
+  for (int i = 0; i < MAX_NUM_OF_PROCS; ++i) {
     entryMap->entries[i] = NULL;
   }
   return entryMap;
@@ -66,7 +66,7 @@ VALUE get_proc(ProcEntryMap *entryMap, const char *key) {
 }
 
 void free_proc_entry_map(ProcEntryMap *entryMap) {
-  for (int i = 0; i < MAX_NUM_OF_PROC; ++i) {
+  for (int i = 0; i < MAX_NUM_OF_PROCS; ++i) {
     ProcEntry *entry = entryMap->entries[i];
     while (entry != NULL) {
       ProcEntry *temp = entry;
@@ -77,16 +77,4 @@ void free_proc_entry_map(ProcEntryMap *entryMap) {
   }
   free(entryMap->entries);
   free(entryMap);
-}
-
-QuickjsrbRuntimeState *create_quickjsrb_runtime_state() {
-  QuickjsrbRuntimeState *state = malloc(sizeof(QuickjsrbRuntimeState));
-  state->procs = create_proc_entries();
-
-  return state;
-}
-
-void free_quickjsrb_runtime_state(QuickjsrbRuntimeState *state) {
-  free_proc_entry_map(state->procs);
-  free(state);
 }

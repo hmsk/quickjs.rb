@@ -1,38 +1,37 @@
 #include "quickjsrb.h"
-#include "quickjsrb-runtime-state.h"
 
-struct qvmdata {
+typedef struct VMData {
   char alive;
   struct JSContext *context;
   struct QuickjsrbRuntimeState *state;
-};
+  struct ProcEntryMap *procs;
+} VMData;
 
-void qvm_free(void* data)
+void vm_free(void* data)
 {
   free(data);
 }
 
-size_t qvm_size(const void* data)
+size_t vm_size(const void* data)
 {
   return sizeof(data);
 }
 
-static const rb_data_type_t qvm_type = {
-  .wrap_struct_name = "qvm",
+static const rb_data_type_t vm_type = {
+  .wrap_struct_name = "vm",
   .function = {
     .dmark = NULL,
-    .dfree = qvm_free,
-    .dsize = qvm_size,
+    .dfree = vm_free,
+    .dsize = vm_size,
   },
   .data = NULL,
   .flags = RUBY_TYPED_FREE_IMMEDIATELY,
 };
 
-VALUE qvm_alloc(VALUE self)
+VALUE vm_alloc(VALUE self)
 {
-  struct qvmdata *data;
-
-  return TypedData_Make_Struct(self, struct qvmdata, &qvm_type, data);
+  VMData *data;
+  return TypedData_Make_Struct(self, VMData, &vm_type, data);
 }
 
 VALUE rb_mQuickjs;
@@ -134,11 +133,11 @@ VALUE to_rb_value (JSValue jsv, JSContext *ctx) {
 }
 
 static JSValue js_quickjsrb_call_global (JSContext *ctx, JSValueConst _this, int _argc, JSValueConst *argv) {
-  struct qvmdata *data = JS_GetContextOpaque(ctx);
+  VMData *data = JS_GetContextOpaque(ctx);
   JSValue maybeFuncName = JS_ToString(ctx, argv[0]);
   const char *funcName = JS_ToCString(ctx, maybeFuncName);
 
-  VALUE proc = get_proc(data->state->procs, funcName);
+  VALUE proc = get_proc(data->procs, funcName);
   if (proc == Qnil) {
     return JS_NewString(ctx, "missing");
   }
@@ -151,7 +150,7 @@ static JSValue js_quickjsrb_call_global (JSContext *ctx, JSValueConst _this, int
   return JS_NewString(ctx, result);
 }
 
-VALUE qvm_m_initialize(int argc, VALUE* argv, VALUE self)
+VALUE vm_m_initialize(int argc, VALUE* argv, VALUE self)
 {
   VALUE r_opts;
   rb_scan_args(argc, argv, ":", &r_opts);
@@ -164,13 +163,12 @@ VALUE qvm_m_initialize(int argc, VALUE* argv, VALUE self)
   VALUE r_features = rb_hash_aref(r_opts, ID2SYM(rb_intern("features")));
   if (NIL_P(r_features)) r_features = rb_ary_new();
 
-  struct qvmdata *data;
-  TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
+  VMData *data;
+  TypedData_Get_Struct(self, VMData, &vm_type, data);
 
-  QuickjsrbRuntimeState *state= create_quickjsrb_runtime_state();
   JSRuntime *runtime = JS_NewRuntime();
   data->context = JS_NewContext(runtime);
-  data->state = state;
+  data->procs = create_proc_entries();
   data->alive = 1;
   JS_SetContextOpaque(data->context, data);
 
@@ -214,10 +212,10 @@ VALUE qvm_m_initialize(int argc, VALUE* argv, VALUE self)
   return self;
 }
 
-VALUE qvm_m_evalCode(VALUE self, VALUE r_code)
+VALUE vm_m_evalCode(VALUE self, VALUE r_code)
 {
-  struct qvmdata *data;
-  TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
+  VMData *data;
+  TypedData_Get_Struct(self, VMData, &vm_type, data);
 
   if (data->alive < 1) {
     rb_raise(rb_eRuntimeError, "Quickjs::VM was disposed");
@@ -231,19 +229,19 @@ VALUE qvm_m_evalCode(VALUE self, VALUE r_code)
   return result;
 }
 
-VALUE qvm_m_defineGlobalFunction(VALUE self, VALUE r_name)
+VALUE vm_m_defineGlobalFunction(VALUE self, VALUE r_name)
 {
   rb_need_block();
 
-  struct qvmdata *data;
-  TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
+  VMData *data;
+  TypedData_Get_Struct(self, VMData, &vm_type, data);
 
   if (rb_block_given_p()) {
     VALUE proc = rb_block_proc();
 
     char *funcName = StringValueCStr(r_name);
 
-    set_proc(data->state->procs, funcName, proc);
+    set_proc(data->procs, funcName, proc);
 
     const char* template = "globalThis.__ruby['%s'] = (...args) => rubyGlobal('%s', args);\nglobalThis['%s'] = globalThis.__ruby['%s'];\n";
     int length = snprintf(NULL, 0, template, funcName, funcName, funcName, funcName);
@@ -260,14 +258,14 @@ VALUE qvm_m_defineGlobalFunction(VALUE self, VALUE r_name)
   return Qnil;
 }
 
-VALUE qvm_m_dispose(VALUE self)
+VALUE vm_m_dispose(VALUE self)
 {
-  struct qvmdata *data;
-  TypedData_Get_Struct(self, struct qvmdata, &qvm_type, data);
+  VMData *data;
+  TypedData_Get_Struct(self, VMData, &vm_type, data);
 
   JSRuntime *runtime = JS_GetRuntime(data->context);
   js_std_free_handlers(runtime);
-  free_quickjsrb_runtime_state(data->state);
+  free_proc_entry_map(data->procs);
   JS_FreeContext(data->context);
   JS_FreeRuntime(runtime);
   data->alive = 0;
@@ -287,9 +285,9 @@ Init_quickjsrb(void)
   rb_define_const(valueClass, "NAN", ID2SYM(rb_intern(nanId)));
 
   VALUE vmClass = rb_define_class_under(rb_mQuickjs, "VM", rb_cObject);
-  rb_define_alloc_func(vmClass, qvm_alloc);
-  rb_define_method(vmClass, "initialize", qvm_m_initialize, -1);
-  rb_define_method(vmClass, "eval_code", qvm_m_evalCode, 1);
-  rb_define_method(vmClass, "define_function", qvm_m_defineGlobalFunction, 1);
-  rb_define_method(vmClass, "dispose!", qvm_m_dispose, 0);
+  rb_define_alloc_func(vmClass, vm_alloc);
+  rb_define_method(vmClass, "initialize", vm_m_initialize, -1);
+  rb_define_method(vmClass, "eval_code", vm_m_evalCode, 1);
+  rb_define_method(vmClass, "define_function", vm_m_defineGlobalFunction, 1);
+  rb_define_method(vmClass, "dispose!", vm_m_dispose, 0);
 }
