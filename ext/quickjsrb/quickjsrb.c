@@ -41,7 +41,7 @@ const char *nanId = "NaN";
 const char *featureStdId = "feature_std";
 const char *featureOsId = "feature_os";
 
-VALUE to_rb_value (JSValue jsv, JSContext *ctx) {
+VALUE to_rb_value(JSValue jsv, JSContext *ctx) {
   switch(JS_VALUE_GET_NORM_TAG(jsv)) {
   case JS_TAG_INT: {
     int int_res = 0;
@@ -132,16 +132,16 @@ VALUE to_rb_value (JSValue jsv, JSContext *ctx) {
   }
 }
 
-static JSValue js_quickjsrb_call_global (JSContext *ctx, JSValueConst _this, int _argc, JSValueConst *argv) {
+static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int _argc, JSValueConst *argv) {
   VMData *data = JS_GetContextOpaque(ctx);
   JSValue maybeFuncName = JS_ToString(ctx, argv[0]);
   const char *funcName = JS_ToCString(ctx, maybeFuncName);
+  JS_FreeValue(ctx, maybeFuncName);
 
   VALUE proc = get_proc(data->procs, funcName);
-  if (proc == Qnil) {
-    return JS_NewString(ctx, "missing");
+  if (proc == Qnil) { // Shouldn't happen
+    return JS_ThrowReferenceError(ctx, "Proc `%s` is not defined", funcName);
   }
-  JS_FreeValue(ctx, maybeFuncName);
 
   VALUE r_result = rb_apply(proc, rb_intern("call"), to_rb_value(argv[1], ctx));
   char *result = StringValueCStr(r_result);
