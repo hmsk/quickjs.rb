@@ -158,7 +158,6 @@ class QuickjsTest < Test::Unit::TestCase
       assert_equal(vm.eval_code("concat('Ri', 'ck')"), 'Rick')
     end
 
-
     test "VM can run defined Ruby block with many args in JS" do
       vm = Quickjs::VM.new
       vm.define_function("buildCSV") do |arg1, arg2, arg3, arg4|
@@ -168,5 +167,13 @@ class QuickjsTest < Test::Unit::TestCase
       assert_equal(vm.eval_code("buildCSV('R', 'i', 'c', 'k')"), 'R i c k')
     end
 
+    test "VM can run defined Ruby block with many args including an optional in JS" do
+      vm = Quickjs::VM.new
+      vm.define_function("callName") do |arg1, arg2, arg3, arg4, arg5 = 'Song'|
+        [arg1, arg2, arg3, arg4].join('') + ' ' + arg5
+      end
+
+      assert_equal(vm.eval_code("callName('R', 'i', 'c', 'k')"), 'Rick Song')
+    end
   end
 end
