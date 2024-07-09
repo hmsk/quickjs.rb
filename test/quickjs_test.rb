@@ -140,7 +140,6 @@ class QuickjsTest < Test::Unit::TestCase
       assert_equal(vm.eval_code("callRuby()"), 'Message from Ruby')
     end
 
-    # only supporting single string arg now
     test "VM can run defined Ruby block with an arg in JS" do
       vm = Quickjs::VM.new
       vm.define_function("greetingTo") do |arg1|
@@ -149,5 +148,25 @@ class QuickjsTest < Test::Unit::TestCase
 
       assert_equal(vm.eval_code("greetingTo('Rick')"), 'Hello! Rick')
     end
+
+    test "VM can run defined Ruby block with two args in JS" do
+      vm = Quickjs::VM.new
+      vm.define_function("concat") do |arg1, arg2|
+        "#{arg1}#{arg2}"
+      end
+
+      assert_equal(vm.eval_code("concat('Ri', 'ck')"), 'Rick')
+    end
+
+
+    test "VM can run defined Ruby block with many args in JS" do
+      vm = Quickjs::VM.new
+      vm.define_function("buildCSV") do |arg1, arg2, arg3, arg4|
+        [arg1, arg2, arg3, arg4].join(' ')
+      end
+
+      assert_equal(vm.eval_code("buildCSV('R', 'i', 'c', 'k')"), 'R i c k')
+    end
+
   end
 end

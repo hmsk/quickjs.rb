@@ -35,32 +35,6 @@ VALUE qvm_alloc(VALUE self)
   return TypedData_Make_Struct(self, struct qvmdata, &qvm_type, data);
 }
 
-static JSValue js_quickjsrb_call_global (JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-  struct qvmdata *data = JS_GetContextOpaque(ctx);
-  JSValue maybeFuncName = JS_ToString(ctx, argv[0]);
-  const char *funcName = JS_ToCString(ctx, maybeFuncName);
-
-  VALUE proc = get_proc(data->state->procs, funcName);
-  if (proc == Qnil) {
-    return JS_NewString(ctx, "missing");
-  }
-  JS_FreeValue(ctx, maybeFuncName);
-
-  // TODO: support multiple args
-  JSValue maybeString;
-  VALUE r_array = rb_ary_new2(argc);
-  for (int i = 1; i < argc; ++i) {
-    maybeString = JS_ToString(ctx, argv[i]);
-    const char *msg = JS_ToCString(ctx, maybeString);
-    rb_ary_push(r_array, rb_str_new2(msg));
-  }
-  JS_FreeValue(ctx, maybeString);
-
-  VALUE r_result = rb_funcall(proc, rb_intern("call"), argc - 1, r_array);
-  char *result = StringValueCStr(r_result);
-  return JS_NewString(ctx, result);
-}
-
 VALUE rb_mQuickjs;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
@@ -157,6 +131,24 @@ VALUE to_rb_value (JSValue jsv, JSContext *ctx) {
   default:
     return Qnil;
   }
+}
+
+static JSValue js_quickjsrb_call_global (JSContext *ctx, JSValueConst _this, int _argc, JSValueConst *argv) {
+  struct qvmdata *data = JS_GetContextOpaque(ctx);
+  JSValue maybeFuncName = JS_ToString(ctx, argv[0]);
+  const char *funcName = JS_ToCString(ctx, maybeFuncName);
+
+  VALUE proc = get_proc(data->state->procs, funcName);
+  if (proc == Qnil) {
+    return JS_NewString(ctx, "missing");
+  }
+  JS_FreeValue(ctx, maybeFuncName);
+
+  // this arity won't work for optional, splat params
+  int procArgc = NUM2INT(rb_funcall(proc, rb_intern("arity"), 0, NULL));
+  VALUE r_result = rb_apply(proc, rb_intern("call"), to_rb_value(argv[1], ctx));
+  char *result = StringValueCStr(r_result);
+  return JS_NewString(ctx, result);
 }
 
 VALUE qvm_m_initialize(int argc, VALUE* argv, VALUE self)
