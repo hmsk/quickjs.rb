@@ -143,8 +143,6 @@ static JSValue js_quickjsrb_call_global (JSContext *ctx, JSValueConst _this, int
   }
   JS_FreeValue(ctx, maybeFuncName);
 
-  // this arity won't work for optional, splat params
-  int procArgc = NUM2INT(rb_funcall(proc, rb_intern("arity"), 0, NULL));
   VALUE r_result = rb_apply(proc, rb_intern("call"), to_rb_value(argv[1], ctx));
   char *result = StringValueCStr(r_result);
   return JS_NewString(ctx, result);
