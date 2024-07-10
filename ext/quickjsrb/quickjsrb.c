@@ -3,7 +3,6 @@
 typedef struct VMData {
   char alive;
   struct JSContext *context;
-  struct QuickjsrbRuntimeState *state;
   struct ProcEntryMap *procs;
 } VMData;
 
