@@ -137,6 +137,14 @@ class QuickjsTest < Test::Unit::TestCase
       assert_raise_with_message(RuntimeError, /interrupted/) { vm.eval_code("while(1) {}") }
     end
 
+    test "VM accepts timeout_msec to control maximum evaluation time" do
+      vm = Quickjs::VM.new(timeout_msec: 200)
+
+      started = Time.now.to_f * 1000
+      assert_raise_with_message(RuntimeError, /interrupted/) { vm.eval_code("while(1) {}") }
+      assert_in_delta(started + 200, Time.now.to_f * 1000, 5) # within 5 msec
+    end
+
     class GlobalFunction < QuickjsTestVm
       setup { @vm = Quickjs::VM.new }
       teardown { @vm = nil }

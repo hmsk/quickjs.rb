@@ -220,6 +220,8 @@ VALUE vm_m_initialize(int argc, VALUE* argv, VALUE self)
   if (NIL_P(r_maxStackSize)) r_maxStackSize = UINT2NUM(1024 * 1024 * 4);
   VALUE r_features = rb_hash_aref(r_opts, ID2SYM(rb_intern("features")));
   if (NIL_P(r_features)) r_features = rb_ary_new();
+  VALUE r_timeout_msec = rb_hash_aref(r_opts, ID2SYM(rb_intern("timeout_msec")));
+  if (NIL_P(r_timeout_msec)) r_timeout_msec= UINT2NUM(100);
 
   VMData *data;
   TypedData_Get_Struct(self, VMData, &vm_type, data);
@@ -230,7 +232,7 @@ VALUE vm_m_initialize(int argc, VALUE* argv, VALUE self)
 
   EvalTime *eval_time = malloc(sizeof(EvalTime));
   data->eval_time = eval_time;
-  data->eval_time->limit = (clock_t)(1 * CLOCKS_PER_SEC);
+  data->eval_time->limit = (clock_t)(CLOCKS_PER_SEC * NUM2UINT(r_timeout_msec) / 1000);
   data->alive = 1;
   JS_SetContextOpaque(data->context, data);
 
