@@ -1,9 +1,15 @@
 #include "quickjsrb.h"
 
+typedef struct EvalTime {
+  clock_t limit;
+  clock_t started_at;
+} EvalTime;
+
 typedef struct VMData {
   char alive;
   struct JSContext *context;
   struct ProcEntryMap *procs;
+  struct EvalTime *eval_time;
 } VMData;
 
 void vm_free(void* data)
@@ -122,7 +128,7 @@ VALUE to_rb_value(JSValue jsv, JSContext *ctx) {
   case JS_TAG_OBJECT: {
     int promiseState = JS_PromiseState(ctx, jsv);
     if (promiseState == JS_PROMISE_FULFILLED || promiseState == JS_PROMISE_PENDING) {
-      return to_rb_value(js_std_await(ctx, jsv), ctx);
+      return to_rb_value(js_std_await(ctx, jsv), ctx); // should have timeout
     } else if (promiseState == JS_PROMISE_REJECTED) {
       return to_rb_value(JS_Throw(ctx, JS_PromiseResult(ctx, jsv)), ctx);
     }
@@ -221,6 +227,10 @@ VALUE vm_m_initialize(int argc, VALUE* argv, VALUE self)
   JSRuntime *runtime = JS_NewRuntime();
   data->context = JS_NewContext(runtime);
   data->procs = create_proc_entries();
+
+  EvalTime *eval_time = malloc(sizeof(EvalTime));
+  data->eval_time = eval_time;
+  data->eval_time->limit = (clock_t)(1 * CLOCKS_PER_SEC);
   data->alive = 1;
   JS_SetContextOpaque(data->context, data);
 
@@ -264,6 +274,11 @@ VALUE vm_m_initialize(int argc, VALUE* argv, VALUE self)
   return self;
 }
 
+static int interrupt_handler(JSRuntime *runtime, void *opaque) {
+	EvalTime *eval_time = opaque;
+	return clock() >= eval_time->started_at + eval_time->limit ? 1 : 0;
+}
+
 VALUE vm_m_evalCode(VALUE self, VALUE r_code)
 {
   VMData *data;
@@ -273,6 +288,10 @@ VALUE vm_m_evalCode(VALUE self, VALUE r_code)
     rb_raise(rb_eRuntimeError, "Quickjs::VM was disposed");
     return Qnil;
   }
+
+  data->eval_time->started_at = clock();
+  JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
+
   char *code = StringValueCStr(r_code);
   JSValue codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL);
   VALUE result = to_rb_value(codeResult, data->context);
@@ -316,6 +335,7 @@ VALUE vm_m_dispose(VALUE self)
   TypedData_Get_Struct(self, VMData, &vm_type, data);
 
   JSRuntime *runtime = JS_GetRuntime(data->context);
+  JS_SetInterruptHandler(runtime, NULL, NULL);
   js_std_free_handlers(runtime);
   free_proc_entry_map(data->procs);
   JS_FreeContext(data->context);

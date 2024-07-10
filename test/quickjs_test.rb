@@ -131,6 +131,12 @@ class QuickjsTest < Test::Unit::TestCase
       assert_equal(vm.eval_code("!!os.kill"), true)
     end
 
+    test "gets timeout" do
+      vm = Quickjs::VM.new
+
+      assert_raise_with_message(RuntimeError, /interrupted/) { vm.eval_code("while(1) {}") }
+    end
+
     class GlobalFunction < QuickjsTestVm
       setup { @vm = Quickjs::VM.new }
       teardown { @vm = nil }
