@@ -89,6 +89,11 @@ vm = Quickjs::VM.new(
 vm = Quickjs::VM.new(
   features: [::Quickjs::MODULE_OS],
 )
+
+# `eval_code` will be interrupted after 1 sec (default: 100 msec)
+vm = Quickjs::VM.new(
+  timeout_msec: 1_000,
+)
 ```
 
 #### Dispose VM explicitly
