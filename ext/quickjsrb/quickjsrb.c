@@ -128,7 +128,7 @@ VALUE to_rb_value(JSValue jsv, JSContext *ctx) {
   case JS_TAG_OBJECT: {
     int promiseState = JS_PromiseState(ctx, jsv);
     if (promiseState == JS_PROMISE_FULFILLED || promiseState == JS_PROMISE_PENDING) {
-      return to_rb_value(js_std_await(ctx, jsv), ctx); // should have timeout
+      return to_rb_value(js_std_await(ctx, jsv), ctx); // TODO: should have timeout
     } else if (promiseState == JS_PROMISE_REJECTED) {
       return to_rb_value(JS_Throw(ctx, JS_PromiseResult(ctx, jsv)), ctx);
     }
@@ -204,6 +204,7 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
     return JS_ThrowReferenceError(ctx, "Proc `%s` is not defined", funcName);
   }
 
+  // TODO: cover timeout for calling proc
   VALUE r_result = rb_apply(proc, rb_intern("call"), to_rb_value(argv[1], ctx));
   return to_js_value(ctx, r_result);
 }

@@ -189,6 +189,12 @@ class QuickjsTest < Test::Unit::TestCase
         assert_equal(@vm.eval_code("callName('R', 'i', 'c', 'k')"), 'Rick Song')
       end
 
+      test "global timeout still work" do
+        pend 'apply timeout for evaluating proc'
+        @vm.define_function("infinite") { loop {} }
+        assert_raise_with_message(RuntimeError, /interrupted/) { @vm.eval_code("infinite();") }
+      end
+
       test "returns symbol as string" do
         @vm.define_function("get_sym") { :symsym }
 
