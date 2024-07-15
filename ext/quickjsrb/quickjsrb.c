@@ -137,14 +137,23 @@ VALUE to_rb_value(JSValue jsv, JSContext *ctx) {
   case JS_TAG_STRING: {
     JSValue maybeString = JS_ToString(ctx, jsv);
     const char *msg = JS_ToCString(ctx, maybeString);
+    JS_FreeValue(ctx, maybeString);
     return rb_str_new2(msg);
   }
   case JS_TAG_OBJECT: {
     int promiseState = JS_PromiseState(ctx, jsv);
     if (promiseState == JS_PROMISE_FULFILLED || promiseState == JS_PROMISE_PENDING) {
-      return to_rb_value(js_std_await(ctx, jsv), ctx); // TODO: should have timeout
+      JSValue awaited = js_std_await(ctx, jsv);
+      VALUE rb_awaited = to_rb_value(awaited, ctx); // TODO: should have timeout
+      JS_FreeValue(ctx, awaited);
+      return rb_awaited;
     } else if (promiseState == JS_PROMISE_REJECTED) {
-      return to_rb_value(JS_Throw(ctx, JS_PromiseResult(ctx, jsv)), ctx);
+      JSValue promiseResult = JS_PromiseResult(ctx, jsv);
+      JSValue throw = JS_Throw(ctx, promiseResult);
+      JS_FreeValue(ctx, promiseResult);
+      VALUE rb_errored = to_rb_value(throw, ctx);
+      JS_FreeValue(ctx, throw);
+      return rb_errored;
     }
 
     JSValue global = JS_GetGlobalObject(ctx);
