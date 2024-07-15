@@ -18,12 +18,19 @@ static void vm_free(void *ptr)
 {
   VMData *data = (VMData *)ptr;
   free(data->eval_time);
+
+  JSRuntime *runtime = JS_GetRuntime(data->context);
+  JS_SetInterruptHandler(runtime, NULL, NULL);
+  js_std_free_handlers(runtime);
+  JS_FreeContext(data->context);
+  JS_FreeRuntime(runtime);
+
   xfree(ptr);
 }
 
 size_t vm_size(const void *data)
 {
-  return sizeof(data);
+  return sizeof(VMData);
 }
 
 static void vm_mark(void *ptr)
@@ -39,7 +46,6 @@ static const rb_data_type_t vm_type = {
         .dfree = vm_free,
         .dsize = vm_size,
     },
-    .data = NULL,
     .flags = RUBY_TYPED_FREE_IMMEDIATELY,
 };
 
@@ -216,19 +222,21 @@ VALUE to_rb_value(JSValue jsv, JSContext *ctx)
       JS_FreeValue(ctx, jsErrorClassMessage);
       JS_FreeValue(ctx, jsErrorClassName);
 
-      rb_raise(rb_eRuntimeError, "%s: %s", errorClassName, errorClassMessage);
+      VALUE rb_errorMessage = rb_sprintf("%s: %s", errorClassName, errorClassMessage);
       JS_FreeCString(ctx, errorClassName);
       JS_FreeCString(ctx, errorClassMessage);
+      JS_FreeValue(ctx, exceptionVal);
+      rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, rb_errorMessage));
     }
     else
     {
       const char *errorMessage = JS_ToCString(ctx, exceptionVal);
 
-      rb_raise(rb_eRuntimeError, "%s", errorMessage);
+      VALUE rb_errorMessage = rb_sprintf("%s", errorMessage);
       JS_FreeCString(ctx, errorMessage);
+      JS_FreeValue(ctx, exceptionVal);
+      rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, rb_errorMessage));
     }
-
-    JS_FreeValue(ctx, exceptionVal);
     return Qnil;
   }
   case JS_TAG_BIG_INT:
@@ -391,8 +399,8 @@ static VALUE vm_m_defineGlobalFunction(VALUE self, VALUE r_name)
 
     JSValue codeResult = JS_Eval(data->context, result, strlen(result), "<vm>", JS_EVAL_TYPE_MODULE);
 
-    JS_FreeValue(data->context, codeResult);
     free(result);
+    JS_FreeValue(data->context, codeResult);
     return rb_funcall(r_name, rb_intern("to_sym"), 0, NULL);
   }
 
@@ -405,10 +413,6 @@ static VALUE vm_m_dispose(VALUE self)
   TypedData_Get_Struct(self, VMData, &vm_type, data);
 
   JSRuntime *runtime = JS_GetRuntime(data->context);
-  JS_SetInterruptHandler(runtime, NULL, NULL);
-  js_std_free_handlers(runtime);
-  JS_FreeContext(data->context);
-  JS_FreeRuntime(runtime);
   data->defined_functions = Qnil;
   data->alive = 0;
 
