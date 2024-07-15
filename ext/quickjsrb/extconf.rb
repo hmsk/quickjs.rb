@@ -11,7 +11,6 @@ $srcs = [
   'cutils.c',
   'quickjs.c',
   'quickjs-libc.c',
-  'procs.c',
   'quickjsrb.c',
 ]
 

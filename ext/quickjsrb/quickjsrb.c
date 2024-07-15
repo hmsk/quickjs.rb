@@ -8,13 +8,15 @@ typedef struct EvalTime {
 typedef struct VMData {
   char alive;
   struct JSContext *context;
-  struct ProcEntryMap *procs;
+  VALUE defined_functions;
   struct EvalTime *eval_time;
 } VMData;
 
-void vm_free(void* data)
+void vm_free(void* ptr)
 {
-  free(data);
+  VMData *data = (VMData *)ptr;
+  free(data->eval_time);
+  xfree(ptr);
 }
 
 size_t vm_size(const void* data)
@@ -22,10 +24,16 @@ size_t vm_size(const void* data)
   return sizeof(data);
 }
 
+static void vm_mark(void *ptr)
+{
+  VMData *data = (VMData *)ptr;
+  rb_gc_mark_movable(data->defined_functions);
+}
+
 static const rb_data_type_t vm_type = {
   .wrap_struct_name = "vm",
   .function = {
-    .dmark = NULL,
+    .dmark = vm_mark,
     .dfree = vm_free,
     .dsize = vm_size,
   },
@@ -36,7 +44,13 @@ static const rb_data_type_t vm_type = {
 VALUE vm_alloc(VALUE self)
 {
   VMData *data;
-  return TypedData_Make_Struct(self, VMData, &vm_type, data);
+  VALUE obj = TypedData_Make_Struct(self, VMData, &vm_type, data);
+  data->defined_functions = rb_hash_new();
+
+  EvalTime *eval_time = malloc(sizeof(EvalTime));
+  data->eval_time = eval_time;
+
+  return obj;
 }
 
 VALUE rb_mQuickjs;
@@ -199,7 +213,7 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   const char *funcName = JS_ToCString(ctx, maybeFuncName);
   JS_FreeValue(ctx, maybeFuncName);
 
-  VALUE proc = get_proc(data->procs, funcName);
+  VALUE proc = rb_hash_aref(data->defined_functions, rb_str_new2(funcName));
   if (proc == Qnil) { // Shouldn't happen
     return JS_ThrowReferenceError(ctx, "Proc `%s` is not defined", funcName);
   }
@@ -229,10 +243,6 @@ VALUE vm_m_initialize(int argc, VALUE* argv, VALUE self)
 
   JSRuntime *runtime = JS_NewRuntime();
   data->context = JS_NewContext(runtime);
-  data->procs = create_proc_entries();
-
-  EvalTime *eval_time = malloc(sizeof(EvalTime));
-  data->eval_time = eval_time;
   data->eval_time->limit = (clock_t)(CLOCKS_PER_SEC * NUM2UINT(r_timeout_msec) / 1000);
   data->alive = 1;
   JS_SetContextOpaque(data->context, data);
@@ -315,7 +325,7 @@ VALUE vm_m_defineGlobalFunction(VALUE self, VALUE r_name)
 
     char *funcName = StringValueCStr(r_name);
 
-    set_proc(data->procs, funcName, proc);
+    rb_hash_aset(data->defined_functions, r_name, proc);
 
     const char* template = "globalThis.__ruby['%s'] = (...args) => rubyGlobal('%s', args);\nglobalThis['%s'] = globalThis.__ruby['%s'];\n";
     int length = snprintf(NULL, 0, template, funcName, funcName, funcName, funcName);
@@ -340,7 +350,6 @@ VALUE vm_m_dispose(VALUE self)
   JSRuntime *runtime = JS_GetRuntime(data->context);
   JS_SetInterruptHandler(runtime, NULL, NULL);
   js_std_free_handlers(runtime);
-  free_proc_entry_map(data->procs);
   JS_FreeContext(data->context);
   JS_FreeRuntime(runtime);
   data->alive = 0;

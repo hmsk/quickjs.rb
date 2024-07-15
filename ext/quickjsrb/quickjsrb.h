@@ -12,6 +12,4 @@
 #include <string.h>
 #include <time.h>
 
-#include "procs.h"
-
 #endif /* QUICKJSRB_H */
