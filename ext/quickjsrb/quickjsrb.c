@@ -74,6 +74,7 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value) {
       JSValue stringified = JS_Call(ctx, numberClass, JS_UNDEFINED, 1, &j_str);
       JS_FreeValue(ctx, global);
       JS_FreeValue(ctx, numberClass);
+      JS_FreeValue(ctx, j_str);
 
       return stringified;
     }
@@ -102,8 +103,9 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value) {
       JSValue j_str = JS_NewString(ctx, str);
       JSValue stringified = JS_Call(ctx, parseFunc, jsonClass, 1, &j_str);
       JS_FreeValue(ctx, global);
-      JS_FreeValue(ctx, parseFunc);
       JS_FreeValue(ctx, jsonClass);
+      JS_FreeValue(ctx, parseFunc);
+      JS_FreeValue(ctx, j_str);
 
       return stringified;
     }
