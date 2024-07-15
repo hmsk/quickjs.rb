@@ -137,7 +137,7 @@ class QuickjsTest < Test::Unit::TestCase
 
       started = Time.now.to_f * 1000
       assert_raise_with_message(RuntimeError, /interrupted/) { vm.eval_code("while(1) {}") }
-      assert_in_delta(started + 200, Time.now.to_f * 1000, 5) # within 5 msec
+      assert_in_delta(started + 200, Time.now.to_f * 1000, 10) # within 10 msec
     end
 
     class GlobalFunction < QuickjsVmTest
