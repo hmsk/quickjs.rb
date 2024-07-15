@@ -12,7 +12,7 @@ typedef struct VMData {
   struct EvalTime *eval_time;
 } VMData;
 
-void vm_free(void* ptr)
+static void vm_free(void* ptr)
 {
   VMData *data = (VMData *)ptr;
   free(data->eval_time);
@@ -41,7 +41,7 @@ static const rb_data_type_t vm_type = {
   .flags = RUBY_TYPED_FREE_IMMEDIATELY,
 };
 
-VALUE vm_alloc(VALUE self)
+static VALUE vm_alloc(VALUE self)
 {
   VMData *data;
   VALUE obj = TypedData_Make_Struct(self, VMData, &vm_type, data);
@@ -232,7 +232,7 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   return to_js_value(ctx, r_result);
 }
 
-VALUE vm_m_initialize(int argc, VALUE* argv, VALUE self)
+static VALUE vm_m_initialize(int argc, VALUE* argv, VALUE self)
 {
   VALUE r_opts;
   rb_scan_args(argc, argv, ":", &r_opts);
@@ -301,7 +301,7 @@ static int interrupt_handler(JSRuntime *runtime, void *opaque) {
 	return clock() >= eval_time->started_at + eval_time->limit ? 1 : 0;
 }
 
-VALUE vm_m_evalCode(VALUE self, VALUE r_code)
+static VALUE vm_m_evalCode(VALUE self, VALUE r_code)
 {
   VMData *data;
   TypedData_Get_Struct(self, VMData, &vm_type, data);
@@ -322,7 +322,7 @@ VALUE vm_m_evalCode(VALUE self, VALUE r_code)
   return result;
 }
 
-VALUE vm_m_defineGlobalFunction(VALUE self, VALUE r_name)
+static VALUE vm_m_defineGlobalFunction(VALUE self, VALUE r_name)
 {
   rb_need_block();
 
@@ -351,7 +351,7 @@ VALUE vm_m_defineGlobalFunction(VALUE self, VALUE r_name)
   return Qnil;
 }
 
-VALUE vm_m_dispose(VALUE self)
+static VALUE vm_m_dispose(VALUE self)
 {
   VMData *data;
   TypedData_Get_Struct(self, VMData, &vm_type, data);
