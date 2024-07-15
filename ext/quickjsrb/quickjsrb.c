@@ -31,7 +31,7 @@ static void vm_mark(void *ptr)
 }
 
 static const rb_data_type_t vm_type = {
-  .wrap_struct_name = "vm",
+  .wrap_struct_name = "quickjsvm",
   .function = {
     .dmark = vm_mark,
     .dfree = vm_free,
