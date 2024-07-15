@@ -52,6 +52,9 @@ static VALUE vm_alloc(VALUE self)
   EvalTime *eval_time = malloc(sizeof(EvalTime));
   data->eval_time = eval_time;
 
+  JSRuntime *runtime = JS_NewRuntime();
+  data->context = JS_NewContext(runtime);
+
   return obj;
 }
 
@@ -156,6 +159,7 @@ VALUE to_rb_value(JSValue jsv, JSContext *ctx)
     JSValue maybeString = JS_ToString(ctx, jsv);
     const char *msg = JS_ToCString(ctx, maybeString);
     JS_FreeValue(ctx, maybeString);
+    JS_FreeCString(ctx, msg);
     return rb_str_new2(msg);
   }
   case JS_TAG_OBJECT:
@@ -185,6 +189,7 @@ VALUE to_rb_value(JSValue jsv, JSContext *ctx)
 
     const char *msg = JS_ToCString(ctx, strigified);
     VALUE rbString = rb_str_new2(msg);
+    JS_FreeCString(ctx, msg);
 
     JS_FreeValue(ctx, global);
     JS_FreeValue(ctx, strigified);
@@ -212,12 +217,15 @@ VALUE to_rb_value(JSValue jsv, JSContext *ctx)
       JS_FreeValue(ctx, jsErrorClassName);
 
       rb_raise(rb_eRuntimeError, "%s: %s", errorClassName, errorClassMessage);
+      JS_FreeCString(ctx, errorClassName);
+      JS_FreeCString(ctx, errorClassMessage);
     }
     else
     {
       const char *errorMessage = JS_ToCString(ctx, exceptionVal);
 
       rb_raise(rb_eRuntimeError, "%s", errorMessage);
+      JS_FreeCString(ctx, errorMessage);
     }
 
     JS_FreeValue(ctx, exceptionVal);
@@ -230,8 +238,9 @@ VALUE to_rb_value(JSValue jsv, JSContext *ctx)
 
     const char *msg = JS_ToCString(ctx, strigified);
     VALUE rbString = rb_str_new2(msg);
-    JS_FreeValue(ctx, strigified);
     JS_FreeValue(ctx, toStringFunc);
+    JS_FreeValue(ctx, strigified);
+    JS_FreeCString(ctx, msg);
 
     return rb_funcall(rbString, rb_intern("to_i"), 0, NULL);
   }
@@ -255,6 +264,7 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   { // Shouldn't happen
     return JS_ThrowReferenceError(ctx, "Proc `%s` is not defined", funcName);
   }
+  JS_FreeCString(ctx, funcName);
 
   // TODO: cover timeout for calling proc
   VALUE r_result = rb_apply(proc, rb_intern("call"), to_rb_value(argv[1], ctx));
@@ -284,11 +294,10 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE self)
   VMData *data;
   TypedData_Get_Struct(self, VMData, &vm_type, data);
 
-  JSRuntime *runtime = JS_NewRuntime();
-  data->context = JS_NewContext(runtime);
   data->eval_time->limit = (clock_t)(CLOCKS_PER_SEC * NUM2UINT(r_timeout_msec) / 1000);
   data->alive = 1;
   JS_SetContextOpaque(data->context, data);
+  JSRuntime *runtime = JS_GetRuntime(data->context);
 
   JS_SetMemoryLimit(runtime, NUM2UINT(r_memoryLimit));
   JS_SetMaxStackSize(runtime, NUM2UINT(r_maxStackSize));
@@ -400,6 +409,7 @@ static VALUE vm_m_dispose(VALUE self)
   js_std_free_handlers(runtime);
   JS_FreeContext(data->context);
   JS_FreeRuntime(runtime);
+  data->defined_functions = Qnil;
   data->alive = 0;
 
   return Qnil;
