@@ -8,7 +8,6 @@ typedef struct EvalTime
 
 typedef struct VMData
 {
-  char alive;
   struct JSContext *context;
   VALUE defined_functions;
   struct EvalTime *eval_time;
@@ -303,7 +302,6 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE self)
   TypedData_Get_Struct(self, VMData, &vm_type, data);
 
   data->eval_time->limit = (clock_t)(CLOCKS_PER_SEC * NUM2UINT(r_timeout_msec) / 1000);
-  data->alive = 1;
   JS_SetContextOpaque(data->context, data);
   JSRuntime *runtime = JS_GetRuntime(data->context);
 
@@ -360,12 +358,6 @@ static VALUE vm_m_evalCode(VALUE self, VALUE r_code)
   VMData *data;
   TypedData_Get_Struct(self, VMData, &vm_type, data);
 
-  if (data->alive < 1)
-  {
-    rb_raise(rb_eRuntimeError, "Quickjs::VM was disposed");
-    return Qnil;
-  }
-
   data->eval_time->started_at = clock();
   JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
 
@@ -407,18 +399,6 @@ static VALUE vm_m_defineGlobalFunction(VALUE self, VALUE r_name)
   return Qnil;
 }
 
-static VALUE vm_m_dispose(VALUE self)
-{
-  VMData *data;
-  TypedData_Get_Struct(self, VMData, &vm_type, data);
-
-  JSRuntime *runtime = JS_GetRuntime(data->context);
-  data->defined_functions = Qnil;
-  data->alive = 0;
-
-  return Qnil;
-}
-
 RUBY_FUNC_EXPORTED void
 Init_quickjsrb(void)
 {
@@ -435,5 +415,4 @@ Init_quickjsrb(void)
   rb_define_method(vmClass, "initialize", vm_m_initialize, -1);
   rb_define_method(vmClass, "eval_code", vm_m_evalCode, 1);
   rb_define_method(vmClass, "define_function", vm_m_defineGlobalFunction, 1);
-  rb_define_method(vmClass, "dispose!", vm_m_dispose, 0);
 }

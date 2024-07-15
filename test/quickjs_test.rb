@@ -98,12 +98,6 @@ class QuickjsTest < Test::Unit::TestCase
         assert_equal(@vm.eval_code('a.b'), "d")
       end
 
-      test "raises if eval_code is called after disposing" do
-        @vm.eval_code('const a = { b: "c" };')
-        @vm.dispose!
-        assert_raise_with_message(RuntimeError, /disposed/) { @vm.eval_code('a.b = "d"') }
-      end
-
       test "does not enable std/os module as default" do
         assert_equal(@vm.eval_code("typeof std === 'undefined'"), true)
         assert_equal(@vm.eval_code("typeof os === 'undefined'"), true)
@@ -148,7 +142,7 @@ class QuickjsTest < Test::Unit::TestCase
 
     class GlobalFunction < QuickjsVmTest
       setup { @vm = Quickjs::VM.new }
-      teardown { @vm.dispose!; @vm = nil }
+      teardown { @vm = nil }
 
       [
         {

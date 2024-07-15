@@ -96,12 +96,6 @@ vm = Quickjs::VM.new(
 )
 ```
 
-#### Dispose VM explicitly
-
-```rb
-vm.dispose!
-```
-
 #### Define a global function for JS
 
 ```rb
