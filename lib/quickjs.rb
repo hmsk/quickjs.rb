@@ -6,7 +6,10 @@ require_relative "quickjs/quickjsrb"
 
 module Quickjs
   def eval_code(code, overwrite_opts = {})
-    Quickjs::VM.new(**overwrite_opts).eval_code(code)
+    vm = Quickjs::VM.new(**overwrite_opts)
+    res = vm.eval_code(code)
+    vm = nil
+    res
   end
   module_function :eval_code
 end
