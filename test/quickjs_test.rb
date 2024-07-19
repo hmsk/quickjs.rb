@@ -29,6 +29,7 @@ class QuickjsTest < Test::Unit::TestCase
 
     test "string becomes String" do
       assert_code("'1'", "1")
+      assert_code("const promise = new Promise((res) => { res('awaited yo') });await promise", "awaited yo")
     end
 
     test "number for integer becomes Integer" do
@@ -60,19 +61,20 @@ class QuickjsTest < Test::Unit::TestCase
     end
   end
 
-  test "throws an exception transparently" do
-    assert_raise_with_message(RuntimeError, /SyntaxError:/) { ::Quickjs.eval_code("}{") }
-  end
+  class Exceptions < QuickjsTest
+    test "throws an exception transparently" do
+      assert_raise_with_message(RuntimeError, /SyntaxError:/) { ::Quickjs.eval_code("}{") }
+    end
 
-  test "returns Promise (resolved) with awaiting result automatically" do
-    pend 'Handling Promise is still leaking memory' # TODO: FIXME
-    assert_code("const promise = new Promise((res) => { res('awaited yo') });promise", "awaited yo")
-  end
+    test "throws is awaited Promise is rejected" do
+      assert_raise_with_message(RuntimeError, /asynchronously sad/) do
+        ::Quickjs.eval_code("const promise = new Promise((res) => { throw 'asynchronously sad' });await promise")
+      end
+    end
 
-  test "returns Promise (rejected) with awaiting result automatically" do
-    pend 'Handling Promise is still leaking memory' # TODO: FIXME
-    assert_raise_with_message(RuntimeError, /asynchronously sad/) do
-      ::Quickjs.eval_code("const promise = new Promise((res) => { throw 'asynchronously sad' });promise")
+    test "throws an exception if promise instance is returned" do
+      pend "not implemented yet"
+      assert_code("const promise = new Promise((res) => { res('awaited yo') });await promise", "awaited yo")
     end
   end
 
@@ -138,6 +140,14 @@ class QuickjsTest < Test::Unit::TestCase
       started = Time.now.to_f * 1000
       assert_raise_with_message(RuntimeError, /interrupted/) { vm.eval_code("while(1) {}") }
       assert_in_delta(started + 200, Time.now.to_f * 1000, 10) # within 10 msec
+    end
+
+    test "can enable setTimeout selectively" do
+      pend "should timeout"
+      vm = Quickjs::VM.new(features: [::Quickjs::MODULE_OS])
+      vm.eval_code('const longProcess = () => { const pro = new Promise((res) => os.setTimeout(() => res(), 5000)); return pro; }')
+
+      assert_raise_with_message(RuntimeError, /interrupted/) { vm.eval_code("await longProcess()") }
     end
 
     class GlobalFunction < QuickjsVmTest
