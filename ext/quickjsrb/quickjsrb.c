@@ -69,6 +69,7 @@ const char *nanId = "NaN";
 
 const char *featureStdId = "feature_std";
 const char *featureOsId = "feature_os";
+const char *featureOsTimeoutId = "feature_os_timeout";
 
 JSValue to_js_value(JSContext *ctx, VALUE r_value)
 {
@@ -324,6 +325,15 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE self)
     JSValue osEval = JS_Eval(data->context, enableOs, strlen(enableOs), "<vm>", JS_EVAL_TYPE_MODULE);
     JS_FreeValue(data->context, osEval);
   }
+  else if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, ID2SYM(rb_intern(featureOsTimeoutId)))))
+  {
+    js_init_module_os(data->context, "_os"); // Better if this is limited just only for setTimeout and clearTimeout
+    const char *enableTimeout = "import * as _os from '_os';\n"
+                                "globalThis.setTimeout = _os.setTimeout;\n"
+                                "globalThis.clearTimeout = _os.clearTimeout;\n";
+    JSValue timeoutEval = JS_Eval(data->context, enableTimeout, strlen(enableTimeout), "<vm>", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(data->context, timeoutEval);
+  }
 
   const char *setupGlobalRuby = "globalThis.__ruby = {};\n";
   JSValue rubyEval = JS_Eval(data->context, setupGlobalRuby, strlen(setupGlobalRuby), "<vm>", JS_EVAL_TYPE_MODULE);
@@ -408,6 +418,7 @@ Init_quickjsrb(void)
   rb_mQuickjs = rb_define_module("Quickjs");
   rb_define_const(rb_mQuickjs, "MODULE_STD", ID2SYM(rb_intern(featureStdId)));
   rb_define_const(rb_mQuickjs, "MODULE_OS", ID2SYM(rb_intern(featureOsId)));
+  rb_define_const(rb_mQuickjs, "FEATURES_TIMEOUT", ID2SYM(rb_intern(featureOsTimeoutId)));
 
   VALUE valueClass = rb_define_class_under(rb_mQuickjs, "Value", rb_cObject);
   rb_define_const(valueClass, "UNDEFINED", ID2SYM(rb_intern(undefinedId)));

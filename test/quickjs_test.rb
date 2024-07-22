@@ -89,6 +89,12 @@ class QuickjsTest < Test::Unit::TestCase
     assert_equal(::Quickjs.eval_code("!!os.kill", { features: [::Quickjs::MODULE_OS] }), true)
   end
 
+  test "js timeout funcs can be injected" do
+    assert_code("typeof setTimeout === 'undefined'", true)
+    assert_code("typeof clearTimeout === 'undefined'", true)
+    assert_equal(::Quickjs.eval_code("!!setTimeout && !!clearTimeout", { features: [::Quickjs::FEATURES_TIMEOUT] }), true)
+  end
+
   class QuickjsVmTest < Test::Unit::TestCase
     class WithPlainVM < QuickjsVmTest
       setup { @vm = Quickjs::VM.new }
