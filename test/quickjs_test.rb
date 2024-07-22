@@ -232,7 +232,6 @@ class QuickjsTest < Test::Unit::TestCase
       end
 
       test "global timeout still works" do
-        pend 'apply timeout for evaluating proc'
         @vm.define_function("infinite") { loop {} }
         assert_raise_with_message(RuntimeError, /interrupted/) { @vm.eval_code("infinite();") }
       end

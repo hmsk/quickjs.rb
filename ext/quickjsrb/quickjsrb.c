@@ -73,6 +73,17 @@ const char *featureOsTimeoutId = "feature_os_timeout";
 
 JSValue to_js_value(JSContext *ctx, VALUE r_value)
 {
+  VALUE r_isException = rb_funcall(r_value, rb_intern("is_a?"), 1, rb_const_get(rb_cClass, rb_intern("Exception")));
+  if (RTEST(r_isException))
+  {
+    VALUE r_str = rb_funcall(r_value, rb_intern("message"), 0, NULL);
+    char *str = StringValueCStr(r_str);
+    JSValue j_error = JS_NewError(ctx);
+    JSValue j_str = JS_NewString(ctx, str);
+    JS_SetPropertyStr(ctx, j_error, "message", j_str);
+    return JS_Throw(ctx, j_error);
+  }
+
   switch (TYPE(r_value))
   {
   case T_NIL:
@@ -263,8 +274,8 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   }
   JS_FreeCString(ctx, funcName);
 
-  // TODO: cover timeout for calling proc
-  VALUE r_result = rb_apply(proc, rb_intern("call"), to_rb_value(argv[1], ctx));
+  VALUE r_result = rb_funcall(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("_with_timeout"), 3, ULONG2NUM(data->eval_time->limit * 1000 / CLOCKS_PER_SEC), proc, to_rb_value(argv[1], ctx));
+
   return to_js_value(ctx, r_result);
 }
 

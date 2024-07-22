@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "timeout"
 require "json"
 require_relative "quickjs/version"
 require_relative "quickjs/quickjsrb"
@@ -12,4 +13,13 @@ module Quickjs
     res
   end
   module_function :eval_code
+
+  def _with_timeout(msec, proc, args)
+    Timeout.timeout(msec / 1_000.0) { proc.call(*args) }
+  rescue Timeout::Error
+    RuntimeError.new('interrupted')
+  rescue => e
+    e
+  end
+  module_function :_with_timeout
 end
