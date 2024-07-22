@@ -56,6 +56,9 @@ Quickjs.eval_code(code, { features: [Quickjs::MODULE_STD] })
 # enable os module
 # https://bellard.org/quickjs/quickjs.html#os-module
 Quickjs.eval_code(code, { features: [Quickjs::MODULE_OS] })
+
+# enable timeout features `setTimeout`, `clearTimeout`
+Quickjs.eval_code(code, { features: [Quickjs::FEATURES_TIMEOUT] })
 ```
 
 ### `Quickjs::VM`: Maintain a consistent VM/runtime
@@ -94,9 +97,14 @@ vm = Quickjs::VM.new(
 vm = Quickjs::VM.new(
   timeout_msec: 1_000,
 )
+
+# enable timeout features `setTimeout`, `clearTimeout`
+vm = Quickjs::VM.new(
+  features: [::Quickjs::FEATURES_TIMEOUT],
+)
 ```
 
-#### Define a global function for JS
+#### ⚡️ Define a global function for JS by Ruby
 
 ```rb
 vm = Quickjs::VM.new
@@ -110,4 +118,5 @@ vm.eval_code("greetingTo('Rick')") #=> 'Hello! Rick'
 ## License
 
 Every file in `ext/quickjsrb/quickjs` is licensed under [the MIT License Copyright 2017-2021 by Fabrice Bellard and Charlie Goron](/ext/quickjsrb/quickjs/LICENSE).
+
 For otherwise, [the MIT License, Copyright 2024 by Kengo Hamasaki](/LICENSE).
