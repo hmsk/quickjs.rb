@@ -73,8 +73,9 @@ class QuickjsTest < Test::Unit::TestCase
     end
 
     test "throws an exception if promise instance is returned" do
-      pend "not implemented yet"
-      assert_code("const promise = new Promise((res) => { res('awaited yo') });await promise", "awaited yo")
+      assert_raise_with_message(RuntimeError, /An unawaited Promise was/) do
+        ::Quickjs.eval_code("const promise = new Promise((res) => { res('awaited yo') });promise")
+      end
     end
   end
 

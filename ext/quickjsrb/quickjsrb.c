@@ -355,11 +355,21 @@ static VALUE vm_m_evalCode(VALUE self, VALUE r_code)
   JSValue codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
   JSValue awaitedResult = js_std_await(data->context, codeResult);
   JSValue returnedValue = JS_GetPropertyStr(data->context, awaitedResult, "value");
-  VALUE result = to_rb_value(returnedValue, data->context);
-
-  JS_FreeValue(data->context, awaitedResult);
-  JS_FreeValue(data->context, returnedValue);
-  return result;
+  if (JS_VALUE_GET_NORM_TAG(returnedValue) == JS_TAG_OBJECT && JS_PromiseState(data->context, returnedValue) != -1)
+  {
+    JS_FreeValue(data->context, returnedValue);
+    JS_FreeValue(data->context, awaitedResult);
+    VALUE rb_errorMessage = rb_str_new2("An unawaited Promise was returned to the top-level");
+    rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, rb_errorMessage));
+    return Qnil;
+  }
+  else
+  {
+    VALUE result = to_rb_value(returnedValue, data->context);
+    JS_FreeValue(data->context, returnedValue);
+    JS_FreeValue(data->context, awaitedResult);
+    return result;
+  }
 }
 
 static VALUE vm_m_defineGlobalFunction(VALUE self, VALUE r_name)
