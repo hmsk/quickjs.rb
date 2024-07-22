@@ -48,10 +48,10 @@ static const rb_data_type_t vm_type = {
     .flags = RUBY_TYPED_FREE_IMMEDIATELY,
 };
 
-static VALUE vm_alloc(VALUE self)
+static VALUE vm_alloc(VALUE r_self)
 {
   VMData *data;
-  VALUE obj = TypedData_Make_Struct(self, VMData, &vm_type, data);
+  VALUE obj = TypedData_Make_Struct(r_self, VMData, &vm_type, data);
   data->defined_functions = rb_hash_new();
 
   EvalTime *eval_time = malloc(sizeof(EvalTime));
@@ -73,8 +73,10 @@ const char *featureOsTimeoutId = "feature_os_timeout";
 
 JSValue to_js_value(JSContext *ctx, VALUE r_value)
 {
-  VALUE r_isException = rb_funcall(r_value, rb_intern("is_a?"), 1, rb_const_get(rb_cClass, rb_intern("Exception")));
-  if (RTEST(r_isException))
+  if (RTEST(rb_funcall(
+          r_value,
+          rb_intern("is_a?"),
+          1, rb_const_get(rb_cClass, rb_intern("Exception")))))
   {
     VALUE r_str = rb_funcall(r_value, rb_intern("message"), 0, NULL);
     char *str = StringValueCStr(r_str);
@@ -93,15 +95,15 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   {
     VALUE r_str = rb_funcall(r_value, rb_intern("to_s"), 0, NULL);
     char *str = StringValueCStr(r_str);
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue numberClass = JS_GetPropertyStr(ctx, global, "Number");
+    JSValue j_global = JS_GetGlobalObject(ctx);
+    JSValue j_numberClass = JS_GetPropertyStr(ctx, j_global, "Number");
     JSValue j_str = JS_NewString(ctx, str);
-    JSValue stringified = JS_Call(ctx, numberClass, JS_UNDEFINED, 1, &j_str);
-    JS_FreeValue(ctx, global);
-    JS_FreeValue(ctx, numberClass);
+    JSValue j_stringified = JS_Call(ctx, j_numberClass, JS_UNDEFINED, 1, &j_str);
+    JS_FreeValue(ctx, j_global);
+    JS_FreeValue(ctx, j_numberClass);
     JS_FreeValue(ctx, j_str);
 
-    return stringified;
+    return j_stringified;
   }
   case T_STRING:
   {
@@ -125,17 +127,17 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   {
     VALUE r_json_str = rb_funcall(r_value, rb_intern("to_json"), 0, NULL);
     char *str = StringValueCStr(r_json_str);
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue jsonClass = JS_GetPropertyStr(ctx, global, "JSON");
-    JSValue parseFunc = JS_GetPropertyStr(ctx, jsonClass, "parse");
+    JSValue j_global = JS_GetGlobalObject(ctx);
+    JSValue j_jsonClass = JS_GetPropertyStr(ctx, j_global, "JSON");
+    JSValue j_parseFunc = JS_GetPropertyStr(ctx, j_jsonClass, "parse");
     JSValue j_str = JS_NewString(ctx, str);
-    JSValue stringified = JS_Call(ctx, parseFunc, jsonClass, 1, &j_str);
-    JS_FreeValue(ctx, global);
-    JS_FreeValue(ctx, jsonClass);
-    JS_FreeValue(ctx, parseFunc);
+    JSValue j_stringified = JS_Call(ctx, j_parseFunc, j_jsonClass, 1, &j_str);
+    JS_FreeValue(ctx, j_global);
+    JS_FreeValue(ctx, j_jsonClass);
+    JS_FreeValue(ctx, j_parseFunc);
     JS_FreeValue(ctx, j_str);
 
-    return stringified;
+    return j_stringified;
   }
   default:
   {
@@ -147,62 +149,62 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   }
 }
 
-VALUE to_rb_value(JSContext *ctx, JSValue jsv)
+VALUE to_rb_value(JSContext *ctx, JSValue j_val)
 {
-  switch (JS_VALUE_GET_NORM_TAG(jsv))
+  switch (JS_VALUE_GET_NORM_TAG(j_val))
   {
   case JS_TAG_INT:
   {
     int int_res = 0;
-    JS_ToInt32(ctx, &int_res, jsv);
+    JS_ToInt32(ctx, &int_res, j_val);
     return INT2NUM(int_res);
   }
   case JS_TAG_FLOAT64:
   {
-    if (JS_VALUE_IS_NAN(jsv))
+    if (JS_VALUE_IS_NAN(j_val))
     {
       return ID2SYM(rb_intern(nanId));
     }
     double double_res;
-    JS_ToFloat64(ctx, &double_res, jsv);
+    JS_ToFloat64(ctx, &double_res, j_val);
     return DBL2NUM(double_res);
   }
   case JS_TAG_BOOL:
   {
-    return JS_ToBool(ctx, jsv) > 0 ? Qtrue : Qfalse;
+    return JS_ToBool(ctx, j_val) > 0 ? Qtrue : Qfalse;
   }
   case JS_TAG_STRING:
   {
-    const char *msg = JS_ToCString(ctx, jsv);
-    VALUE ret = rb_str_new2(msg);
+    const char *msg = JS_ToCString(ctx, j_val);
+    VALUE r_str = rb_str_new2(msg);
     JS_FreeCString(ctx, msg);
-    return ret;
+    return r_str;
   }
   case JS_TAG_OBJECT:
   {
-    int promiseState = JS_PromiseState(ctx, jsv);
+    int promiseState = JS_PromiseState(ctx, j_val);
     if (promiseState != -1)
     {
-      VALUE rb_errorMessage = rb_str_new2("cannot translate a Promise to Ruby. await within JavaScript's end");
-      rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, rb_errorMessage));
+      VALUE r_error_message = rb_str_new2("cannot translate a Promise to Ruby. await within JavaScript's end");
+      rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, r_error_message));
       return Qnil;
     }
 
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue jsonClass = JS_GetPropertyStr(ctx, global, "JSON");
-    JSValue stringifyFunc = JS_GetPropertyStr(ctx, jsonClass, "stringify");
-    JSValue strigified = JS_Call(ctx, stringifyFunc, jsonClass, 1, &jsv);
+    JSValue j_global = JS_GetGlobalObject(ctx);
+    JSValue j_jsonClass = JS_GetPropertyStr(ctx, j_global, "JSON");
+    JSValue j_stringifyFunc = JS_GetPropertyStr(ctx, j_jsonClass, "stringify");
+    JSValue j_strigified = JS_Call(ctx, j_stringifyFunc, j_jsonClass, 1, &j_val);
 
-    const char *msg = JS_ToCString(ctx, strigified);
-    VALUE rbString = rb_str_new2(msg);
+    const char *msg = JS_ToCString(ctx, j_strigified);
+    VALUE r_str = rb_str_new2(msg);
     JS_FreeCString(ctx, msg);
 
-    JS_FreeValue(ctx, global);
-    JS_FreeValue(ctx, strigified);
-    JS_FreeValue(ctx, stringifyFunc);
-    JS_FreeValue(ctx, jsonClass);
+    JS_FreeValue(ctx, j_global);
+    JS_FreeValue(ctx, j_strigified);
+    JS_FreeValue(ctx, j_stringifyFunc);
+    JS_FreeValue(ctx, j_jsonClass);
 
-    return rb_funcall(rb_const_get(rb_cClass, rb_intern("JSON")), rb_intern("parse"), 1, rbString);
+    return rb_funcall(rb_const_get(rb_cClass, rb_intern("JSON")), rb_intern("parse"), 1, r_str);
   }
   case JS_TAG_NULL:
     return Qnil;
@@ -210,47 +212,47 @@ VALUE to_rb_value(JSContext *ctx, JSValue jsv)
     return ID2SYM(rb_intern(undefinedId));
   case JS_TAG_EXCEPTION:
   {
-    JSValue exceptionVal = JS_GetException(ctx);
-    if (JS_IsError(ctx, exceptionVal))
+    JSValue j_exceptionVal = JS_GetException(ctx);
+    if (JS_IsError(ctx, j_exceptionVal))
     {
-      JSValue jsErrorClassName = JS_GetPropertyStr(ctx, exceptionVal, "name");
-      const char *errorClassName = JS_ToCString(ctx, jsErrorClassName);
+      JSValue j_errorClassName = JS_GetPropertyStr(ctx, j_exceptionVal, "name");
+      const char *errorClassName = JS_ToCString(ctx, j_errorClassName);
 
-      JSValue jsErrorClassMessage = JS_GetPropertyStr(ctx, exceptionVal, "message");
-      const char *errorClassMessage = JS_ToCString(ctx, jsErrorClassMessage);
+      JSValue j_errorClassMessage = JS_GetPropertyStr(ctx, j_exceptionVal, "message");
+      const char *errorClassMessage = JS_ToCString(ctx, j_errorClassMessage);
 
-      JS_FreeValue(ctx, jsErrorClassMessage);
-      JS_FreeValue(ctx, jsErrorClassName);
+      JS_FreeValue(ctx, j_errorClassMessage);
+      JS_FreeValue(ctx, j_errorClassName);
 
-      VALUE rb_errorMessage = rb_sprintf("%s: %s", errorClassName, errorClassMessage);
+      VALUE r_error_message = rb_sprintf("%s: %s", errorClassName, errorClassMessage);
       JS_FreeCString(ctx, errorClassName);
       JS_FreeCString(ctx, errorClassMessage);
-      JS_FreeValue(ctx, exceptionVal);
-      rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, rb_errorMessage));
+      JS_FreeValue(ctx, j_exceptionVal);
+      rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, r_error_message));
     }
     else
     {
-      const char *errorMessage = JS_ToCString(ctx, exceptionVal);
+      const char *errorMessage = JS_ToCString(ctx, j_exceptionVal);
+      VALUE r_error_message = rb_sprintf("%s", errorMessage);
 
-      VALUE rb_errorMessage = rb_sprintf("%s", errorMessage);
       JS_FreeCString(ctx, errorMessage);
-      JS_FreeValue(ctx, exceptionVal);
-      rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, rb_errorMessage));
+      JS_FreeValue(ctx, j_exceptionVal);
+      rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, r_error_message));
     }
     return Qnil;
   }
   case JS_TAG_BIG_INT:
   {
-    JSValue toStringFunc = JS_GetPropertyStr(ctx, jsv, "toString");
-    JSValue strigified = JS_Call(ctx, toStringFunc, jsv, 0, NULL);
+    JSValue j_toStringFunc = JS_GetPropertyStr(ctx, j_val, "toString");
+    JSValue j_strigified = JS_Call(ctx, j_toStringFunc, j_val, 0, NULL);
 
-    const char *msg = JS_ToCString(ctx, strigified);
-    VALUE rbString = rb_str_new2(msg);
-    JS_FreeValue(ctx, toStringFunc);
-    JS_FreeValue(ctx, strigified);
+    const char *msg = JS_ToCString(ctx, j_strigified);
+    VALUE r_str = rb_str_new2(msg);
+    JS_FreeValue(ctx, j_toStringFunc);
+    JS_FreeValue(ctx, j_strigified);
     JS_FreeCString(ctx, msg);
 
-    return rb_funcall(rbString, rb_intern("to_i"), 0, NULL);
+    return rb_funcall(r_str, rb_intern("to_i"), 0, NULL);
   }
   case JS_TAG_BIG_FLOAT:
   case JS_TAG_BIG_DECIMAL:
@@ -263,35 +265,41 @@ VALUE to_rb_value(JSContext *ctx, JSValue jsv)
 static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int _argc, JSValueConst *argv)
 {
   VMData *data = JS_GetContextOpaque(ctx);
-  JSValue maybeFuncName = JS_ToString(ctx, argv[0]);
-  const char *funcName = JS_ToCString(ctx, maybeFuncName);
-  JS_FreeValue(ctx, maybeFuncName);
+  JSValue j_maybeFuncName = JS_ToString(ctx, argv[0]);
+  const char *funcName = JS_ToCString(ctx, j_maybeFuncName);
+  JS_FreeValue(ctx, j_maybeFuncName);
 
-  VALUE proc = rb_hash_aref(data->defined_functions, rb_str_new2(funcName));
-  if (proc == Qnil)
+  VALUE r_proc = rb_hash_aref(data->defined_functions, rb_str_new2(funcName));
+  if (r_proc == Qnil)
   { // Shouldn't happen
     return JS_ThrowReferenceError(ctx, "Proc `%s` is not defined", funcName);
   }
   JS_FreeCString(ctx, funcName);
 
-  VALUE r_result = rb_funcall(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("_with_timeout"), 3, ULONG2NUM(data->eval_time->limit * 1000 / CLOCKS_PER_SEC), proc, to_rb_value(ctx, argv[1]));
+  VALUE r_result = rb_funcall(
+      rb_const_get(rb_cClass, rb_intern("Quickjs")),
+      rb_intern("_with_timeout"),
+      3,
+      ULONG2NUM(data->eval_time->limit * 1000 / CLOCKS_PER_SEC),
+      r_proc,
+      to_rb_value(ctx, argv[1]));
 
   return to_js_value(ctx, r_result);
 }
 
-static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE self)
+static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 {
   VALUE r_opts;
   rb_scan_args(argc, argv, ":", &r_opts);
   if (NIL_P(r_opts))
     r_opts = rb_hash_new();
 
-  VALUE r_memoryLimit = rb_hash_aref(r_opts, ID2SYM(rb_intern("memory_limit")));
-  if (NIL_P(r_memoryLimit))
-    r_memoryLimit = UINT2NUM(1024 * 1024 * 128);
-  VALUE r_maxStackSize = rb_hash_aref(r_opts, ID2SYM(rb_intern("max_stack_size")));
-  if (NIL_P(r_maxStackSize))
-    r_maxStackSize = UINT2NUM(1024 * 1024 * 4);
+  VALUE r_memory_limit = rb_hash_aref(r_opts, ID2SYM(rb_intern("memory_limit")));
+  if (NIL_P(r_memory_limit))
+    r_memory_limit = UINT2NUM(1024 * 1024 * 128);
+  VALUE r_max_stack_size = rb_hash_aref(r_opts, ID2SYM(rb_intern("max_stack_size")));
+  if (NIL_P(r_max_stack_size))
+    r_max_stack_size = UINT2NUM(1024 * 1024 * 4);
   VALUE r_features = rb_hash_aref(r_opts, ID2SYM(rb_intern("features")));
   if (NIL_P(r_features))
     r_features = rb_ary_new();
@@ -300,14 +308,14 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE self)
     r_timeout_msec = UINT2NUM(100);
 
   VMData *data;
-  TypedData_Get_Struct(self, VMData, &vm_type, data);
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   data->eval_time->limit = (clock_t)(CLOCKS_PER_SEC * NUM2UINT(r_timeout_msec) / 1000);
   JS_SetContextOpaque(data->context, data);
   JSRuntime *runtime = JS_GetRuntime(data->context);
 
-  JS_SetMemoryLimit(runtime, NUM2UINT(r_memoryLimit));
-  JS_SetMaxStackSize(runtime, NUM2UINT(r_maxStackSize));
+  JS_SetMemoryLimit(runtime, NUM2UINT(r_memory_limit));
+  JS_SetMaxStackSize(runtime, NUM2UINT(r_max_stack_size));
 
   JS_AddIntrinsicBigFloat(data->context);
   JS_AddIntrinsicBigDecimal(data->context);
@@ -323,8 +331,8 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE self)
     js_init_module_std(data->context, "std");
     const char *enableStd = "import * as std from 'std';\n"
                             "globalThis.std = std;\n";
-    JSValue stdEval = JS_Eval(data->context, enableStd, strlen(enableStd), "<vm>", JS_EVAL_TYPE_MODULE);
-    JS_FreeValue(data->context, stdEval);
+    JSValue j_stdEval = JS_Eval(data->context, enableStd, strlen(enableStd), "<vm>", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(data->context, j_stdEval);
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, ID2SYM(rb_intern(featureOsId)))))
@@ -332,8 +340,8 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE self)
     js_init_module_os(data->context, "os");
     const char *enableOs = "import * as os from 'os';\n"
                            "globalThis.os = os;\n";
-    JSValue osEval = JS_Eval(data->context, enableOs, strlen(enableOs), "<vm>", JS_EVAL_TYPE_MODULE);
-    JS_FreeValue(data->context, osEval);
+    JSValue j_osEval = JS_Eval(data->context, enableOs, strlen(enableOs), "<vm>", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(data->context, j_osEval);
   }
   else if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, ID2SYM(rb_intern(featureOsTimeoutId)))))
   {
@@ -341,20 +349,20 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE self)
     const char *enableTimeout = "import * as _os from '_os';\n"
                                 "globalThis.setTimeout = _os.setTimeout;\n"
                                 "globalThis.clearTimeout = _os.clearTimeout;\n";
-    JSValue timeoutEval = JS_Eval(data->context, enableTimeout, strlen(enableTimeout), "<vm>", JS_EVAL_TYPE_MODULE);
-    JS_FreeValue(data->context, timeoutEval);
+    JSValue j_timeoutEval = JS_Eval(data->context, enableTimeout, strlen(enableTimeout), "<vm>", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(data->context, j_timeoutEval);
   }
 
   const char *setupGlobalRuby = "globalThis.__ruby = {};\n";
-  JSValue rubyEval = JS_Eval(data->context, setupGlobalRuby, strlen(setupGlobalRuby), "<vm>", JS_EVAL_TYPE_MODULE);
-  JS_FreeValue(data->context, rubyEval);
+  JSValue j_rubyEval = JS_Eval(data->context, setupGlobalRuby, strlen(setupGlobalRuby), "<vm>", JS_EVAL_TYPE_MODULE);
+  JS_FreeValue(data->context, j_rubyEval);
 
-  JSValue global = JS_GetGlobalObject(data->context);
-  JSValue func = JS_NewCFunction(data->context, js_quickjsrb_call_global, "rubyGlobal", 2);
-  JS_SetPropertyStr(data->context, global, "rubyGlobal", func);
-  JS_FreeValue(data->context, global);
+  JSValue j_global = JS_GetGlobalObject(data->context);
+  JSValue j_func = JS_NewCFunction(data->context, js_quickjsrb_call_global, "rubyGlobal", 2);
+  JS_SetPropertyStr(data->context, j_global, "rubyGlobal", j_func);
+  JS_FreeValue(data->context, j_global);
 
-  return self;
+  return r_self;
 }
 
 static int interrupt_handler(JSRuntime *runtime, void *opaque)
@@ -363,60 +371,59 @@ static int interrupt_handler(JSRuntime *runtime, void *opaque)
   return clock() >= eval_time->started_at + eval_time->limit ? 1 : 0;
 }
 
-static VALUE vm_m_evalCode(VALUE self, VALUE r_code)
+static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
 {
   VMData *data;
-  TypedData_Get_Struct(self, VMData, &vm_type, data);
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   data->eval_time->started_at = clock();
   JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
 
   char *code = StringValueCStr(r_code);
-  JSValue codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
-  JSValue awaitedResult = js_std_await(data->context, codeResult);
-  JSValue returnedValue = JS_GetPropertyStr(data->context, awaitedResult, "value");
+  JSValue j_codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
+  JSValue j_awaitedResult = js_std_await(data->context, j_codeResult);
+  JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
   // Do this by rescuing to_rb_value
-  if (JS_VALUE_GET_NORM_TAG(returnedValue) == JS_TAG_OBJECT && JS_PromiseState(data->context, returnedValue) != -1)
+  if (JS_VALUE_GET_NORM_TAG(j_returnedValue) == JS_TAG_OBJECT && JS_PromiseState(data->context, j_returnedValue) != -1)
   {
-    JS_FreeValue(data->context, returnedValue);
-    JS_FreeValue(data->context, awaitedResult);
-    VALUE rb_errorMessage = rb_str_new2("An unawaited Promise was returned to the top-level");
-    rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, rb_errorMessage));
+    JS_FreeValue(data->context, j_returnedValue);
+    JS_FreeValue(data->context, j_awaitedResult);
+    VALUE r_error_message = rb_str_new2("An unawaited Promise was returned to the top-level");
+    rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, r_error_message));
     return Qnil;
   }
   else
   {
-    VALUE result = to_rb_value(data->context, returnedValue);
-    JS_FreeValue(data->context, returnedValue);
-    JS_FreeValue(data->context, awaitedResult);
+    VALUE result = to_rb_value(data->context, j_returnedValue);
+    JS_FreeValue(data->context, j_returnedValue);
+    JS_FreeValue(data->context, j_awaitedResult);
     return result;
   }
 }
 
-static VALUE vm_m_defineGlobalFunction(VALUE self, VALUE r_name)
+static VALUE vm_m_defineGlobalFunction(VALUE r_self, VALUE r_name)
 {
   rb_need_block();
 
   VMData *data;
-  TypedData_Get_Struct(self, VMData, &vm_type, data);
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   if (rb_block_given_p())
   {
-    VALUE proc = rb_block_proc();
-
+    VALUE r_proc = rb_block_proc();
+    rb_hash_aset(data->defined_functions, r_name, r_proc);
     char *funcName = StringValueCStr(r_name);
 
-    rb_hash_aset(data->defined_functions, r_name, proc);
-
-    const char *template = "globalThis.__ruby['%s'] = (...args) => rubyGlobal('%s', args);\nglobalThis['%s'] = globalThis.__ruby['%s'];\n";
+    const char *template = "globalThis.__ruby['%s'] = (...args) => rubyGlobal('%s', args);\n"
+                           "globalThis['%s'] = globalThis.__ruby['%s'];\n";
     int length = snprintf(NULL, 0, template, funcName, funcName, funcName, funcName);
     char *result = (char *)malloc(length + 1);
     snprintf(result, length + 1, template, funcName, funcName, funcName, funcName);
 
-    JSValue codeResult = JS_Eval(data->context, result, strlen(result), "<vm>", JS_EVAL_TYPE_MODULE);
+    JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), "<vm>", JS_EVAL_TYPE_MODULE);
 
     free(result);
-    JS_FreeValue(data->context, codeResult);
+    JS_FreeValue(data->context, j_codeResult);
     return rb_funcall(r_name, rb_intern("to_sym"), 0, NULL);
   }
 
