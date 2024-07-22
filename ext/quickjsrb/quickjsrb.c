@@ -172,10 +172,9 @@ VALUE to_rb_value(JSValue jsv, JSContext *ctx)
     int promiseState = JS_PromiseState(ctx, jsv);
     if (promiseState != -1)
     {
-      JSValue awaited = js_std_await(ctx, jsv);
-      VALUE rb_awaited = to_rb_value(awaited, ctx); // TODO: should have timeout
-      JS_FreeValue(ctx, awaited);
-      return rb_awaited;
+      VALUE rb_errorMessage = rb_str_new2("cannot translate a Promise to Ruby. await within JavaScript's end");
+      rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, rb_errorMessage));
+      return Qnil;
     }
 
     JSValue global = JS_GetGlobalObject(ctx);
@@ -365,6 +364,7 @@ static VALUE vm_m_evalCode(VALUE self, VALUE r_code)
   JSValue codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
   JSValue awaitedResult = js_std_await(data->context, codeResult);
   JSValue returnedValue = JS_GetPropertyStr(data->context, awaitedResult, "value");
+  // Do this by rescuing to_rb_value
   if (JS_VALUE_GET_NORM_TAG(returnedValue) == JS_TAG_OBJECT && JS_PromiseState(data->context, returnedValue) != -1)
   {
     JS_FreeValue(data->context, returnedValue);
