@@ -147,7 +147,7 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   }
 }
 
-VALUE to_rb_value(JSValue jsv, JSContext *ctx)
+VALUE to_rb_value(JSContext *ctx, JSValue jsv)
 {
   switch (JS_VALUE_GET_NORM_TAG(jsv))
   {
@@ -274,7 +274,7 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   }
   JS_FreeCString(ctx, funcName);
 
-  VALUE r_result = rb_funcall(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("_with_timeout"), 3, ULONG2NUM(data->eval_time->limit * 1000 / CLOCKS_PER_SEC), proc, to_rb_value(argv[1], ctx));
+  VALUE r_result = rb_funcall(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("_with_timeout"), 3, ULONG2NUM(data->eval_time->limit * 1000 / CLOCKS_PER_SEC), proc, to_rb_value(ctx, argv[1]));
 
   return to_js_value(ctx, r_result);
 }
@@ -386,7 +386,7 @@ static VALUE vm_m_evalCode(VALUE self, VALUE r_code)
   }
   else
   {
-    VALUE result = to_rb_value(returnedValue, data->context);
+    VALUE result = to_rb_value(data->context, returnedValue);
     JS_FreeValue(data->context, returnedValue);
     JS_FreeValue(data->context, awaitedResult);
     return result;
