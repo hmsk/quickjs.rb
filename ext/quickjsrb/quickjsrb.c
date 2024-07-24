@@ -64,6 +64,7 @@ static VALUE vm_alloc(VALUE r_self)
 }
 
 VALUE rb_mQuickjs;
+VALUE rb_cQuickjsSyntaxError, rb_cQuickjsRuntimeError, rb_cQuickjsInterruptedError, rb_cQuickjsNoAwaitError;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
 
@@ -78,11 +79,13 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
           rb_intern("is_a?"),
           1, rb_const_get(rb_cClass, rb_intern("Exception")))))
   {
-    VALUE r_str = rb_funcall(r_value, rb_intern("message"), 0, NULL);
-    char *str = StringValueCStr(r_str);
     JSValue j_error = JS_NewError(ctx);
-    JSValue j_str = JS_NewString(ctx, str);
-    JS_SetPropertyStr(ctx, j_error, "message", j_str);
+    VALUE r_str = rb_funcall(r_value, rb_intern("message"), 0, NULL);
+    char *exceptionMessage = StringValueCStr(r_str);
+    VALUE r_exception_name = rb_funcall(rb_funcall(r_value, rb_intern("class"), 0, NULL), rb_intern("name"), 0, NULL);
+    char *exceptionName = StringValueCStr(r_exception_name);
+    JS_SetPropertyStr(ctx, j_error, "name", JS_NewString(ctx, exceptionName));
+    JS_SetPropertyStr(ctx, j_error, "message", JS_NewString(ctx, exceptionMessage));
     return JS_Throw(ctx, j_error);
   }
 
@@ -225,19 +228,37 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       JS_FreeValue(ctx, j_errorClassName);
 
       VALUE r_error_message = rb_sprintf("%s: %s", errorClassName, errorClassMessage);
+      VALUE r_error_class = rb_eRuntimeError;
+
+      if (strcmp(errorClassName, "SyntaxError") == 0)
+      {
+        r_error_class = rb_cQuickjsSyntaxError;
+        r_error_message = rb_str_new2(errorClassMessage);
+      }
+      else if (strcmp(errorClassName, "InternalError") == 0 && strstr(errorClassMessage, "interrupted") != NULL)
+      {
+        r_error_class = rb_cQuickjsInterruptedError;
+        r_error_message = rb_str_new2("Code evaluation is interrupted by the timeout or something");
+      }
+      else if (strcmp(errorClassName, "Quickjs::InterruptedError") == 0)
+      {
+        r_error_class = rb_cQuickjsInterruptedError;
+        r_error_message = rb_str_new2(errorClassMessage);
+      }
       JS_FreeCString(ctx, errorClassName);
       JS_FreeCString(ctx, errorClassMessage);
       JS_FreeValue(ctx, j_exceptionVal);
-      rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, r_error_message));
+
+      rb_exc_raise(rb_exc_new_str(r_error_class, r_error_message));
     }
-    else
+    else // exception without Error object
     {
       const char *errorMessage = JS_ToCString(ctx, j_exceptionVal);
       VALUE r_error_message = rb_sprintf("%s", errorMessage);
 
       JS_FreeCString(ctx, errorMessage);
       JS_FreeValue(ctx, j_exceptionVal);
-      rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, r_error_message));
+      rb_exc_raise(rb_exc_new_str(rb_cQuickjsRuntimeError, r_error_message));
     }
     return Qnil;
   }
@@ -389,7 +410,7 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
     JS_FreeValue(data->context, j_returnedValue);
     JS_FreeValue(data->context, j_awaitedResult);
     VALUE r_error_message = rb_str_new2("An unawaited Promise was returned to the top-level");
-    rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, r_error_message));
+    rb_exc_raise(rb_exc_new_str(rb_cQuickjsNoAwaitError, r_error_message));
     return Qnil;
   }
   else
@@ -447,4 +468,9 @@ Init_quickjsrb(void)
   rb_define_method(vmClass, "initialize", vm_m_initialize, -1);
   rb_define_method(vmClass, "eval_code", vm_m_evalCode, 1);
   rb_define_method(vmClass, "define_function", vm_m_defineGlobalFunction, 1);
+
+  rb_cQuickjsRuntimeError = rb_define_class_under(rb_mQuickjs, "RuntimeError", rb_eRuntimeError);
+  rb_cQuickjsSyntaxError = rb_define_class_under(rb_mQuickjs, "SyntaxError", rb_cQuickjsRuntimeError);
+  rb_cQuickjsInterruptedError = rb_define_class_under(rb_mQuickjs, "InterruptedError", rb_cQuickjsRuntimeError);
+  rb_cQuickjsNoAwaitError = rb_define_class_under(rb_mQuickjs, "NoAwaitError", rb_cQuickjsRuntimeError);
 }

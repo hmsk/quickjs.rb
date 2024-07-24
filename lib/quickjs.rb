@@ -17,7 +17,7 @@ module Quickjs
   def _with_timeout(msec, proc, args)
     Timeout.timeout(msec / 1_000.0) { proc.call(*args) }
   rescue Timeout::Error
-    RuntimeError.new('interrupted')
+    Quickjs::InterruptedError.new('Ruby runtime got timeout')
   rescue => e
     e
   end

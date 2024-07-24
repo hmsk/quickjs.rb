@@ -63,17 +63,17 @@ class QuickjsTest < Test::Unit::TestCase
 
   class Exceptions < QuickjsTest
     test "throws an exception transparently" do
-      assert_raise_with_message(RuntimeError, /SyntaxError:/) { ::Quickjs.eval_code("}{") }
+      assert_raise_with_message(Quickjs::SyntaxError, /unexpected token in/) { ::Quickjs.eval_code("}{") }
     end
 
     test "throws is awaited Promise is rejected" do
-      assert_raise_with_message(RuntimeError, /asynchronously sad/) do
+      assert_raise_with_message(Quickjs::RuntimeError, /asynchronously sad/) do
         ::Quickjs.eval_code("const promise = new Promise((res) => { throw 'asynchronously sad' });await promise")
       end
     end
 
     test "throws an exception if promise instance is returned" do
-      assert_raise_with_message(RuntimeError, /An unawaited Promise was/) do
+      assert_raise_with_message(Quickjs::NoAwaitError, /An unawaited Promise was/) do
         ::Quickjs.eval_code("const promise = new Promise((res) => { res('awaited yo') });promise")
       end
     end
@@ -138,14 +138,14 @@ class QuickjsTest < Test::Unit::TestCase
     test "gets timeout from evaluation" do
       vm = Quickjs::VM.new
 
-      assert_raise_with_message(RuntimeError, /interrupted/) { vm.eval_code("while(1) {}") }
+      assert_raise_with_message(Quickjs::InterruptedError, /timeout/) { vm.eval_code("while(1) {}") }
     end
 
     test "accepts timeout_msec option to control maximum evaluation time" do
       vm = Quickjs::VM.new(timeout_msec: 200)
 
       started = Time.now.to_f * 1000
-      assert_raise_with_message(RuntimeError, /interrupted/) { vm.eval_code("while(1) {}") }
+      assert_raise_with_message(Quickjs::InterruptedError, /timeout/) { vm.eval_code("while(1) {}") }
       assert_in_delta(started + 200, Time.now.to_f * 1000, 10) # within 10 msec
     end
 
@@ -154,7 +154,7 @@ class QuickjsTest < Test::Unit::TestCase
       vm = Quickjs::VM.new(features: [::Quickjs::MODULE_OS])
       vm.eval_code('const longProcess = () => { const pro = new Promise((res) => os.setTimeout(() => res(), 5000)); return pro; }')
 
-      assert_raise_with_message(RuntimeError, /interrupted/) { vm.eval_code("await longProcess()") }
+      assert_raise_with_message(Quickjs::InterruptedError, /timeout/) { vm.eval_code("await longProcess()") }
     end
 
     class GlobalFunction < QuickjsVmTest
@@ -233,7 +233,7 @@ class QuickjsTest < Test::Unit::TestCase
 
       test "global timeout still works" do
         @vm.define_function("infinite") { loop {} }
-        assert_raise_with_message(RuntimeError, /interrupted/) { @vm.eval_code("infinite();") }
+        assert_raise_with_message(Quickjs::InterruptedError, /Ruby runtime got timeout/) { @vm.eval_code("infinite();") }
       end
     end
   end
