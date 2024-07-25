@@ -64,7 +64,7 @@ static VALUE vm_alloc(VALUE r_self)
 }
 
 VALUE rb_mQuickjs;
-VALUE rb_cQuickjsSyntaxError, rb_cQuickjsRuntimeError, rb_cQuickjsInterruptedError, rb_cQuickjsNoAwaitError;
+VALUE rb_cQuickjsSyntaxError, rb_cQuickjsRuntimeError, rb_cQuickjsInterruptedError, rb_cQuickjsNoAwaitError, rb_cQuickjsTypeError, rb_cQuickjsReferenceError, rb_cQuickjsRangeError, rb_cQuickjsEvalError, rb_cQuickjsURIError, rb_cQuickjsAggregateError;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
 
@@ -233,6 +233,36 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       if (strcmp(errorClassName, "SyntaxError") == 0)
       {
         r_error_class = rb_cQuickjsSyntaxError;
+        r_error_message = rb_str_new2(errorClassMessage);
+      }
+      else if (strcmp(errorClassName, "TypeError") == 0)
+      {
+        r_error_class = rb_cQuickjsTypeError;
+        r_error_message = rb_str_new2(errorClassMessage);
+      }
+      else if (strcmp(errorClassName, "ReferenceError") == 0)
+      {
+        r_error_class = rb_cQuickjsReferenceError;
+        r_error_message = rb_str_new2(errorClassMessage);
+      }
+      else if (strcmp(errorClassName, "RangeError") == 0)
+      {
+        r_error_class = rb_cQuickjsRangeError;
+        r_error_message = rb_str_new2(errorClassMessage);
+      }
+      else if (strcmp(errorClassName, "EvalError") == 0)
+      {
+        r_error_class = rb_cQuickjsEvalError;
+        r_error_message = rb_str_new2(errorClassMessage);
+      }
+      else if (strcmp(errorClassName, "URIError") == 0)
+      {
+        r_error_class = rb_cQuickjsURIError;
+        r_error_message = rb_str_new2(errorClassMessage);
+      }
+      else if (strcmp(errorClassName, "AggregateError") == 0)
+      {
+        r_error_class = rb_cQuickjsAggregateError;
         r_error_message = rb_str_new2(errorClassMessage);
       }
       else if (strcmp(errorClassName, "InternalError") == 0 && strstr(errorClassMessage, "interrupted") != NULL)
@@ -470,7 +500,15 @@ Init_quickjsrb(void)
   rb_define_method(vmClass, "define_function", vm_m_defineGlobalFunction, 1);
 
   rb_cQuickjsRuntimeError = rb_define_class_under(rb_mQuickjs, "RuntimeError", rb_eRuntimeError);
+
   rb_cQuickjsSyntaxError = rb_define_class_under(rb_mQuickjs, "SyntaxError", rb_cQuickjsRuntimeError);
+  rb_cQuickjsTypeError = rb_define_class_under(rb_mQuickjs, "TypeError", rb_cQuickjsRuntimeError);
+  rb_cQuickjsRangeError = rb_define_class_under(rb_mQuickjs, "RangeError", rb_cQuickjsRuntimeError);
+  rb_cQuickjsReferenceError = rb_define_class_under(rb_mQuickjs, "ReferenceError", rb_cQuickjsRuntimeError);
+  rb_cQuickjsURIError = rb_define_class_under(rb_mQuickjs, "URIError", rb_cQuickjsRuntimeError);
+  rb_cQuickjsEvalError = rb_define_class_under(rb_mQuickjs, "EvalError", rb_cQuickjsRuntimeError);
+  rb_cQuickjsAggregateError = rb_define_class_under(rb_mQuickjs, "AggregateError", rb_cQuickjsRuntimeError);
+
   rb_cQuickjsInterruptedError = rb_define_class_under(rb_mQuickjs, "InterruptedError", rb_cQuickjsRuntimeError);
   rb_cQuickjsNoAwaitError = rb_define_class_under(rb_mQuickjs, "NoAwaitError", rb_cQuickjsRuntimeError);
 }

@@ -62,8 +62,32 @@ class QuickjsTest < Test::Unit::TestCase
   end
 
   class Exceptions < QuickjsTest
-    test "throws an exception transparently" do
+    test "throws Quickjs::SyntaxError if SyntaxError happens" do
       assert_raise_with_message(Quickjs::SyntaxError, /unexpected token in/) { ::Quickjs.eval_code("}{") }
+    end
+
+    test "throws Quickjs::TypeError if TypeError happens" do
+      assert_raise_with_message(Quickjs::TypeError, /not a function/) { ::Quickjs.eval_code("globalThis.func()") }
+    end
+
+    test "throws Quickjs::ReferenceError if ReferenceError happens" do
+      assert_raise_with_message(Quickjs::ReferenceError, /is not defined/) { ::Quickjs.eval_code("let a = undefinedVariable;") }
+    end
+
+    test "throws Quickjs::RangeError if RangeError happens" do
+      assert_raise_with_message(Quickjs::RangeError, /out of range/) { ::Quickjs.eval_code("throw new RangeError('out of range')") }
+    end
+
+    test "throws Quickjs::EvalError if EvalError happens" do
+      assert_raise_with_message(Quickjs::EvalError, /I am old/) { ::Quickjs.eval_code("throw new EvalError('I am old')") }
+    end
+
+    test "throws Quickjs::URIError if URIError happens" do
+      assert_raise_with_message(Quickjs::URIError, /expecting/) { ::Quickjs.eval_code("decodeURIComponent('%')") }
+    end
+
+    test "throws Quickjs::AggregateError if AggregateError happens" do
+      assert_raise_with_message(Quickjs::AggregateError, /aggregated/) { ::Quickjs.eval_code("throw new AggregateError([new Error('some error')], 'aggregated')") }
     end
 
     test "throws is awaited Promise is rejected" do
