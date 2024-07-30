@@ -372,16 +372,9 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   JS_AddIntrinsicBigDecimal(data->context);
   JS_AddIntrinsicOperators(data->context);
   JS_EnableBignumExt(data->context, TRUE);
-  js_std_add_helpers(data->context, 0, NULL);
 
   JS_SetModuleLoaderFunc(runtime, NULL, js_module_loader, NULL);
   js_std_init_handlers(runtime);
-
-  const char *stripGlobals = "delete(globalThis.scriptArgs);\n"
-                             "delete(globalThis.console);\n"
-                             "delete(print);\n";
-  JSValue j_stripGlobals = JS_Eval(data->context, stripGlobals, strlen(stripGlobals), "<vm>", JS_EVAL_TYPE_GLOBAL);
-  JS_FreeValue(data->context, j_stripGlobals);
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, ID2SYM(rb_intern(featureStdId)))))
   {

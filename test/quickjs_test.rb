@@ -136,7 +136,8 @@ class QuickjsTest < Test::Unit::TestCase
         assert_equal(@vm.eval_code("typeof os === 'undefined'"), true)
       end
 
-      test "does not have default globals by Quickjs" do
+      test "does not have std helpers" do
+        assert_equal(@vm.eval_code("typeof __loadScript === 'undefined'"), true)
         assert_equal(@vm.eval_code("typeof scriptArgs === 'undefined'"), true)
         assert_equal(@vm.eval_code("typeof console === 'undefined'"), true)
         assert_equal(@vm.eval_code("typeof print === 'undefined'"), true)
