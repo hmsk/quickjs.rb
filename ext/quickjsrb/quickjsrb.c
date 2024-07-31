@@ -403,13 +403,12 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JS_FreeValue(data->context, j_timeoutEval);
   }
 
-  const char *setupGlobalRuby = "globalThis.__ruby = {};\n";
-  JSValue j_rubyEval = JS_Eval(data->context, setupGlobalRuby, strlen(setupGlobalRuby), "<vm>", JS_EVAL_TYPE_MODULE);
-  JS_FreeValue(data->context, j_rubyEval);
-
   JSValue j_global = JS_GetGlobalObject(data->context);
-  JSValue j_func = JS_NewCFunction(data->context, js_quickjsrb_call_global, "rubyGlobal", 2);
-  JS_SetPropertyStr(data->context, j_global, "rubyGlobal", j_func);
+  JSValue j_quickjsrbGlobal = JS_NewObject(data->context);
+  JS_SetPropertyStr(
+      data->context, j_quickjsrbGlobal, "runRubyMethod",
+      JS_NewCFunction(data->context, js_quickjsrb_call_global, "runRubyMethod", 2));
+  JS_SetPropertyStr(data->context, j_global, "__quickjsrb", j_quickjsrbGlobal);
   JS_FreeValue(data->context, j_global);
 
   return r_self;
@@ -464,11 +463,10 @@ static VALUE vm_m_defineGlobalFunction(VALUE r_self, VALUE r_name)
     rb_hash_aset(data->defined_functions, r_name, r_proc);
     char *funcName = StringValueCStr(r_name);
 
-    const char *template = "globalThis.__ruby['%s'] = (...args) => rubyGlobal('%s', args);\n"
-                           "globalThis['%s'] = globalThis.__ruby['%s'];\n";
-    int length = snprintf(NULL, 0, template, funcName, funcName, funcName, funcName);
+    const char *template = "globalThis['%s'] = (...args) => __quickjsrb.runRubyMethod('%s', args);\n";
+    int length = snprintf(NULL, 0, template, funcName, funcName);
     char *result = (char *)malloc(length + 1);
-    snprintf(result, length + 1, template, funcName, funcName, funcName, funcName);
+    snprintf(result, length + 1, template, funcName, funcName);
 
     JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), "<vm>", JS_EVAL_TYPE_MODULE);
 
