@@ -11,6 +11,7 @@ typedef struct VMData
   struct JSContext *context;
   VALUE defined_functions;
   struct EvalTime *eval_time;
+  VALUE logs;
 } VMData;
 
 static void vm_free(void *ptr)
@@ -36,6 +37,7 @@ static void vm_mark(void *ptr)
 {
   VMData *data = (VMData *)ptr;
   rb_gc_mark_movable(data->defined_functions);
+  rb_gc_mark_movable(data->logs);
 }
 
 static const rb_data_type_t vm_type = {
@@ -53,6 +55,7 @@ static VALUE vm_alloc(VALUE r_self)
   VMData *data;
   VALUE obj = TypedData_Make_Struct(r_self, VMData, &vm_type, data);
   data->defined_functions = rb_hash_new();
+  data->logs = rb_ary_new();
 
   EvalTime *eval_time = malloc(sizeof(EvalTime));
   data->eval_time = eval_time;
@@ -338,6 +341,38 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   return to_js_value(ctx, r_result);
 }
 
+static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, JSValueConst *argv)
+{
+  VMData *data = JS_GetContextOpaque(ctx);
+  JSValue j_severity = JS_ToString(ctx, argv[0]);
+  const char *severity = JS_ToCString(ctx, j_severity);
+  JS_FreeValue(ctx, j_severity);
+
+  VALUE r_log = rb_ary_new2(2);
+  rb_ary_store(r_log, 0, ID2SYM(rb_intern(severity)));
+  VALUE r_row = rb_ary_new();
+
+  int i;
+  JSValue j_length = JS_GetPropertyStr(ctx, argv[1], "length");
+  int count;
+  JS_ToInt32(ctx, &count, j_length);
+  JS_FreeValue(ctx, j_length);
+  for (i = 0; i < count; i++)
+  {
+    JSValue j_logged = JS_GetPropertyUint32(ctx, argv[1], i);
+    const char *body = JS_ToCString(ctx, j_logged);
+    rb_ary_push(r_row, rb_str_new2(body));
+    JS_FreeValue(ctx, j_logged);
+    JS_FreeCString(ctx, body);
+  }
+
+  rb_ary_store(r_log, 1, r_row);
+  rb_ary_push(data->logs, r_log);
+  JS_FreeCString(ctx, severity);
+
+  return JS_UNDEFINED;
+}
+
 static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 {
   VALUE r_opts;
@@ -408,8 +443,23 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   JS_SetPropertyStr(
       data->context, j_quickjsrbGlobal, "runRubyMethod",
       JS_NewCFunction(data->context, js_quickjsrb_call_global, "runRubyMethod", 2));
+
   JS_SetPropertyStr(data->context, j_global, "__quickjsrb", j_quickjsrbGlobal);
+
+  JSValue j_console = JS_NewObject(data->context);
+  JS_SetPropertyStr(
+      data->context, j_quickjsrbGlobal, "log",
+      JS_NewCFunction(data->context, js_quickjsrb_log, "log", 2));
+  JS_SetPropertyStr(data->context, j_global, "console", j_console);
   JS_FreeValue(data->context, j_global);
+
+  const char *defineLoggers = "console.log = (...args) => __quickjsrb.log('info', args);\n"
+                              "console.debug = (...args) => __quickjsrb.log('verbose', args);\n"
+                              "console.info = (...args) => __quickjsrb.log('info', args);\n"
+                              "console.warn = (...args) => __quickjsrb.log('warning', args);\n"
+                              "console.error = (...args) => __quickjsrb.log('error', args);\n";
+  JSValue j_defineLoggers = JS_Eval(data->context, defineLoggers, strlen(defineLoggers), "<vm>", JS_EVAL_TYPE_GLOBAL);
+  JS_FreeValue(data->context, j_defineLoggers);
 
   return r_self;
 }
@@ -478,6 +528,14 @@ static VALUE vm_m_defineGlobalFunction(VALUE r_self, VALUE r_name)
   return Qnil;
 }
 
+static VALUE vm_m_getLogs(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  return data->logs;
+}
+
 RUBY_FUNC_EXPORTED void
 Init_quickjsrb(void)
 {
@@ -495,6 +553,7 @@ Init_quickjsrb(void)
   rb_define_method(vmClass, "initialize", vm_m_initialize, -1);
   rb_define_method(vmClass, "eval_code", vm_m_evalCode, 1);
   rb_define_method(vmClass, "define_function", vm_m_defineGlobalFunction, 1);
+  rb_define_method(vmClass, "logs", vm_m_getLogs, 0);
 
   rb_cQuickjsRuntimeError = rb_define_class_under(rb_mQuickjs, "RuntimeError", rb_eRuntimeError);
 

@@ -139,7 +139,6 @@ class QuickjsTest < Test::Unit::TestCase
       test "does not have std helpers" do
         assert_equal(@vm.eval_code("typeof __loadScript === 'undefined'"), true)
         assert_equal(@vm.eval_code("typeof scriptArgs === 'undefined'"), true)
-        assert_equal(@vm.eval_code("typeof console === 'undefined'"), true)
         assert_equal(@vm.eval_code("typeof print === 'undefined'"), true)
       end
     end
@@ -265,6 +264,36 @@ class QuickjsTest < Test::Unit::TestCase
       test "global timeout still works" do
         @vm.define_function("infinite") { loop {} }
         assert_raise_with_message(Quickjs::InterruptedError, /Ruby runtime got timeout/) { @vm.eval_code("infinite();") }
+      end
+    end
+
+    class ConsoleLoggers < QuickjsVmTest
+      setup { @vm = Quickjs::VM.new }
+      teardown { @vm = nil }
+
+      test "there are functions for some severities" do
+        @vm.eval_code('console.log("log it")')
+        @vm.eval_code('console.info("info it")')
+        @vm.eval_code('console.debug("debug it")')
+        @vm.eval_code('console.warn("warn it")')
+        @vm.eval_code('console.error("error it")')
+
+        assert_equal(@vm.logs, [
+          [:info, ['log it']],
+          [:info, ['info it']],
+          [:verbose, ['debug it']],
+          [:warning, ['warn it']],
+          [:error, ['error it']],
+        ])
+      end
+
+      test "can give multiple arguments" do
+        @vm.eval_code('const variable = "var!";')
+        @vm.eval_code('console.log(128, "str", variable, undefined, null, { key: "value" }, [1, 2, 3])')
+
+        assert_equal(@vm.logs.last.last, [
+          "128", "str", "var!", "undefined", "null", "[object Object]", "1,2,3"
+        ])
       end
     end
   end
