@@ -66,7 +66,7 @@ static VALUE vm_alloc(VALUE r_self)
   return obj;
 }
 
-VALUE rb_mQuickjs;
+VALUE rb_mQuickjs, rb_cLog;
 VALUE rb_cQuickjsSyntaxError, rb_cQuickjsRuntimeError, rb_cQuickjsInterruptedError, rb_cQuickjsNoAwaitError, rb_cQuickjsTypeError, rb_cQuickjsReferenceError, rb_cQuickjsRangeError, rb_cQuickjsEvalError, rb_cQuickjsURIError, rb_cQuickjsAggregateError;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
@@ -348,10 +348,10 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, J
   const char *severity = JS_ToCString(ctx, j_severity);
   JS_FreeValue(ctx, j_severity);
 
-  VALUE r_log = rb_ary_new2(2);
-  rb_ary_store(r_log, 0, ID2SYM(rb_intern(severity)));
-  VALUE r_row = rb_ary_new();
+  VALUE r_log = rb_funcall(rb_cLog, rb_intern("new"), 0);
+  rb_iv_set(r_log, "@severity", ID2SYM(rb_intern(severity)));
 
+  VALUE r_row = rb_ary_new();
   int i;
   JSValue j_length = JS_GetPropertyStr(ctx, argv[1], "length");
   int count;
@@ -361,12 +361,14 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, J
   {
     JSValue j_logged = JS_GetPropertyUint32(ctx, argv[1], i);
     const char *body = JS_ToCString(ctx, j_logged);
-    rb_ary_push(r_row, rb_str_new2(body));
+    VALUE r_loghash = rb_hash_new();
+    rb_hash_aset(r_loghash, ID2SYM(rb_intern("c")), rb_str_new2(body));
+    rb_ary_push(r_row, r_loghash);
     JS_FreeValue(ctx, j_logged);
     JS_FreeCString(ctx, body);
   }
 
-  rb_ary_store(r_log, 1, r_row);
+  rb_iv_set(r_log, "@row", r_row);
   rb_ary_push(data->logs, r_log);
   JS_FreeCString(ctx, severity);
 
@@ -536,6 +538,19 @@ static VALUE vm_m_getLogs(VALUE r_self)
   return data->logs;
 }
 
+static VALUE pick_c(VALUE block_arg, VALUE data, int argc, const VALUE *argv, VALUE blockarg)
+{
+  return rb_hash_aref(block_arg, ID2SYM(rb_intern("c")));
+}
+
+static VALUE vm_m_to_s(VALUE r_self)
+{
+  VALUE row = rb_iv_get(r_self, "@row");
+  VALUE r_ary = rb_block_call(row, rb_intern("map"), 0, NULL, pick_c, Qnil);
+
+  return rb_funcall(r_ary, rb_intern("join"), 1, rb_str_new2(" "));
+}
+
 RUBY_FUNC_EXPORTED void
 Init_quickjsrb(void)
 {
@@ -554,6 +569,11 @@ Init_quickjsrb(void)
   rb_define_method(vmClass, "eval_code", vm_m_evalCode, 1);
   rb_define_method(vmClass, "define_function", vm_m_defineGlobalFunction, 1);
   rb_define_method(vmClass, "logs", vm_m_getLogs, 0);
+
+  rb_cLog = rb_define_class_under(vmClass, "Log", rb_cObject);
+  rb_define_attr(rb_cLog, "severity", 1, 0);
+  rb_define_method(rb_cLog, "to_s", vm_m_to_s, 0);
+  rb_define_method(rb_cLog, "inspect", vm_m_to_s, 0);
 
   rb_cQuickjsRuntimeError = rb_define_class_under(rb_mQuickjs, "RuntimeError", rb_eRuntimeError);
 

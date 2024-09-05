@@ -273,27 +273,35 @@ class QuickjsTest < Test::Unit::TestCase
 
       test "there are functions for some severities" do
         @vm.eval_code('console.log("log it")')
-        @vm.eval_code('console.info("info it")')
-        @vm.eval_code('console.debug("debug it")')
-        @vm.eval_code('console.warn("warn it")')
-        @vm.eval_code('console.error("error it")')
+        assert_equal(@vm.logs.last.severity, :info)
+        assert_equal(@vm.logs.last.to_s, 'log it')
 
-        assert_equal(@vm.logs, [
-          [:info, ['log it']],
-          [:info, ['info it']],
-          [:verbose, ['debug it']],
-          [:warning, ['warn it']],
-          [:error, ['error it']],
-        ])
+        @vm.eval_code('console.info("info it")')
+        assert_equal(@vm.logs.last.severity, :info)
+        assert_equal(@vm.logs.last.to_s, 'info it')
+
+        @vm.eval_code('console.debug("debug it")')
+        assert_equal(@vm.logs.last.severity, :verbose)
+        assert_equal(@vm.logs.last.to_s, 'debug it')
+
+        @vm.eval_code('console.warn("warn it")')
+        assert_equal(@vm.logs.last.severity, :warning)
+        assert_equal(@vm.logs.last.to_s, 'warn it')
+
+        @vm.eval_code('console.error("error it")')
+        assert_equal(@vm.logs.last.severity, :error)
+        assert_equal(@vm.logs.last.to_s, 'error it')
+
+        assert_equal(@vm.logs.size, 5)
       end
 
       test "can give multiple arguments" do
         @vm.eval_code('const variable = "var!";')
         @vm.eval_code('console.log(128, "str", variable, undefined, null, { key: "value" }, [1, 2, 3])')
 
-        assert_equal(@vm.logs.last.last, [
+        assert_equal(@vm.logs.last.to_s, [
           "128", "str", "var!", "undefined", "null", "[object Object]", "1,2,3"
-        ])
+        ].join(' '))
       end
     end
   end
