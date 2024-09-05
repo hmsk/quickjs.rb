@@ -66,8 +66,7 @@ static VALUE vm_alloc(VALUE r_self)
   return obj;
 }
 
-VALUE rb_mQuickjs, rb_cLog;
-VALUE rb_cQuickjsSyntaxError, rb_cQuickjsRuntimeError, rb_cQuickjsInterruptedError, rb_cQuickjsNoAwaitError, rb_cQuickjsTypeError, rb_cQuickjsReferenceError, rb_cQuickjsRangeError, rb_cQuickjsEvalError, rb_cQuickjsURIError, rb_cQuickjsAggregateError;
+VALUE rb_cQuickjsVMLog, rb_cQuickjsSyntaxError, rb_cQuickjsRuntimeError, rb_cQuickjsInterruptedError, rb_cQuickjsNoAwaitError, rb_cQuickjsTypeError, rb_cQuickjsReferenceError, rb_cQuickjsRangeError, rb_cQuickjsEvalError, rb_cQuickjsURIError, rb_cQuickjsAggregateError;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
 
@@ -348,7 +347,7 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, J
   const char *severity = JS_ToCString(ctx, j_severity);
   JS_FreeValue(ctx, j_severity);
 
-  VALUE r_log = rb_funcall(rb_cLog, rb_intern("new"), 0);
+  VALUE r_log = rb_funcall(rb_cQuickjsVMLog, rb_intern("new"), 0);
   rb_iv_set(r_log, "@severity", ID2SYM(rb_intern(severity)));
 
   VALUE r_row = rb_ary_new();
@@ -554,26 +553,26 @@ static VALUE vm_m_to_s(VALUE r_self)
 RUBY_FUNC_EXPORTED void
 Init_quickjsrb(void)
 {
-  rb_mQuickjs = rb_define_module("Quickjs");
+  VALUE rb_mQuickjs = rb_define_module("Quickjs");
   rb_define_const(rb_mQuickjs, "MODULE_STD", ID2SYM(rb_intern(featureStdId)));
   rb_define_const(rb_mQuickjs, "MODULE_OS", ID2SYM(rb_intern(featureOsId)));
   rb_define_const(rb_mQuickjs, "FEATURES_TIMEOUT", ID2SYM(rb_intern(featureOsTimeoutId)));
 
-  VALUE valueClass = rb_define_class_under(rb_mQuickjs, "Value", rb_cObject);
-  rb_define_const(valueClass, "UNDEFINED", ID2SYM(rb_intern(undefinedId)));
-  rb_define_const(valueClass, "NAN", ID2SYM(rb_intern(nanId)));
+  VALUE rb_cQuickjsValue = rb_define_class_under(rb_mQuickjs, "Value", rb_cObject);
+  rb_define_const(rb_cQuickjsValue, "UNDEFINED", ID2SYM(rb_intern(undefinedId)));
+  rb_define_const(rb_cQuickjsValue, "NAN", ID2SYM(rb_intern(nanId)));
 
-  VALUE vmClass = rb_define_class_under(rb_mQuickjs, "VM", rb_cObject);
-  rb_define_alloc_func(vmClass, vm_alloc);
-  rb_define_method(vmClass, "initialize", vm_m_initialize, -1);
-  rb_define_method(vmClass, "eval_code", vm_m_evalCode, 1);
-  rb_define_method(vmClass, "define_function", vm_m_defineGlobalFunction, 1);
-  rb_define_method(vmClass, "logs", vm_m_getLogs, 0);
+  VALUE rb_cQuickjsVM = rb_define_class_under(rb_mQuickjs, "VM", rb_cObject);
+  rb_define_alloc_func(rb_cQuickjsVM, vm_alloc);
+  rb_define_method(rb_cQuickjsVM, "initialize", vm_m_initialize, -1);
+  rb_define_method(rb_cQuickjsVM, "eval_code", vm_m_evalCode, 1);
+  rb_define_method(rb_cQuickjsVM, "define_function", vm_m_defineGlobalFunction, 1);
+  rb_define_method(rb_cQuickjsVM, "logs", vm_m_getLogs, 0);
 
-  rb_cLog = rb_define_class_under(vmClass, "Log", rb_cObject);
-  rb_define_attr(rb_cLog, "severity", 1, 0);
-  rb_define_method(rb_cLog, "to_s", vm_m_to_s, 0);
-  rb_define_method(rb_cLog, "inspect", vm_m_to_s, 0);
+  rb_cQuickjsVMLog = rb_define_class_under(rb_cQuickjsVM, "Log", rb_cObject);
+  rb_define_attr(rb_cQuickjsVMLog, "severity", 1, 0);
+  rb_define_method(rb_cQuickjsVMLog, "to_s", vm_m_to_s, 0);
+  rb_define_method(rb_cQuickjsVMLog, "inspect", vm_m_to_s, 0);
 
   rb_cQuickjsRuntimeError = rb_define_class_under(rb_mQuickjs, "RuntimeError", rb_eRuntimeError);
 
