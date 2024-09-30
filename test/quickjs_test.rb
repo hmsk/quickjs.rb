@@ -267,6 +267,18 @@ class QuickjsTest < Test::Unit::TestCase
       end
     end
 
+    class GlobalFunction < QuickjsVmTest
+      setup { @vm = Quickjs::VM.new }
+      teardown { @vm = nil }
+
+      test "imports from given ESM code" do
+        @vm.import("fixture", from: File.read('./test/fixture.esm.js'))
+
+        assert_equal(@vm.eval_code("fixture.default()"), "I am a default export of ESM.")
+        assert_equal(@vm.eval_code("fixture.member()"), "I am a exported member of ESM.")
+      end
+    end
+
     class ConsoleLoggers < QuickjsVmTest
       setup { @vm = Quickjs::VM.new }
       teardown { @vm = nil }

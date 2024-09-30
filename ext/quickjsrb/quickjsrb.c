@@ -529,6 +529,47 @@ static VALUE vm_m_defineGlobalFunction(VALUE r_self, VALUE r_name)
   return Qnil;
 }
 
+// WISH: vm.import('hey', from: '...source...') imports just default
+// WISH: vm.import('{ member, member2 }', from: '...source...')
+// WISH: vm.import('{ member as aliasedName }', from: '...source...')
+// WISH: vm.import('defaultMember, { member }', from: '...source...')
+// WISH: vm.import('* as all', from: '...source...')
+static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
+{
+  VALUE r_import_string, r_opts;
+  rb_scan_args(argc, argv, "10:", &r_import_string, &r_opts);
+  if (NIL_P(r_opts))
+    r_opts = rb_hash_new();
+  VALUE r_from = rb_hash_aref(r_opts, ID2SYM(rb_intern("from")));
+  if (NIL_P(r_from))
+  {
+    VALUE r_error_message = rb_str_new2("missing import source");
+    rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, r_error_message));
+    return Qnil;
+  }
+
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  char *source = StringValueCStr(r_from);
+  char *import_name = StringValueCStr(r_import_string);
+  JSValue func = JS_Eval(data->context, source, strlen(source), "mmmodule", JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  js_module_set_import_meta(data->context, func, TRUE, FALSE);
+  JS_FreeValue(data->context, func);
+
+  const char *importAndGlobalizeModule = "import * as %s from 'mmmodule';\n"
+                                         "globalThis['%s'] = %s;\n";
+  int length = snprintf(NULL, 0, importAndGlobalizeModule, import_name, import_name, import_name);
+  char *result = (char *)malloc(length + 1);
+  snprintf(result, length + 1, importAndGlobalizeModule, import_name, import_name, import_name);
+
+  JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), "<vm>", JS_EVAL_TYPE_MODULE);
+  free(result);
+  JS_FreeValue(data->context, j_codeResult);
+
+  return Qtrue;
+}
+
 static VALUE vm_m_getLogs(VALUE r_self)
 {
   VMData *data;
@@ -567,6 +608,7 @@ Init_quickjsrb(void)
   rb_define_method(rb_cQuickjsVM, "initialize", vm_m_initialize, -1);
   rb_define_method(rb_cQuickjsVM, "eval_code", vm_m_evalCode, 1);
   rb_define_method(rb_cQuickjsVM, "define_function", vm_m_defineGlobalFunction, 1);
+  rb_define_method(rb_cQuickjsVM, "import", vm_m_import, -1);
   rb_define_method(rb_cQuickjsVM, "logs", vm_m_getLogs, 0);
 
   rb_cQuickjsVMLog = rb_define_class_under(rb_cQuickjsVM, "Log", rb_cObject);
