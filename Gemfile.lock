@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    quickjs (0.1.12)
+    quickjs (0.1.13)
       json
 
 GEM
