@@ -315,6 +315,15 @@ class QuickjsTest < Test::Unit::TestCase
           "128", "str", "var!", "undefined", "null", "[object Object]", "1,2,3"
         ].join(' '))
       end
+
+      test "can give converted given data as 'raw'" do
+        @vm.eval_code('const variable = "var!";')
+        @vm.eval_code('console.log(128, "str", variable, undefined, null, { key: "value" }, [1, 2, 3])')
+
+        assert_equal(@vm.logs.last.raw, [
+          128, "str", "var!", Quickjs::Value::UNDEFINED, nil, { "key" => "value" }, [1,2,3]
+        ])
+      end
     end
   end
 end

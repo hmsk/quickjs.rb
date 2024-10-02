@@ -362,6 +362,7 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, J
     const char *body = JS_ToCString(ctx, j_logged);
     VALUE r_loghash = rb_hash_new();
     rb_hash_aset(r_loghash, ID2SYM(rb_intern("c")), rb_str_new2(body));
+    rb_hash_aset(r_loghash, ID2SYM(rb_intern("raw")), to_rb_value(ctx, j_logged));
     rb_ary_push(r_row, r_loghash);
     JS_FreeValue(ctx, j_logged);
     JS_FreeCString(ctx, body);
@@ -578,6 +579,19 @@ static VALUE vm_m_getLogs(VALUE r_self)
   return data->logs;
 }
 
+static VALUE pick_raw(VALUE block_arg, VALUE data, int argc, const VALUE *argv, VALUE blockarg)
+{
+  return rb_hash_aref(block_arg, ID2SYM(rb_intern("raw")));
+}
+
+static VALUE vm_m_raw(VALUE r_self)
+{
+  VALUE row = rb_iv_get(r_self, "@row");
+  VALUE r_ary = rb_block_call(row, rb_intern("map"), 0, NULL, pick_raw, Qnil);
+
+  return r_ary;
+}
+
 static VALUE pick_c(VALUE block_arg, VALUE data, int argc, const VALUE *argv, VALUE blockarg)
 {
   return rb_hash_aref(block_arg, ID2SYM(rb_intern("c")));
@@ -613,6 +627,7 @@ Init_quickjsrb(void)
 
   rb_cQuickjsVMLog = rb_define_class_under(rb_cQuickjsVM, "Log", rb_cObject);
   rb_define_attr(rb_cQuickjsVMLog, "severity", 1, 0);
+  rb_define_method(rb_cQuickjsVMLog, "raw", vm_m_raw, 0);
   rb_define_method(rb_cQuickjsVMLog, "to_s", vm_m_to_s, 0);
   rb_define_method(rb_cQuickjsVMLog, "inspect", vm_m_to_s, 0);
 
