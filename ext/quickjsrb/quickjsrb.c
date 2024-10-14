@@ -229,42 +229,35 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       JS_FreeValue(ctx, j_errorClassMessage);
       JS_FreeValue(ctx, j_errorClassName);
 
-      VALUE r_error_message, r_error_class;
+      VALUE r_error_class, r_error_message = rb_str_new2(errorClassMessage);
 
       if (strcmp(errorClassName, "SyntaxError") == 0)
       {
         r_error_class = rb_cQuickjsSyntaxError;
-        r_error_message = rb_str_new2(errorClassMessage);
       }
       else if (strcmp(errorClassName, "TypeError") == 0)
       {
         r_error_class = rb_cQuickjsTypeError;
-        r_error_message = rb_str_new2(errorClassMessage);
       }
       else if (strcmp(errorClassName, "ReferenceError") == 0)
       {
         r_error_class = rb_cQuickjsReferenceError;
-        r_error_message = rb_str_new2(errorClassMessage);
       }
       else if (strcmp(errorClassName, "RangeError") == 0)
       {
         r_error_class = rb_cQuickjsRangeError;
-        r_error_message = rb_str_new2(errorClassMessage);
       }
       else if (strcmp(errorClassName, "EvalError") == 0)
       {
         r_error_class = rb_cQuickjsEvalError;
-        r_error_message = rb_str_new2(errorClassMessage);
       }
       else if (strcmp(errorClassName, "URIError") == 0)
       {
         r_error_class = rb_cQuickjsURIError;
-        r_error_message = rb_str_new2(errorClassMessage);
       }
       else if (strcmp(errorClassName, "AggregateError") == 0)
       {
         r_error_class = rb_cQuickjsAggregateError;
-        r_error_message = rb_str_new2(errorClassMessage);
       }
       else if (strcmp(errorClassName, "InternalError") == 0 && strstr(errorClassMessage, "interrupted") != NULL)
       {
@@ -274,12 +267,10 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       else if (strcmp(errorClassName, "Quickjs::InterruptedError") == 0)
       {
         r_error_class = rb_cQuickjsInterruptedError;
-        r_error_message = rb_str_new2(errorClassMessage);
       }
       else
       {
         r_error_class = rb_cQuickjsRuntimeError;
-        r_error_message = rb_sprintf("%s: %s", errorClassName, errorClassMessage);
       }
       JS_FreeCString(ctx, errorClassName);
       JS_FreeCString(ctx, errorClassMessage);

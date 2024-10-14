@@ -64,49 +64,49 @@ class QuickjsTest < Test::Unit::TestCase
   class Exceptions < QuickjsTest
     test "throws Quickjs::SyntaxError if SyntaxError happens" do
       err = assert_raises(Quickjs::SyntaxError) { ::Quickjs.eval_code("}{") }
-      assert_match(/unexpected token in/, err.message)
+      assert_equal("unexpected token in expression: '}'", err.message)
       assert_equal("SyntaxError", err.js_name)
     end
 
     test "throws Quickjs::TypeError if TypeError happens" do
       err = assert_raises(Quickjs::TypeError) { ::Quickjs.eval_code("globalThis.func()") }
-      assert_match(/not a function/, err.message)
+      assert_equal("not a function", err.message)
       assert_equal("TypeError", err.js_name)
     end
 
     test "throws Quickjs::ReferenceError if ReferenceError happens" do
       err = assert_raises(Quickjs::ReferenceError) { ::Quickjs.eval_code("let a = undefinedVariable;") }
-      assert_match(/is not defined/, err.message)
+      assert_equal("'undefinedVariable' is not defined", err.message)
       assert_equal("ReferenceError", err.js_name)
     end
 
     test "throws Quickjs::RangeError if RangeError happens" do
       err = assert_raises(Quickjs::RangeError) { ::Quickjs.eval_code("throw new RangeError('out of range')") }
-      assert_match(/out of range/, err.message)
+      assert_equal("out of range", err.message)
       assert_equal("RangeError", err.js_name)
     end
 
     test "throws Quickjs::EvalError if EvalError happens" do
       err = assert_raises(Quickjs::EvalError) { ::Quickjs.eval_code("throw new EvalError('I am old')") }
-      assert_match(/I am old/, err.message)
+      assert_equal("I am old", err.message)
       assert_equal("EvalError", err.js_name)
     end
 
     test "throws Quickjs::URIError if URIError happens" do
       err = assert_raises(Quickjs::URIError) { ::Quickjs.eval_code("decodeURIComponent('%')") }
-      assert_match(/expecting/, err.message)
+      assert_equal("expecting hex digit", err.message)
       assert_equal("URIError", err.js_name)
     end
 
     test "throws Quickjs::AggregateError if AggregateError happens" do
       err = assert_raises(Quickjs::AggregateError) { ::Quickjs.eval_code("throw new AggregateError([new Error('some error')], 'aggregated')") }
-      assert_match(/aggregated/, err.message)
+      assert_equal("aggregated", err.message)
       assert_equal("AggregateError", err.js_name)
     end
 
     test "throws Quickjs::RuntimeError if custom exception happens" do
       err = assert_raises(Quickjs::RuntimeError) { ::Quickjs.eval_code("class MyError extends Error { constructor(message) { super(message); this.name = 'CustomError'; } }; throw new MyError('my error')") }
-      assert_match(/my error/, err.message)
+      assert_equal("my error", err.message)
       assert_equal("CustomError", err.js_name)
     end
 
@@ -114,7 +114,7 @@ class QuickjsTest < Test::Unit::TestCase
       err = assert_raises(Quickjs::RuntimeError) do
         ::Quickjs.eval_code("const promise = new Promise((res) => { throw 'asynchronously sad' });await promise")
       end
-      assert_match(/asynchronously sad/, err.message)
+      assert_equal("asynchronously sad", err.message)
       assert_equal(nil, err.js_name)
     end
 
@@ -122,7 +122,7 @@ class QuickjsTest < Test::Unit::TestCase
       err = assert_raises(Quickjs::NoAwaitError) do
         ::Quickjs.eval_code("const promise = new Promise((res) => { res('awaited yo') });promise")
       end
-      assert_match(/An unawaited Promise was/, err.message)
+      assert_equal("An unawaited Promise was returned to the top-level", err.message)
       assert_equal(nil, err.js_name)
     end
   end
