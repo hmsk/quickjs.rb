@@ -63,43 +63,67 @@ class QuickjsTest < Test::Unit::TestCase
 
   class Exceptions < QuickjsTest
     test "throws Quickjs::SyntaxError if SyntaxError happens" do
-      assert_raise_with_message(Quickjs::SyntaxError, /unexpected token in/) { ::Quickjs.eval_code("}{") }
+      err = assert_raises(Quickjs::SyntaxError) { ::Quickjs.eval_code("}{") }
+      assert_match(/unexpected token in/, err.message)
+      assert_equal("SyntaxError", err.js_name)
     end
 
     test "throws Quickjs::TypeError if TypeError happens" do
-      assert_raise_with_message(Quickjs::TypeError, /not a function/) { ::Quickjs.eval_code("globalThis.func()") }
+      err = assert_raises(Quickjs::TypeError) { ::Quickjs.eval_code("globalThis.func()") }
+      assert_match(/not a function/, err.message)
+      assert_equal("TypeError", err.js_name)
     end
 
     test "throws Quickjs::ReferenceError if ReferenceError happens" do
-      assert_raise_with_message(Quickjs::ReferenceError, /is not defined/) { ::Quickjs.eval_code("let a = undefinedVariable;") }
+      err = assert_raises(Quickjs::ReferenceError) { ::Quickjs.eval_code("let a = undefinedVariable;") }
+      assert_match(/is not defined/, err.message)
+      assert_equal("ReferenceError", err.js_name)
     end
 
     test "throws Quickjs::RangeError if RangeError happens" do
-      assert_raise_with_message(Quickjs::RangeError, /out of range/) { ::Quickjs.eval_code("throw new RangeError('out of range')") }
+      err = assert_raises(Quickjs::RangeError) { ::Quickjs.eval_code("throw new RangeError('out of range')") }
+      assert_match(/out of range/, err.message)
+      assert_equal("RangeError", err.js_name)
     end
 
     test "throws Quickjs::EvalError if EvalError happens" do
-      assert_raise_with_message(Quickjs::EvalError, /I am old/) { ::Quickjs.eval_code("throw new EvalError('I am old')") }
+      err = assert_raises(Quickjs::EvalError) { ::Quickjs.eval_code("throw new EvalError('I am old')") }
+      assert_match(/I am old/, err.message)
+      assert_equal("EvalError", err.js_name)
     end
 
     test "throws Quickjs::URIError if URIError happens" do
-      assert_raise_with_message(Quickjs::URIError, /expecting/) { ::Quickjs.eval_code("decodeURIComponent('%')") }
+      err = assert_raises(Quickjs::URIError) { ::Quickjs.eval_code("decodeURIComponent('%')") }
+      assert_match(/expecting/, err.message)
+      assert_equal("URIError", err.js_name)
     end
 
     test "throws Quickjs::AggregateError if AggregateError happens" do
-      assert_raise_with_message(Quickjs::AggregateError, /aggregated/) { ::Quickjs.eval_code("throw new AggregateError([new Error('some error')], 'aggregated')") }
+      err = assert_raises(Quickjs::AggregateError) { ::Quickjs.eval_code("throw new AggregateError([new Error('some error')], 'aggregated')") }
+      assert_match(/aggregated/, err.message)
+      assert_equal("AggregateError", err.js_name)
+    end
+
+    test "throws Quickjs::RuntimeError if custom exception happens" do
+      err = assert_raises(Quickjs::RuntimeError) { ::Quickjs.eval_code("class MyError extends Error { constructor(message) { super(message); this.name = 'CustomError'; } }; throw new MyError('my error')") }
+      assert_match(/my error/, err.message)
+      assert_equal("CustomError", err.js_name)
     end
 
     test "throws is awaited Promise is rejected" do
-      assert_raise_with_message(Quickjs::RuntimeError, /asynchronously sad/) do
+      err = assert_raises(Quickjs::RuntimeError) do
         ::Quickjs.eval_code("const promise = new Promise((res) => { throw 'asynchronously sad' });await promise")
       end
+      assert_match(/asynchronously sad/, err.message)
+      assert_equal(nil, err.js_name)
     end
 
     test "throws an exception if promise instance is returned" do
-      assert_raise_with_message(Quickjs::NoAwaitError, /An unawaited Promise was/) do
+      err = assert_raises(Quickjs::NoAwaitError) do
         ::Quickjs.eval_code("const promise = new Promise((res) => { res('awaited yo') });promise")
       end
+      assert_match(/An unawaited Promise was/, err.message)
+      assert_equal(nil, err.js_name)
     end
   end
 

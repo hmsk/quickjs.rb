@@ -191,7 +191,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     if (promiseState != -1)
     {
       VALUE r_error_message = rb_str_new2("cannot translate a Promise to Ruby. await within JavaScript's end");
-      rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, r_error_message));
+      rb_exc_raise(rb_funcall(rb_cQuickjsRuntimeError, rb_intern("new"), 2, r_error_message, Qnil));
       return Qnil;
     }
 
@@ -229,8 +229,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       JS_FreeValue(ctx, j_errorClassMessage);
       JS_FreeValue(ctx, j_errorClassName);
 
-      VALUE r_error_message = rb_sprintf("%s: %s", errorClassName, errorClassMessage);
-      VALUE r_error_class = rb_eRuntimeError;
+      VALUE r_error_message, r_error_class;
 
       if (strcmp(errorClassName, "SyntaxError") == 0)
       {
@@ -277,11 +276,16 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
         r_error_class = rb_cQuickjsInterruptedError;
         r_error_message = rb_str_new2(errorClassMessage);
       }
+      else
+      {
+        r_error_class = rb_cQuickjsRuntimeError;
+        r_error_message = rb_sprintf("%s: %s", errorClassName, errorClassMessage);
+      }
       JS_FreeCString(ctx, errorClassName);
       JS_FreeCString(ctx, errorClassMessage);
       JS_FreeValue(ctx, j_exceptionVal);
 
-      rb_exc_raise(rb_exc_new_str(r_error_class, r_error_message));
+      rb_exc_raise(rb_funcall(r_error_class, rb_intern("new"), 2, r_error_message, rb_str_new2(errorClassName)));
     }
     else // exception without Error object
     {
@@ -290,7 +294,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
 
       JS_FreeCString(ctx, errorMessage);
       JS_FreeValue(ctx, j_exceptionVal);
-      rb_exc_raise(rb_exc_new_str(rb_cQuickjsRuntimeError, r_error_message));
+      rb_exc_raise(rb_funcall(rb_cQuickjsRuntimeError, rb_intern("new"), 2, r_error_message, Qnil));
     }
     return Qnil;
   }
@@ -490,7 +494,7 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
     JS_FreeValue(data->context, j_returnedValue);
     JS_FreeValue(data->context, j_awaitedResult);
     VALUE r_error_message = rb_str_new2("An unawaited Promise was returned to the top-level");
-    rb_exc_raise(rb_exc_new_str(rb_cQuickjsNoAwaitError, r_error_message));
+    rb_exc_raise(rb_funcall(rb_cQuickjsNoAwaitError, rb_intern("new"), 2, r_error_message, Qnil));
     return Qnil;
   }
   else
@@ -545,7 +549,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   if (NIL_P(r_from))
   {
     VALUE r_error_message = rb_str_new2("missing import source");
-    rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, r_error_message));
+    rb_exc_raise(rb_funcall(rb_cQuickjsRuntimeError, rb_intern("new"), 2, r_error_message, Qnil));
     return Qnil;
   }
 
@@ -605,8 +609,15 @@ static VALUE vm_m_to_s(VALUE r_self)
   return rb_funcall(r_ary, rb_intern("join"), 1, rb_str_new2(" "));
 }
 
-RUBY_FUNC_EXPORTED void
-Init_quickjsrb(void)
+VALUE vm_m_initialize_quickjs_error(VALUE self, VALUE r_message, VALUE r_js_name)
+{
+  rb_call_super(1, &r_message);
+  rb_iv_set(self, "@js_name", r_js_name);
+
+  return self;
+}
+
+RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
 {
   VALUE rb_mQuickjs = rb_define_module("Quickjs");
   rb_define_const(rb_mQuickjs, "MODULE_STD", ID2SYM(rb_intern(featureStdId)));
@@ -632,6 +643,8 @@ Init_quickjsrb(void)
   rb_define_method(rb_cQuickjsVMLog, "inspect", vm_m_to_s, 0);
 
   rb_cQuickjsRuntimeError = rb_define_class_under(rb_mQuickjs, "RuntimeError", rb_eRuntimeError);
+  rb_define_method(rb_cQuickjsRuntimeError, "initialize", vm_m_initialize_quickjs_error, 2);
+  rb_define_attr(rb_cQuickjsRuntimeError, "js_name", 1, 0);
 
   rb_cQuickjsSyntaxError = rb_define_class_under(rb_mQuickjs, "SyntaxError", rb_cQuickjsRuntimeError);
   rb_cQuickjsTypeError = rb_define_class_under(rb_mQuickjs, "TypeError", rb_cQuickjsRuntimeError);
