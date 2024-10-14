@@ -36,7 +36,10 @@ Quickjs.eval_code('const obj = {}; obj.missingKey;') # => :undefined (Quickjs::V
 Quickjs.eval_code("Number('whatever')") #=> :NaN (Quickjs::Value::NAN)
 ```
 
-#### Limit resources
+<details>
+<summary>Options</summary>
+
+#### Resources
 
 ```rb
 # 1GB memory limit
@@ -46,20 +49,21 @@ Quickjs.eval_code(code, { memory_limit: 1024 ** 3 })
 Quickjs.eval_code(code, { max_stack_size: 1024 ** 2 })
 ```
 
-#### Enable built-in modules
+#### Built-in modules
+
+To enable [std module](https://bellard.org/quickjs/quickjs.html#std-module) and [os module](https://bellard.org/quickjs/quickjs.html#os-module) selectively.
 
 ```rb
 # enable std module
-# https://bellard.org/quickjs/quickjs.html#std-module
 Quickjs.eval_code(code, { features: [Quickjs::MODULE_STD] })
 
 # enable os module
-# https://bellard.org/quickjs/quickjs.html#os-module
 Quickjs.eval_code(code, { features: [Quickjs::MODULE_OS] })
 
-# enable timeout features `setTimeout`, `clearTimeout`
+# enable timeout features `setTimeout`, `clearTimeout` from os module specifically
 Quickjs.eval_code(code, { features: [Quickjs::FEATURES_TIMEOUT] })
 ```
+</details>
 
 ### `Quickjs::VM`: Maintain a consistent VM/runtime
 
@@ -71,7 +75,10 @@ vm.eval_code('a.b = "d";')
 vm.eval_code('a.b;') #=> "d"
 ```
 
-#### Config VM
+<details>
+<summary>Config VM/runtime</summary>
+
+#### Resources
 
 ```rb
 vm = Quickjs::VM.new(
@@ -80,31 +87,30 @@ vm = Quickjs::VM.new(
 )
 ```
 
+#### Built-in modules
+
+To enable [std module](https://bellard.org/quickjs/quickjs.html#std-module) and [os module](https://bellard.org/quickjs/quickjs.html#os-module) selectively.
+
 ```rb
 # enable std module
-# https://bellard.org/quickjs/quickjs.html#std-module
-vm = Quickjs::VM.new(
-  features: [::Quickjs::MODULE_STD],
-)
+vm = Quickjs::VM.new(features: [::Quickjs::MODULE_STD])
 
 # enable os module
-# https://bellard.org/quickjs/quickjs.html#os-module
-vm = Quickjs::VM.new(
-  features: [::Quickjs::MODULE_OS],
-)
-
-# `eval_code` will be interrupted after 1 sec (default: 100 msec)
-vm = Quickjs::VM.new(
-  timeout_msec: 1_000,
-)
+vm = Quickjs::VM.new(features: [::Quickjs::MODULE_OS])
 
 # enable timeout features `setTimeout`, `clearTimeout`
-vm = Quickjs::VM.new(
-  features: [::Quickjs::FEATURES_TIMEOUT],
-)
+vm = Quickjs::VM.new(features: [::Quickjs::FEATURES_TIMEOUT])
 ```
 
-#### ⚡️ Import ESM from source
+#### VM timeout
+
+```rb
+# `eval_code` will be interrupted after 1 sec (default: 100 msec)
+vm = Quickjs::VM.new(timeout_msec: 1_000)
+```
+</details>
+
+#### 🔌 Import ESM from source
 
 ```rb
 vm = Quickjs::VM.new
@@ -114,7 +120,7 @@ vm.eval_code("aliasedDefault()") #=> Exported `default` of the ESM is called
 vm.eval_code("member()") #=> Exported `member` of the ESM is called
 ```
 
-#### ⚡️ Define a global function for JS by Ruby
+#### 💎 Define a global function for JS by Ruby
 
 ```rb
 vm = Quickjs::VM.new
