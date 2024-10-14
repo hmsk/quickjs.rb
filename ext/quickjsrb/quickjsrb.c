@@ -525,11 +525,6 @@ static VALUE vm_m_defineGlobalFunction(VALUE r_self, VALUE r_name)
   return Qnil;
 }
 
-// WISH: vm.import('hey', from: '...source...') imports just default
-// WISH: vm.import('{ member, member2 }', from: '...source...')
-// WISH: vm.import('{ member as aliasedName }', from: '...source...')
-// WISH: vm.import('defaultMember, { member }', from: '...source...')
-// WISH: vm.import('* as all', from: '...source...')
 static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
 {
   VALUE r_import_string, r_opts;
@@ -548,16 +543,25 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   char *source = StringValueCStr(r_from);
-  char *import_name = StringValueCStr(r_import_string);
   JSValue func = JS_Eval(data->context, source, strlen(source), "mmmodule", JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
   js_module_set_import_meta(data->context, func, TRUE, FALSE);
   JS_FreeValue(data->context, func);
 
-  const char *importAndGlobalizeModule = "import * as %s from 'mmmodule';\n"
-                                         "globalThis['%s'] = %s;\n";
-  int length = snprintf(NULL, 0, importAndGlobalizeModule, import_name, import_name, import_name);
+  VALUE r_import_settings = rb_funcall(
+      rb_const_get(rb_cClass, rb_intern("Quickjs")),
+      rb_intern("_build_import"),
+      1,
+      r_import_string);
+  VALUE r_import_name = rb_ary_entry(r_import_settings, 0);
+  char *import_name = StringValueCStr(r_import_name);
+  VALUE r_globalize = rb_ary_entry(r_import_settings, 1);
+  char *globalize = StringValueCStr(r_globalize);
+
+  const char *importAndGlobalizeModule = "import %s from 'mmmodule';\n"
+                                         "%s\n";
+  int length = snprintf(NULL, 0, importAndGlobalizeModule, import_name, globalize);
   char *result = (char *)malloc(length + 1);
-  snprintf(result, length + 1, importAndGlobalizeModule, import_name, import_name, import_name);
+  snprintf(result, length + 1, importAndGlobalizeModule, import_name, globalize);
 
   JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), "<vm>", JS_EVAL_TYPE_MODULE);
   free(result);

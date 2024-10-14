@@ -22,4 +22,16 @@ module Quickjs
     e
   end
   module_function :_with_timeout
+
+  def _build_import(mappings)
+    imports, aliases = mappings.to_a.map do |imp|
+      ["#{imp[0]} as #{imp[1]}", imp[1].to_s]
+    end.transpose
+
+    [
+      imports.join(", ").yield_self{|s| '{ %s }' % s },
+      aliases.map {|name| "globalThis['#{name}'] = #{name};"}.join("\n")
+    ]
+  end
+  module_function :_build_import
 end
