@@ -291,7 +291,7 @@ class QuickjsTest < Test::Unit::TestCase
       end
     end
 
-    class GlobalFunction < QuickjsVmTest
+    class Import < QuickjsVmTest
       setup { @vm = Quickjs::VM.new }
       teardown { @vm = nil }
 
