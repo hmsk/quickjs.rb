@@ -110,7 +110,7 @@ vm = Quickjs::VM.new(timeout_msec: 1_000)
 ```
 </details>
 
-#### 🔌 Import ESM from source
+#### `Quickjs::VM#import`: 🔌 Import ESM from a source code
 
 ```rb
 vm = Quickjs::VM.new
@@ -120,7 +120,7 @@ vm.eval_code("aliasedDefault()") #=> Exported `default` of the ESM is called
 vm.eval_code("member()") #=> Exported `member` of the ESM is called
 ```
 
-#### 💎 Define a global function for JS by Ruby
+#### `Quickjs::VM#define_function`: 💎 Define a global function for JS by Ruby
 
 ```rb
 vm = Quickjs::VM.new
