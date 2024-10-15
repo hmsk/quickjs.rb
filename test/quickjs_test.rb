@@ -295,23 +295,29 @@ class QuickjsTest < Test::Unit::TestCase
       setup { @vm = Quickjs::VM.new }
       teardown { @vm = nil }
 
-      test "imports with named aliases from given ESM code" do
-        @vm.import({ default: 'aliasedDefault', member: 'member' }, from: File.read('./test/fixture.esm.js'))
+      test "imports named exports from given ESM code as is" do
+        @vm.import(['defaultMember', 'member'], from: File.read('./test/fixture.esm.js'))
 
-        assert_equal(@vm.eval_code("aliasedDefault()"), "I am a default export of ESM.")
+        assert_equal(@vm.eval_code("defaultMember()"), "I am a default export of ESM.")
         assert_equal(@vm.eval_code("member()"), "I am a exported member of ESM.")
       end
 
-      test "imports with * from given ESM code" do
-        pend 'will be supported'
+      test "imports named exports from given ESM code with alias" do
+        @vm.import({ default: 'aliasedDefault', member: 'aliasedMember' }, from: File.read('./test/fixture.esm.js'))
+
+        assert_equal(@vm.eval_code("aliasedDefault()"), "I am a default export of ESM.")
+        assert_equal(@vm.eval_code("aliasedMember()"), "I am a exported member of ESM.")
+      end
+
+      test "imports all exports from given ESM code into a single alias" do
         @vm.import('* as all', from: File.read('./test/fixture.esm.js'))
 
-        assert_equal(@vm.eval_code("all.aliasedDefault()"), "I am a default export of ESM.")
+        assert_equal(@vm.eval_code("all.default()"), "I am a default export of ESM.")
+        assert_equal(@vm.eval_code("all.defaultMember()"), "I am a default export of ESM.")
         assert_equal(@vm.eval_code("all.member()"), "I am a exported member of ESM.")
       end
 
       test "imports with implicit default from given ESM code" do
-        pend 'will be supported'
         @vm.import('Imported', from: File.read('./test/fixture.esm.js'))
 
         assert_equal(@vm.eval_code("Imported()"), "I am a default export of ESM.")

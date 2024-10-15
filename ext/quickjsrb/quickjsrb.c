@@ -531,7 +531,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   rb_scan_args(argc, argv, "10:", &r_import_string, &r_opts);
   if (NIL_P(r_opts))
     r_opts = rb_hash_new();
-  VALUE r_from = rb_hash_aref(r_opts, ID2SYM(rb_intern("from")));
+  VALUE r_from = rb_hash_aref(r_opts, ID2SYM(rb_intern("from"))); // TODO: Use kwargs instead
   if (NIL_P(r_from))
   {
     VALUE r_error_message = rb_str_new2("missing import source");
