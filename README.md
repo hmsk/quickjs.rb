@@ -114,18 +114,20 @@ vm = Quickjs::VM.new(timeout_msec: 1_000)
 
 ```rb
 vm = Quickjs::VM.new
-# equivalent to `import { default: aliasedDefault, member: member } from './exports.esm.js'`;
+
+# Equivalent to `import { default: aliasedDefault, member: member } from './exports.esm.js';`
 vm.import({ default: 'aliasedDefault', member: 'member' }, from: File.read('exports.esm.js'))
+
 vm.eval_code("aliasedDefault()") #=> Exported `default` of the ESM is called
 vm.eval_code("member()") #=> Exported `member` of the ESM is called
 
-# `import { member, defaultMember } from './exports.esm.js';
+# import { member, defaultMember } from './exports.esm.js';
 vm.import(['member', 'defaultMember'], from: File.read('exports.esm.js'))
 
-# `import DefaultExport from './exports.esm.js';
+# import DefaultExport from './exports.esm.js';
 vm.import('DefaultExport', from: File.read('exports.esm.js'))
 
-# `import * as all from './exports.esm.js';
+# import * as all from './exports.esm.js';
 vm.import('* as all', from: File.read('exports.esm.js'))
 ```
 
@@ -138,6 +140,20 @@ vm.define_function("greetingTo") do |arg1|
 end
 
 vm.eval_code("greetingTo('Rick')") #=> 'Hello! Rick'
+```
+
+#### `Quickjs::VM#logs`: 💾 Capture console logs
+
+All logs by `console.(log|info|debug|warn|error)` on VM are recorded and inspectable.
+
+```rb
+vm = Quickjs::VM.new
+vm.eval_code('console.log("log me", null)')
+
+vm.logs #=> Array of Quickjs::VM::Log
+vm.logs.last.severity #=> :info
+vm.logs.last.to_s #=> 'log me null'
+vm,logs.last.raw #=> ['log me', nil]
 ```
 
 ## License
