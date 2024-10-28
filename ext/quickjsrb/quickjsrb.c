@@ -1,71 +1,5 @@
 #include "quickjsrb.h"
 
-typedef struct EvalTime
-{
-  clock_t limit;
-  clock_t started_at;
-} EvalTime;
-
-typedef struct VMData
-{
-  struct JSContext *context;
-  VALUE defined_functions;
-  struct EvalTime *eval_time;
-  VALUE logs;
-} VMData;
-
-static void vm_free(void *ptr)
-{
-  VMData *data = (VMData *)ptr;
-  free(data->eval_time);
-
-  JSRuntime *runtime = JS_GetRuntime(data->context);
-  JS_SetInterruptHandler(runtime, NULL, NULL);
-  js_std_free_handlers(runtime);
-  JS_FreeContext(data->context);
-  JS_FreeRuntime(runtime);
-
-  xfree(ptr);
-}
-
-size_t vm_size(const void *data)
-{
-  return sizeof(VMData);
-}
-
-static void vm_mark(void *ptr)
-{
-  VMData *data = (VMData *)ptr;
-  rb_gc_mark_movable(data->defined_functions);
-  rb_gc_mark_movable(data->logs);
-}
-
-static const rb_data_type_t vm_type = {
-    .wrap_struct_name = "quickjsvm",
-    .function = {
-        .dmark = vm_mark,
-        .dfree = vm_free,
-        .dsize = vm_size,
-    },
-    .flags = RUBY_TYPED_FREE_IMMEDIATELY,
-};
-
-static VALUE vm_alloc(VALUE r_self)
-{
-  VMData *data;
-  VALUE obj = TypedData_Make_Struct(r_self, VMData, &vm_type, data);
-  data->defined_functions = rb_hash_new();
-  data->logs = rb_ary_new();
-
-  EvalTime *eval_time = malloc(sizeof(EvalTime));
-  data->eval_time = eval_time;
-
-  JSRuntime *runtime = JS_NewRuntime();
-  data->context = JS_NewContext(runtime);
-
-  return obj;
-}
-
 VALUE rb_cQuickjsVMLog, rb_cQuickjsSyntaxError, rb_cQuickjsRuntimeError, rb_cQuickjsInterruptedError, rb_cQuickjsNoAwaitError, rb_cQuickjsTypeError, rb_cQuickjsReferenceError, rb_cQuickjsRangeError, rb_cQuickjsEvalError, rb_cQuickjsURIError, rb_cQuickjsAggregateError;
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
@@ -370,16 +304,6 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, J
   return JS_UNDEFINED;
 }
 
-static char *random_string()
-{
-  VALUE r_rand = rb_funcall(
-      rb_const_get(rb_cClass, rb_intern("SecureRandom")),
-      rb_intern("alphanumeric"),
-      1,
-      INT2NUM(12));
-  return StringValueCStr(r_rand);
-}
-
 static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 {
   VALUE r_opts;
@@ -587,38 +511,12 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   return Qtrue;
 }
 
-static VALUE vm_m_getLogs(VALUE r_self)
+static VALUE vm_m_logs(VALUE r_self)
 {
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   return data->logs;
-}
-
-static VALUE pick_raw(VALUE block_arg, VALUE data, int argc, const VALUE *argv, VALUE blockarg)
-{
-  return rb_hash_aref(block_arg, ID2SYM(rb_intern("raw")));
-}
-
-static VALUE vm_m_raw(VALUE r_self)
-{
-  VALUE row = rb_iv_get(r_self, "@row");
-  VALUE r_ary = rb_block_call(row, rb_intern("map"), 0, NULL, pick_raw, Qnil);
-
-  return r_ary;
-}
-
-static VALUE pick_c(VALUE block_arg, VALUE data, int argc, const VALUE *argv, VALUE blockarg)
-{
-  return rb_hash_aref(block_arg, ID2SYM(rb_intern("c")));
-}
-
-static VALUE vm_m_to_s(VALUE r_self)
-{
-  VALUE row = rb_iv_get(r_self, "@row");
-  VALUE r_ary = rb_block_call(row, rb_intern("map"), 0, NULL, pick_c, Qnil);
-
-  return rb_funcall(r_ary, rb_intern("join"), 1, rb_str_new2(" "));
 }
 
 VALUE vm_m_initialize_quickjs_error(VALUE self, VALUE r_message, VALUE r_js_name)
@@ -646,13 +544,9 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(rb_cQuickjsVM, "eval_code", vm_m_evalCode, 1);
   rb_define_method(rb_cQuickjsVM, "define_function", vm_m_defineGlobalFunction, 1);
   rb_define_method(rb_cQuickjsVM, "import", vm_m_import, -1);
-  rb_define_method(rb_cQuickjsVM, "logs", vm_m_getLogs, 0);
+  rb_define_method(rb_cQuickjsVM, "logs", vm_m_logs, 0);
 
-  rb_cQuickjsVMLog = rb_define_class_under(rb_cQuickjsVM, "Log", rb_cObject);
-  rb_define_attr(rb_cQuickjsVMLog, "severity", 1, 0);
-  rb_define_method(rb_cQuickjsVMLog, "raw", vm_m_raw, 0);
-  rb_define_method(rb_cQuickjsVMLog, "to_s", vm_m_to_s, 0);
-  rb_define_method(rb_cQuickjsVMLog, "inspect", vm_m_to_s, 0);
+  rb_cQuickjsVMLog = r_define_log_class(rb_cQuickjsVM);
 
   rb_cQuickjsRuntimeError = rb_define_class_under(rb_mQuickjs, "RuntimeError", rb_eRuntimeError);
   rb_define_method(rb_cQuickjsRuntimeError, "initialize", vm_m_initialize_quickjs_error, 2);
