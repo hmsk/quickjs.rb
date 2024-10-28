@@ -12,6 +12,16 @@
 #include <string.h>
 #include <time.h>
 
+const char *featureStdId = "feature_std";
+const char *featureOsId = "feature_os";
+const char *featureOsTimeoutId = "feature_os_timeout";
+
+const char *undefinedId = "undefined";
+const char *nanId = "NaN";
+
+#define QUICKJSRB_SYM(id) \
+  (VALUE) { ID2SYM(rb_intern(id)) }
+
 // VM data structure
 
 typedef struct EvalTime
@@ -90,6 +100,19 @@ static char *random_string()
       1,
       INT2NUM(12));
   return StringValueCStr(r_rand);
+}
+
+// Constants
+
+static void r_define_constants(VALUE r_parent_class)
+{
+  rb_define_const(r_parent_class, "MODULE_STD", QUICKJSRB_SYM(featureStdId));
+  rb_define_const(r_parent_class, "MODULE_OS", QUICKJSRB_SYM(featureOsId));
+  rb_define_const(r_parent_class, "FEATURES_TIMEOUT", QUICKJSRB_SYM(featureOsTimeoutId));
+
+  VALUE rb_cQuickjsValue = rb_define_class_under(r_parent_class, "Value", rb_cObject);
+  rb_define_const(rb_cQuickjsValue, "UNDEFINED", QUICKJSRB_SYM(undefinedId));
+  rb_define_const(rb_cQuickjsValue, "NAN", QUICKJSRB_SYM(nanId));
 }
 
 // Log class

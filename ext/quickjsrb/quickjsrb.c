@@ -1,12 +1,6 @@
 #include "quickjsrb.h"
 
 VALUE rb_cQuickjsVMLog, rb_cQuickjsSyntaxError, rb_cQuickjsRuntimeError, rb_cQuickjsInterruptedError, rb_cQuickjsNoAwaitError, rb_cQuickjsTypeError, rb_cQuickjsReferenceError, rb_cQuickjsRangeError, rb_cQuickjsEvalError, rb_cQuickjsURIError, rb_cQuickjsAggregateError;
-const char *undefinedId = "undefined";
-const char *nanId = "NaN";
-
-const char *featureStdId = "feature_std";
-const char *featureOsId = "feature_os";
-const char *featureOsTimeoutId = "feature_os_timeout";
 
 JSValue to_js_value(JSContext *ctx, VALUE r_value)
 {
@@ -102,7 +96,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
   {
     if (JS_VALUE_IS_NAN(j_val))
     {
-      return ID2SYM(rb_intern(nanId));
+      return QUICKJSRB_SYM(nanId);
     }
     double double_res;
     JS_ToFloat64(ctx, &double_res, j_val);
@@ -148,7 +142,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
   case JS_TAG_NULL:
     return Qnil;
   case JS_TAG_UNDEFINED:
-    return ID2SYM(rb_intern(undefinedId));
+    return QUICKJSRB_SYM(undefinedId);
   case JS_TAG_EXCEPTION:
   {
     JSValue j_exceptionVal = JS_GetException(ctx);
@@ -342,7 +336,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   JS_SetModuleLoaderFunc(runtime, NULL, js_module_loader, NULL);
   js_std_init_handlers(runtime);
 
-  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, ID2SYM(rb_intern(featureStdId)))))
+  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featureStdId))))
   {
     js_init_module_std(data->context, "std");
     const char *enableStd = "import * as std from 'std';\n"
@@ -351,7 +345,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JS_FreeValue(data->context, j_stdEval);
   }
 
-  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, ID2SYM(rb_intern(featureOsId)))))
+  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featureOsId))))
   {
     js_init_module_os(data->context, "os");
     const char *enableOs = "import * as os from 'os';\n"
@@ -359,7 +353,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JSValue j_osEval = JS_Eval(data->context, enableOs, strlen(enableOs), "<vm>", JS_EVAL_TYPE_MODULE);
     JS_FreeValue(data->context, j_osEval);
   }
-  else if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, ID2SYM(rb_intern(featureOsTimeoutId)))))
+  else if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featureOsTimeoutId))))
   {
     char *filename = random_string();
     js_init_module_os(data->context, filename); // Better if this is limited just only for setTimeout and clearTimeout
@@ -530,13 +524,7 @@ VALUE vm_m_initialize_quickjs_error(VALUE self, VALUE r_message, VALUE r_js_name
 RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
 {
   VALUE rb_mQuickjs = rb_define_module("Quickjs");
-  rb_define_const(rb_mQuickjs, "MODULE_STD", ID2SYM(rb_intern(featureStdId)));
-  rb_define_const(rb_mQuickjs, "MODULE_OS", ID2SYM(rb_intern(featureOsId)));
-  rb_define_const(rb_mQuickjs, "FEATURES_TIMEOUT", ID2SYM(rb_intern(featureOsTimeoutId)));
-
-  VALUE rb_cQuickjsValue = rb_define_class_under(rb_mQuickjs, "Value", rb_cObject);
-  rb_define_const(rb_cQuickjsValue, "UNDEFINED", ID2SYM(rb_intern(undefinedId)));
-  rb_define_const(rb_cQuickjsValue, "NAN", ID2SYM(rb_intern(nanId)));
+  r_define_constants(rb_mQuickjs);
 
   VALUE rb_cQuickjsVM = rb_define_class_under(rb_mQuickjs, "VM", rb_cObject);
   rb_define_alloc_func(rb_cQuickjsVM, vm_alloc);
