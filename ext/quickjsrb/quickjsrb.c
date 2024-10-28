@@ -523,6 +523,8 @@ VALUE vm_m_initialize_quickjs_error(VALUE self, VALUE r_message, VALUE r_js_name
 
 RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
 {
+  rb_require("json");
+  rb_require("securerandom");
   VALUE rb_mQuickjs = rb_define_module("Quickjs");
   r_define_constants(rb_mQuickjs);
 

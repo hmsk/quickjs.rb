@@ -1,8 +1,6 @@
 # frozen_string_literal: true
 
 require "timeout"
-require "json"
-require "securerandom"
 require_relative "quickjs/version"
 require_relative "quickjs/quickjsrb"
 
