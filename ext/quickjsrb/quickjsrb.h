@@ -19,6 +19,15 @@ const char *featureOsTimeoutId = "feature_os_timeout";
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
 
+const char *native_errors[] = {
+    "SyntaxError",
+    "TypeError",
+    "ReferenceError",
+    "RangeError",
+    "EvalError",
+    "URIError",
+    "AggregateError"};
+
 #define QUICKJSRB_SYM(id) \
   (VALUE) { ID2SYM(rb_intern(id)) }
 
@@ -102,6 +111,21 @@ static char *random_string()
   return StringValueCStr(r_rand);
 }
 
+static bool is_native_error_name(const char *error_name)
+{
+  bool is_native_error = false;
+  int numStrings = sizeof(native_errors) / sizeof(native_errors[0]);
+  for (int i = 0; i < numStrings; i++)
+  {
+    if (strcmp(native_errors[i], error_name) == 0)
+    {
+      is_native_error = true;
+      break;
+    }
+  }
+  return is_native_error;
+}
+
 // Constants
 
 static void r_define_constants(VALUE r_parent_class)
@@ -178,15 +202,13 @@ static void r_define_exception_classes(VALUE r_parent_class)
   rb_define_attr(r_runtime_error, "js_name", 1, 0);
 
   // JS native errors
-  rb_define_class_under(r_parent_class, "SyntaxError", r_runtime_error);
-  rb_define_class_under(r_parent_class, "TypeError", r_runtime_error);
-  rb_define_class_under(r_parent_class, "RangeError", r_runtime_error);
-  rb_define_class_under(r_parent_class, "ReferenceError", r_runtime_error);
-  rb_define_class_under(r_parent_class, "URIError", r_runtime_error);
-  rb_define_class_under(r_parent_class, "EvalError", r_runtime_error);
-  rb_define_class_under(r_parent_class, "AggregateError", r_runtime_error);
+  int numStrings = sizeof(native_errors) / sizeof(native_errors[0]);
+  for (int i = 0; i < numStrings; i++)
+  {
+    rb_define_class_under(r_parent_class, native_errors[i], r_runtime_error);
+  }
 
-  // quickjs, quickjsrb specific errors
+  // quickjsrb specific errors
   rb_define_class_under(r_parent_class, QUICKJSRB_INTERRUPTED_ERROR, r_runtime_error);
   rb_define_class_under(r_parent_class, QUICKJSRB_NO_AWAIT_ERROR, r_runtime_error);
 }

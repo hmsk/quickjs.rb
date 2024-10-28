@@ -156,32 +156,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       JS_FreeValue(ctx, j_errorClassName);
 
       VALUE r_error_class, r_error_message = rb_str_new2(errorClassMessage);
-
-      if (strcmp(errorClassName, "SyntaxError") == 0)
-      {
-        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
-      }
-      else if (strcmp(errorClassName, "TypeError") == 0)
-      {
-        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
-      }
-      else if (strcmp(errorClassName, "ReferenceError") == 0)
-      {
-        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
-      }
-      else if (strcmp(errorClassName, "RangeError") == 0)
-      {
-        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
-      }
-      else if (strcmp(errorClassName, "EvalError") == 0)
-      {
-        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
-      }
-      else if (strcmp(errorClassName, "URIError") == 0)
-      {
-        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
-      }
-      else if (strcmp(errorClassName, "AggregateError") == 0)
+      if (is_native_error_name(errorClassName))
       {
         r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
       }
