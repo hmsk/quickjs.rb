@@ -154,4 +154,49 @@ static VALUE r_define_log_class(VALUE r_parent_class)
   return r_log_class;
 }
 
+// Exceptions
+
+#define QUICKJSRB_ROOT_RUNTIME_ERROR "RuntimeError"
+
+#define QUICKJSRB_SYNTAX_ERROR "SyntaxError"
+#define QUICKJSRB_TYPE_ERROR "TypeError"
+#define QUICKJSRB_RANGE_ERROR "RangeError"
+#define QUICKJSRB_REFERENCE_ERROR "ReferenceError"
+#define QUICKJSRB_URI_ERROR "URIError"
+#define QUICKJSRB_EVAL_ERROR "EvalError"
+#define QUICKJSRB_AGGREGATE_ERROR "AggregateError"
+
+#define QUICKJSRB_INTERRUPTED_ERROR "InterruptedError"
+#define QUICKJSRB_NO_AWAIT_ERROR "NoAwaitError"
+
+VALUE vm_m_initialize_quickjs_error(VALUE self, VALUE r_message, VALUE r_js_name)
+{
+  rb_call_super(1, &r_message);
+  rb_iv_set(self, "@js_name", r_js_name);
+
+  return self;
+}
+
+static void r_define_exception_classes(VALUE r_parent_class)
+{
+  VALUE r_runtime_error = rb_define_class_under(r_parent_class, "RuntimeError", rb_eRuntimeError);
+  rb_define_method(r_runtime_error, "initialize", vm_m_initialize_quickjs_error, 2);
+  rb_define_attr(r_runtime_error, "js_name", 1, 0);
+
+  rb_define_class_under(r_parent_class, QUICKJSRB_SYNTAX_ERROR, r_runtime_error);
+  rb_define_class_under(r_parent_class, QUICKJSRB_TYPE_ERROR, r_runtime_error);
+  rb_define_class_under(r_parent_class, QUICKJSRB_RANGE_ERROR, r_runtime_error);
+  rb_define_class_under(r_parent_class, QUICKJSRB_REFERENCE_ERROR, r_runtime_error);
+  rb_define_class_under(r_parent_class, QUICKJSRB_URI_ERROR, r_runtime_error);
+  rb_define_class_under(r_parent_class, QUICKJSRB_EVAL_ERROR, r_runtime_error);
+  rb_define_class_under(r_parent_class, QUICKJSRB_AGGREGATE_ERROR, r_runtime_error);
+  rb_define_class_under(r_parent_class, QUICKJSRB_INTERRUPTED_ERROR, r_runtime_error);
+  rb_define_class_under(r_parent_class, QUICKJSRB_NO_AWAIT_ERROR, r_runtime_error);
+}
+
+static VALUE r_find_exception_class(const char *class_name)
+{
+  return rb_const_get(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern(class_name));
+}
+
 #endif /* QUICKJSRB_H */
