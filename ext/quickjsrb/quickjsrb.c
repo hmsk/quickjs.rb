@@ -1,6 +1,6 @@
 #include "quickjsrb.h"
 
-VALUE rb_cQuickjsVMLog, rb_cQuickjsSyntaxError, rb_cQuickjsRuntimeError, rb_cQuickjsInterruptedError, rb_cQuickjsNoAwaitError, rb_cQuickjsTypeError, rb_cQuickjsReferenceError, rb_cQuickjsRangeError, rb_cQuickjsEvalError, rb_cQuickjsURIError, rb_cQuickjsAggregateError;
+VALUE rb_cQuickjsSyntaxError, rb_cQuickjsRuntimeError, rb_cQuickjsInterruptedError, rb_cQuickjsNoAwaitError, rb_cQuickjsTypeError, rb_cQuickjsReferenceError, rb_cQuickjsRangeError, rb_cQuickjsEvalError, rb_cQuickjsURIError, rb_cQuickjsAggregateError;
 
 JSValue to_js_value(JSContext *ctx, VALUE r_value)
 {
@@ -270,7 +270,8 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, J
   const char *severity = JS_ToCString(ctx, j_severity);
   JS_FreeValue(ctx, j_severity);
 
-  VALUE r_log = rb_funcall(rb_cQuickjsVMLog, rb_intern("new"), 0);
+  VALUE r_log_class = rb_const_get(rb_const_get(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("VM")), rb_intern("Log"));
+  VALUE r_log = rb_funcall(r_log_class, rb_intern("new"), 0);
   rb_iv_set(r_log, "@severity", ID2SYM(rb_intern(severity)));
 
   VALUE r_row = rb_ary_new();
@@ -535,8 +536,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(rb_cQuickjsVM, "define_function", vm_m_defineGlobalFunction, 1);
   rb_define_method(rb_cQuickjsVM, "import", vm_m_import, -1);
   rb_define_method(rb_cQuickjsVM, "logs", vm_m_logs, 0);
-
-  rb_cQuickjsVMLog = r_define_log_class(rb_cQuickjsVM);
+  r_define_log_class(rb_cQuickjsVM);
 
   rb_cQuickjsRuntimeError = rb_define_class_under(rb_mQuickjs, "RuntimeError", rb_eRuntimeError);
   rb_define_method(rb_cQuickjsRuntimeError, "initialize", vm_m_initialize_quickjs_error, 2);
