@@ -117,7 +117,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     if (promiseState != -1)
     {
       VALUE r_error_message = rb_str_new2("cannot translate a Promise to Ruby. await within JavaScript's end");
-      rb_exc_raise(rb_funcall(r_find_exception_class(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
+      rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
       return Qnil;
     }
 
@@ -159,44 +159,44 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
 
       if (strcmp(errorClassName, "SyntaxError") == 0)
       {
-        r_error_class = r_find_exception_class(QUICKJSRB_SYNTAX_ERROR);
+        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
       }
       else if (strcmp(errorClassName, "TypeError") == 0)
       {
-        r_error_class = r_find_exception_class(QUICKJSRB_TYPE_ERROR);
+        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
       }
       else if (strcmp(errorClassName, "ReferenceError") == 0)
       {
-        r_error_class = r_find_exception_class(QUICKJSRB_REFERENCE_ERROR);
+        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
       }
       else if (strcmp(errorClassName, "RangeError") == 0)
       {
-        r_error_class = r_find_exception_class(QUICKJSRB_RANGE_ERROR);
+        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
       }
       else if (strcmp(errorClassName, "EvalError") == 0)
       {
-        r_error_class = r_find_exception_class(QUICKJSRB_EVAL_ERROR);
+        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
       }
       else if (strcmp(errorClassName, "URIError") == 0)
       {
-        r_error_class = r_find_exception_class(QUICKJSRB_URI_ERROR);
+        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
       }
       else if (strcmp(errorClassName, "AggregateError") == 0)
       {
-        r_error_class = r_find_exception_class(QUICKJSRB_AGGREGATE_ERROR);
+        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
       }
       else if (strcmp(errorClassName, "InternalError") == 0 && strstr(errorClassMessage, "interrupted") != NULL)
       {
-        r_error_class = r_find_exception_class(QUICKJSRB_INTERRUPTED_ERROR);
+        r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR);
         r_error_message = rb_str_new2("Code evaluation is interrupted by the timeout or something");
       }
       else if (strcmp(errorClassName, "Quickjs::InterruptedError") == 0)
       {
-        r_error_class = r_find_exception_class(QUICKJSRB_INTERRUPTED_ERROR);
+        r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR);
       }
       else
       {
-        r_error_class = r_find_exception_class(QUICKJSRB_ROOT_RUNTIME_ERROR);
+        r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR);
       }
       JS_FreeCString(ctx, errorClassName);
       JS_FreeCString(ctx, errorClassMessage);
@@ -211,7 +211,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
 
       JS_FreeCString(ctx, errorMessage);
       JS_FreeValue(ctx, j_exceptionVal);
-      rb_exc_raise(rb_funcall(r_find_exception_class(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
+      rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
     }
     return Qnil;
   }
@@ -418,7 +418,7 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
     JS_FreeValue(data->context, j_returnedValue);
     JS_FreeValue(data->context, j_awaitedResult);
     VALUE r_error_message = rb_str_new2("An unawaited Promise was returned to the top-level");
-    rb_exc_raise(rb_funcall(r_find_exception_class(QUICKJSRB_NO_AWAIT_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_NO_AWAIT_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
     return Qnil;
   }
   else
@@ -468,7 +468,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   if (NIL_P(r_from))
   {
     VALUE r_error_message = rb_str_new2("missing import source");
-    rb_exc_raise(rb_funcall(r_find_exception_class(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
     return Qnil;
   }
 
