@@ -3,6 +3,7 @@ PATH
   specs:
     quickjs (0.2.1)
       json
+      securerandom
 
 GEM
   remote: https://rubygems.org/
@@ -12,6 +13,7 @@ GEM
     rake (13.2.1)
     rake-compiler (1.2.7)
       rake
+    securerandom (0.3.1)
     test-unit (3.6.2)
       power_assert
 

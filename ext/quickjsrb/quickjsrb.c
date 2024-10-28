@@ -370,6 +370,16 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, J
   return JS_UNDEFINED;
 }
 
+static char *random_string()
+{
+  VALUE r_rand = rb_funcall(
+      rb_const_get(rb_cClass, rb_intern("SecureRandom")),
+      rb_intern("alphanumeric"),
+      1,
+      INT2NUM(12));
+  return StringValueCStr(r_rand);
+}
+
 static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 {
   VALUE r_opts;
@@ -427,11 +437,17 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   }
   else if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, ID2SYM(rb_intern(featureOsTimeoutId)))))
   {
-    js_init_module_os(data->context, "_os"); // Better if this is limited just only for setTimeout and clearTimeout
-    const char *enableTimeout = "import * as _os from '_os';\n"
-                                "globalThis.setTimeout = _os.setTimeout;\n"
-                                "globalThis.clearTimeout = _os.clearTimeout;\n";
+    char *filename = random_string();
+    js_init_module_os(data->context, filename); // Better if this is limited just only for setTimeout and clearTimeout
+    const char *enableTimeoutTemplate = "import * as _os from '%s';\n"
+                                        "globalThis.setTimeout = _os.setTimeout;\n"
+                                        "globalThis.clearTimeout = _os.clearTimeout;\n";
+    int length = snprintf(NULL, 0, enableTimeoutTemplate, filename);
+    char *enableTimeout = (char *)malloc(length + 1);
+    snprintf(enableTimeout, length + 1, enableTimeoutTemplate, filename);
+
     JSValue j_timeoutEval = JS_Eval(data->context, enableTimeout, strlen(enableTimeout), "<vm>", JS_EVAL_TYPE_MODULE);
+    free(enableTimeout);
     JS_FreeValue(data->context, j_timeoutEval);
   }
 
@@ -542,8 +558,9 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
+  char *filename = random_string();
   char *source = StringValueCStr(r_from);
-  JSValue func = JS_Eval(data->context, source, strlen(source), "mmmodule", JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  JSValue func = JS_Eval(data->context, source, strlen(source), filename, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
   js_module_set_import_meta(data->context, func, TRUE, FALSE);
   JS_FreeValue(data->context, func);
 
@@ -557,11 +574,11 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   VALUE r_globalize = rb_ary_entry(r_import_settings, 1);
   char *globalize = StringValueCStr(r_globalize);
 
-  const char *importAndGlobalizeModule = "import %s from 'mmmodule';\n"
+  const char *importAndGlobalizeModule = "import %s from '%s';\n"
                                          "%s\n";
-  int length = snprintf(NULL, 0, importAndGlobalizeModule, import_name, globalize);
+  int length = snprintf(NULL, 0, importAndGlobalizeModule, import_name, filename, globalize);
   char *result = (char *)malloc(length + 1);
-  snprintf(result, length + 1, importAndGlobalizeModule, import_name, globalize);
+  snprintf(result, length + 1, importAndGlobalizeModule, import_name, filename, globalize);
 
   JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), "<vm>", JS_EVAL_TYPE_MODULE);
   free(result);

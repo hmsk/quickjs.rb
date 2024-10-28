@@ -19,6 +19,7 @@ Gem::Specification.new do |spec|
   spec.metadata['changelog_uri'] = 'https://github.com/hmsk/quickjs.rb/blob/main/CHANGELOG.md'
 
   spec.add_runtime_dependency 'json'
+  spec.add_runtime_dependency 'securerandom'
   gemspec = File.basename(__FILE__)
   spec.files = IO.popen(%w[git ls-files -z], chdir: __dir__, err: IO::NULL) do |ls|
     ls.readlines("\x0", chomp: true).reject do |f|
