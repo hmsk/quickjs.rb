@@ -369,6 +369,14 @@ class QuickjsTest < Test::Unit::TestCase
           128, "str", "var!", Quickjs::Value::UNDEFINED, nil, { "key" => "value" }, [1,2,3]
         ])
       end
+
+      test "can log Promise object as just a string" do
+        @vm.eval_code('async function hi() {}')
+        @vm.eval_code('console.log("log promise", hi())')
+
+        assert_equal(@vm.logs.last.to_s, ['log promise', '[object Promise]'].join(' '))
+        assert_equal(@vm.logs.last.raw, ['log promise', 'Promise'])
+      end
     end
   end
 end

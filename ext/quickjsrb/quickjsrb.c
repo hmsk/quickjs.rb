@@ -130,10 +130,10 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     VALUE r_str = rb_str_new2(msg);
     JS_FreeCString(ctx, msg);
 
-    JS_FreeValue(ctx, j_global);
     JS_FreeValue(ctx, j_strigified);
     JS_FreeValue(ctx, j_stringifyFunc);
     JS_FreeValue(ctx, j_jsonClass);
+    JS_FreeValue(ctx, j_global);
 
     return rb_funcall(rb_const_get(rb_cClass, rb_intern("JSON")), rb_intern("parse"), 1, r_str);
   }
@@ -246,6 +246,7 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, J
   VALUE r_log_class = rb_const_get(rb_const_get(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("VM")), rb_intern("Log"));
   VALUE r_log = rb_funcall(r_log_class, rb_intern("new"), 0);
   rb_iv_set(r_log, "@severity", ID2SYM(rb_intern(severity)));
+  JS_FreeCString(ctx, severity);
 
   VALUE r_row = rb_ary_new();
   int i;
@@ -253,22 +254,28 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, J
   int count;
   JS_ToInt32(ctx, &count, j_length);
   JS_FreeValue(ctx, j_length);
+
   for (i = 0; i < count; i++)
   {
-    JSValue j_logged = JS_GetPropertyUint32(ctx, argv[1], i);
-    const char *body = JS_ToCString(ctx, j_logged);
     VALUE r_loghash = rb_hash_new();
-    rb_hash_aset(r_loghash, ID2SYM(rb_intern("c")), rb_str_new2(body));
-    rb_hash_aset(r_loghash, ID2SYM(rb_intern("raw")), to_rb_value(ctx, j_logged));
-    rb_ary_push(r_row, r_loghash);
+    JSValue j_logged = JS_GetPropertyUint32(ctx, argv[1], i);
+    if (JS_VALUE_GET_NORM_TAG(j_logged) == JS_TAG_OBJECT && JS_PromiseState(ctx, j_logged) != -1)
+    {
+      rb_hash_aset(r_loghash, ID2SYM(rb_intern("raw")), rb_str_new2("Promise"));
+    }
+    else
+    {
+      rb_hash_aset(r_loghash, ID2SYM(rb_intern("raw")), to_rb_value(ctx, j_logged));
+    }
+    const char *body = JS_ToCString(ctx, j_logged);
     JS_FreeValue(ctx, j_logged);
+    rb_hash_aset(r_loghash, ID2SYM(rb_intern("c")), rb_str_new2(body));
     JS_FreeCString(ctx, body);
+    rb_ary_push(r_row, r_loghash);
   }
 
   rb_iv_set(r_log, "@row", r_row);
   rb_ary_push(data->logs, r_log);
-  JS_FreeCString(ctx, severity);
-
   return JS_UNDEFINED;
 }
 
@@ -385,7 +392,7 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
 
   char *code = StringValueCStr(r_code);
   JSValue j_codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
-  JSValue j_awaitedResult = js_std_await(data->context, j_codeResult);
+  JSValue j_awaitedResult = js_std_await(data->context, j_codeResult); // This frees j_codeResult
   JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
   // Do this by rescuing to_rb_value
   if (JS_VALUE_GET_NORM_TAG(j_returnedValue) == JS_TAG_OBJECT && JS_PromiseState(data->context, j_returnedValue) != -1)
