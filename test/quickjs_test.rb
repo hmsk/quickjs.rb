@@ -287,14 +287,21 @@ class QuickjsTest < Test::Unit::TestCase
 
       test "global timeout still works" do
         @vm.define_function("infinite") { loop {} }
+
         assert_raise_with_message(Quickjs::InterruptedError, /Ruby runtime got timeout/) { @vm.eval_code("infinite();") }
       end
 
-      test "async keyword configures" do
+      test ":async keyword lets global function be defined as async" do
         @vm.define_function "unblocked", :async do
           'asynchronous return'
         end
         assert_equal(@vm.eval_code("const awaited = await unblocked().then((result) => result + '!'); awaited;"), 'asynchronous return!')
+      end
+
+      test "throws an internal error which will be converted to Quickjs::RubyFunctionError in JS world when Ruby function raises" do
+        @vm.define_function("errorable") { raise 'sady' }
+
+        assert_raise_with_message(Quickjs::RubyFunctionError, 'unintentional error is raised while executing the function by Ruby: `errorable`') { @vm.eval_code("errorable();") }
       end
     end
 

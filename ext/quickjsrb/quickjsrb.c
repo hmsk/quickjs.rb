@@ -165,6 +165,11 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
         r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR);
         r_error_message = rb_str_new2("Code evaluation is interrupted by the timeout or something");
       }
+      else if (strcmp(errorClassName, "InternalError") == 0 && strstr(errorClassMessage, "Ruby") != NULL)
+      {
+        r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_RUBY_FUNCTION_ERROR);
+      }
+
       else if (strcmp(errorClassName, "Quickjs::InterruptedError") == 0)
       {
         r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR);
@@ -211,6 +216,18 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
   }
 }
 
+static VALUE r_try_call_proc(VALUE r_try_args)
+{
+  return rb_funcall(
+      rb_const_get(rb_cClass, rb_intern("Quickjs")),
+      rb_intern("_with_timeout"),
+      3,
+      RARRAY_AREF(r_try_args, 2), // timeout
+      RARRAY_AREF(r_try_args, 0), // proc
+      RARRAY_AREF(r_try_args, 1)  // args for proc
+  );
+}
+
 static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int _argc, JSValueConst *argv)
 {
   VMData *data = JS_GetContextOpaque(ctx);
@@ -223,17 +240,25 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   { // Shouldn't happen
     return JS_ThrowReferenceError(ctx, "Proc `%s` is not defined", funcName);
   }
+
+  VALUE r_call_args = rb_ary_new();
+  rb_ary_push(r_call_args, r_proc);
+  rb_ary_push(r_call_args, to_rb_value(ctx, argv[1]));
+  rb_ary_push(r_call_args, ULONG2NUM(data->eval_time->limit * 1000 / CLOCKS_PER_SEC));
+
+  int sadnessHappened;
+  VALUE r_result = rb_protect(r_try_call_proc, r_call_args, &sadnessHappened);
+  JSValue j_result;
+  if (sadnessHappened)
+  {
+    j_result = JS_ThrowInternalError(ctx, "unintentional error is raised while executing the function by Ruby: `%s`", funcName);
+  }
+  else
+  {
+    j_result = to_js_value(ctx, r_result);
+  }
   JS_FreeCString(ctx, funcName);
-
-  VALUE r_result = rb_funcall(
-      rb_const_get(rb_cClass, rb_intern("Quickjs")),
-      rb_intern("_with_timeout"),
-      3,
-      ULONG2NUM(data->eval_time->limit * 1000 / CLOCKS_PER_SEC),
-      r_proc,
-      to_rb_value(ctx, argv[1]));
-
-  return to_js_value(ctx, r_result);
+  return j_result;
 }
 
 static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, JSValueConst *argv)

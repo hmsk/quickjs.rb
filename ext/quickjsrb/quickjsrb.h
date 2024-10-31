@@ -183,6 +183,7 @@ static VALUE r_define_log_class(VALUE r_parent_class)
 #define QUICKJSRB_ROOT_RUNTIME_ERROR "RuntimeError"
 #define QUICKJSRB_INTERRUPTED_ERROR "InterruptedError"
 #define QUICKJSRB_NO_AWAIT_ERROR "NoAwaitError"
+#define QUICKJSRB_RUBY_FUNCTION_ERROR "RubyFunctionError"
 
 #define QUICKJSRB_ERROR_FOR(name) \
   (VALUE) { rb_const_get(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern(name)) }
@@ -211,6 +212,7 @@ static void r_define_exception_classes(VALUE r_parent_class)
   // quickjsrb specific errors
   rb_define_class_under(r_parent_class, QUICKJSRB_INTERRUPTED_ERROR, r_runtime_error);
   rb_define_class_under(r_parent_class, QUICKJSRB_NO_AWAIT_ERROR, r_runtime_error);
+  rb_define_class_under(r_parent_class, QUICKJSRB_RUBY_FUNCTION_ERROR, r_runtime_error);
 }
 
 #endif /* QUICKJSRB_H */
