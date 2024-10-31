@@ -412,30 +412,34 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
   }
 }
 
-static VALUE vm_m_defineGlobalFunction(VALUE r_self, VALUE r_name)
+static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
 {
   rb_need_block();
+
+  VALUE r_name;
+  VALUE r_flags;
+  VALUE r_block;
+  rb_scan_args(argc, argv, "10*&", &r_name, &r_flags, &r_block);
+
+  const char *asyncKeyword =
+      RTEST(rb_funcall(r_flags, rb_intern("include?"), 1, ID2SYM(rb_intern("async")))) ? "async " : "";
 
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
-  if (rb_block_given_p())
-  {
-    VALUE r_proc = rb_block_proc();
-    rb_hash_aset(data->defined_functions, r_name, r_proc);
-    char *funcName = StringValueCStr(r_name);
+  rb_hash_aset(data->defined_functions, r_name, r_block);
+  char *funcName = StringValueCStr(r_name);
 
-    const char *template = "globalThis['%s'] = (...args) => __quickjsrb.runRubyMethod('%s', args);\n";
-    int length = snprintf(NULL, 0, template, funcName, funcName);
-    char *result = (char *)malloc(length + 1);
-    snprintf(result, length + 1, template, funcName, funcName);
+  const char *template = "globalThis['%s'] = %s(...args) => __quickjsrb.runRubyMethod('%s', args);\n";
+  int length = snprintf(NULL, 0, template, funcName, asyncKeyword, funcName);
+  char *result = (char *)malloc(length + 1);
+  snprintf(result, length + 1, template, funcName, asyncKeyword, funcName);
 
-    JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), "<vm>", JS_EVAL_TYPE_MODULE);
+  JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), "<vm>", JS_EVAL_TYPE_MODULE);
 
-    free(result);
-    JS_FreeValue(data->context, j_codeResult);
-    return rb_funcall(r_name, rb_intern("to_sym"), 0, NULL);
-  }
+  free(result);
+  JS_FreeValue(data->context, j_codeResult);
+  return rb_funcall(r_name, rb_intern("to_sym"), 0, NULL);
 
   return Qnil;
 }
@@ -507,7 +511,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_alloc_func(r_class_vm, vm_alloc);
   rb_define_method(r_class_vm, "initialize", vm_m_initialize, -1);
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, 1);
-  rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, 1);
+  rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
   rb_define_method(r_class_vm, "logs", vm_m_logs, 0);
   r_define_log_class(r_class_vm);

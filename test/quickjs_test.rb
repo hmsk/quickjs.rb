@@ -289,6 +289,13 @@ class QuickjsTest < Test::Unit::TestCase
         @vm.define_function("infinite") { loop {} }
         assert_raise_with_message(Quickjs::InterruptedError, /Ruby runtime got timeout/) { @vm.eval_code("infinite();") }
       end
+
+      test "async keyword configures" do
+        @vm.define_function "unblocked", :async do
+          'asynchronous return'
+        end
+        assert_equal(@vm.eval_code("const awaited = await unblocked().then((result) => result + '!'); awaited;"), 'asynchronous return!')
+      end
     end
 
     class Import < QuickjsVmTest
