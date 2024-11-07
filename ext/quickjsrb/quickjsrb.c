@@ -80,6 +80,10 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   }
 }
 
+VALUE r_try_json_parse(VALUE r_str) {
+  return rb_funcall(rb_const_get(rb_cClass, rb_intern("JSON")), rb_intern("parse"), 1, r_str);
+}
+
 VALUE to_rb_value(JSContext *ctx, JSValue j_val)
 {
   switch (JS_VALUE_GET_NORM_TAG(j_val))
@@ -135,7 +139,17 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     JS_FreeValue(ctx, j_jsonClass);
     JS_FreeValue(ctx, j_global);
 
-    return rb_funcall(rb_const_get(rb_cClass, rb_intern("JSON")), rb_intern("parse"), 1, r_str);
+    if (rb_funcall(r_str, rb_intern("=="), 1, rb_str_new2("undefined"))) {
+      return QUICKJSRB_SYM(undefinedId);
+    }
+
+    int couldntParse;
+    VALUE r_result = rb_protect(r_try_json_parse, r_str, &couldntParse);
+    if (couldntParse) {
+      return Qnil;
+    } else {
+      return r_result;
+    }
   }
   case JS_TAG_NULL:
     return Qnil;

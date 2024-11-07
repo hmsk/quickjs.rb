@@ -59,6 +59,10 @@ class QuickjsTest < Test::Unit::TestCase
       assert_code("['a', 2, 'third']", ['a', 2, 'third'])
       assert_code("[1, 2, { 'third': 'sad' }]", [1, 2, { 'third' => 'sad' }])
     end
+
+    test "void (undefined per JSON.stringify) becomes a specific constant" do
+      assert_code("() => 'hi'", Quickjs::Value::UNDEFINED)
+    end
   end
 
   class Exceptions < QuickjsTest
