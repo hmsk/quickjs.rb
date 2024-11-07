@@ -340,6 +340,13 @@ class QuickjsTest < Test::Unit::TestCase
 
         assert_equal(@vm.eval_code("Imported()"), "I am a default export of ESM.")
       end
+
+      test "code_to_expose can differentiate the way to globalize" do
+        @vm.import('Imported', from: File.read('./test/fixture.esm.js'), code_to_expose: 'globalThis.RenamedImported = Imported;')
+
+        assert_equal(@vm.eval_code('RenamedImported()'), 'I am a default export of ESM.')
+        assert_equal(@vm.eval_code('!!globalThis.Imported'), false)
+      end
     end
 
     class ConsoleLoggers < QuickjsVmTest

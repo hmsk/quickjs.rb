@@ -489,13 +489,14 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   rb_scan_args(argc, argv, "10:", &r_import_string, &r_opts);
   if (NIL_P(r_opts))
     r_opts = rb_hash_new();
-  VALUE r_from = rb_hash_aref(r_opts, ID2SYM(rb_intern("from"))); // TODO: Use kwargs instead
+  VALUE r_from = rb_hash_aref(r_opts, ID2SYM(rb_intern("from")));
   if (NIL_P(r_from))
   {
     VALUE r_error_message = rb_str_new2("missing import source");
     rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
     return Qnil;
   }
+  VALUE r_custom_exposure = rb_hash_aref(r_opts, ID2SYM(rb_intern("code_to_expose")));
 
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
@@ -513,8 +514,13 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
       r_import_string);
   VALUE r_import_name = rb_ary_entry(r_import_settings, 0);
   char *import_name = StringValueCStr(r_import_name);
-  VALUE r_globalize = rb_ary_entry(r_import_settings, 1);
-  char *globalize = StringValueCStr(r_globalize);
+  VALUE r_default_exposure = rb_ary_entry(r_import_settings, 1);
+  char *globalize;
+  if (RTEST(r_custom_exposure)) {
+    globalize = StringValueCStr(r_custom_exposure);
+  } else {
+    globalize = StringValueCStr(r_default_exposure);
+  }
 
   const char *importAndGlobalizeModule = "import %s from '%s';\n"
                                          "%s\n";
