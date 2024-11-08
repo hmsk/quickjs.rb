@@ -283,6 +283,14 @@ class QuickjsTest < Test::Unit::TestCase
         assert_equal(@vm.eval_code("get_obj()"), { 'a' => 1 })
       end
 
+      test "returns original exception" do
+        @vm.define_function("get_exception") { IOError.new("yo") }
+
+        exception = @vm.eval_code("get_exception()")
+        assert_equal(exception.class, IOError)
+        assert_equal(exception.message, 'yo')
+      end
+
       test "returns inspected string for otherwise" do
         @vm.define_function("get_class") { Class.new }
 

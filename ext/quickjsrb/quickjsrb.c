@@ -1,22 +1,22 @@
 #include "quickjsrb.h"
 
+JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
+{
+  JSValue j_error = JS_NewError(ctx); // may wanna have custom error class to determine in JS' end
+
+  VALUE r_object_id = rb_funcall(r_error, rb_intern("object_id"), 0, NULL);
+  int objectId = NUM2INT(r_object_id);
+  JS_SetPropertyStr(ctx, j_error, "rb_object_id", JS_NewInt32(ctx, objectId));
+
+  VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0, NULL);
+  const char *errorMessage = StringValueCStr(r_exception_message);
+  JS_SetPropertyStr(ctx, j_error, "message", JS_NewString(ctx, errorMessage));
+
+  return j_error;
+}
+
 JSValue to_js_value(JSContext *ctx, VALUE r_value)
 {
-  if (RTEST(rb_funcall(
-          r_value,
-          rb_intern("is_a?"),
-          1, rb_const_get(rb_cClass, rb_intern("Exception")))))
-  {
-    JSValue j_error = JS_NewError(ctx);
-    VALUE r_str = rb_funcall(r_value, rb_intern("message"), 0, NULL);
-    char *exceptionMessage = StringValueCStr(r_str);
-    VALUE r_exception_name = rb_funcall(rb_funcall(r_value, rb_intern("class"), 0, NULL), rb_intern("name"), 0, NULL);
-    char *exceptionName = StringValueCStr(r_exception_name);
-    JS_SetPropertyStr(ctx, j_error, "name", JS_NewString(ctx, exceptionName));
-    JS_SetPropertyStr(ctx, j_error, "message", JS_NewString(ctx, exceptionMessage));
-    return JS_Throw(ctx, j_error);
-  }
-
   switch (TYPE(r_value))
   {
   case T_NIL:
@@ -72,6 +72,13 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   }
   default:
   {
+    if (TYPE(r_value) == T_OBJECT && RTEST(rb_funcall(
+                                         r_value,
+                                         rb_intern("is_a?"),
+                                         1, rb_const_get(rb_cClass, rb_intern("Exception")))))
+    {
+      return j_error_from_ruby_error(ctx, r_value);
+    }
     VALUE r_inspect_str = rb_funcall(r_value, rb_intern("inspect"), 0, NULL);
     char *str = StringValueCStr(r_inspect_str);
 
@@ -80,7 +87,8 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   }
 }
 
-VALUE r_try_json_parse(VALUE r_str) {
+VALUE r_try_json_parse(VALUE r_str)
+{
   return rb_funcall(rb_const_get(rb_cClass, rb_intern("JSON")), rb_intern("parse"), 1, r_str);
 }
 
@@ -125,6 +133,23 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       return Qnil;
     }
 
+    if (JS_IsError(ctx, j_val))
+    {
+      JSValue j_errorOriginalRubyObjectId = JS_GetPropertyStr(ctx, j_val, "rb_object_id");
+      int errorOriginalRubyObjectId = 0;
+      if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT)
+      {
+        JS_ToInt32(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
+        JS_FreeValue(ctx, j_errorOriginalRubyObjectId);
+        if (errorOriginalRubyObjectId > 0)
+        {
+          // may be nice if cover the case of object is missing
+          return rb_funcall(rb_const_get(rb_cClass, rb_intern("ObjectSpace")), rb_intern("_id2ref"), 1, INT2NUM(errorOriginalRubyObjectId));
+        }
+      }
+      // will support other errors
+    }
+
     JSValue j_global = JS_GetGlobalObject(ctx);
     JSValue j_jsonClass = JS_GetPropertyStr(ctx, j_global, "JSON");
     JSValue j_stringifyFunc = JS_GetPropertyStr(ctx, j_jsonClass, "stringify");
@@ -139,15 +164,19 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     JS_FreeValue(ctx, j_jsonClass);
     JS_FreeValue(ctx, j_global);
 
-    if (rb_funcall(r_str, rb_intern("=="), 1, rb_str_new2("undefined"))) {
+    if (rb_funcall(r_str, rb_intern("=="), 1, rb_str_new2("undefined")))
+    {
       return QUICKJSRB_SYM(undefinedId);
     }
 
     int couldntParse;
     VALUE r_result = rb_protect(r_try_json_parse, r_str, &couldntParse);
-    if (couldntParse) {
+    if (couldntParse)
+    {
       return Qnil;
-    } else {
+    }
+    else
+    {
       return r_result;
     }
   }
@@ -162,10 +191,12 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     {
       JSValue j_errorOriginalRubyObjectId = JS_GetPropertyStr(ctx, j_exceptionVal, "rb_object_id");
       int errorOriginalRubyObjectId = 0;
-      if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT) {
+      if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT)
+      {
         JS_ToInt32(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
         JS_FreeValue(ctx, j_errorOriginalRubyObjectId);
-        if (errorOriginalRubyObjectId > 0) {
+        if (errorOriginalRubyObjectId > 0)
+        {
           JS_FreeValue(ctx, j_exceptionVal);
           // may be nice if cover the case of object is missing
           rb_exc_raise(rb_funcall(rb_const_get(rb_cClass, rb_intern("ObjectSpace")), rb_intern("_id2ref"), 1, INT2NUM(errorOriginalRubyObjectId)));
@@ -274,12 +305,7 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   if (sadnessHappened)
   {
     VALUE r_error = rb_errinfo();
-
-    JSValue j_error = JS_NewError(ctx); // may wanna have custom error class to determine in JS' end
-    VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0, NULL);
-    VALUE r_exception_name = rb_funcall(r_error, rb_intern("object_id"), 0, NULL);
-    JS_SetPropertyStr(ctx, j_error, "rb_object_id", to_js_value(ctx, r_exception_name));
-    JS_SetPropertyStr(ctx, j_error, "message", to_js_value(ctx, r_exception_message));
+    JSValue j_error = j_error_from_ruby_error(ctx, r_error);
     return JS_Throw(ctx, j_error);
   }
   else
@@ -531,9 +557,12 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   char *import_name = StringValueCStr(r_import_name);
   VALUE r_default_exposure = rb_ary_entry(r_import_settings, 1);
   char *globalize;
-  if (RTEST(r_custom_exposure)) {
+  if (RTEST(r_custom_exposure))
+  {
     globalize = StringValueCStr(r_custom_exposure);
-  } else {
+  }
+  else
+  {
     globalize = StringValueCStr(r_default_exposure);
   }
 
