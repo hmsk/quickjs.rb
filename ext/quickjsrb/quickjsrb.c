@@ -160,17 +160,24 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     JSValue j_exceptionVal = JS_GetException(ctx);
     if (JS_IsError(ctx, j_exceptionVal))
     {
+      JSValue j_errorOriginalRubyObjectId = JS_GetPropertyStr(ctx, j_exceptionVal, "rb_object_id");
+      int errorOriginalRubyObjectId = 0;
+      if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT) {
+        JS_ToInt32(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
+        JS_FreeValue(ctx, j_errorOriginalRubyObjectId);
+        if (errorOriginalRubyObjectId > 0) {
+          JS_FreeValue(ctx, j_exceptionVal);
+          // may be nice if cover the case of object is missing
+          rb_exc_raise(rb_funcall(rb_const_get(rb_cClass, rb_intern("ObjectSpace")), rb_intern("_id2ref"), 1, INT2NUM(errorOriginalRubyObjectId)));
+          return Qnil;
+        }
+      }
+
       JSValue j_errorClassName = JS_GetPropertyStr(ctx, j_exceptionVal, "name");
       const char *errorClassName = JS_ToCString(ctx, j_errorClassName);
 
       JSValue j_errorClassMessage = JS_GetPropertyStr(ctx, j_exceptionVal, "message");
       const char *errorClassMessage = JS_ToCString(ctx, j_errorClassMessage);
-
-      JSValue j_errorOriginalRubyObjectId = JS_GetPropertyStr(ctx, j_exceptionVal, "rb_object_id");
-      int errorOriginalRubyObjectId = 0;
-      if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT) {
-        JS_ToInt32(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
-      }
 
       JS_FreeValue(ctx, j_errorClassMessage);
       JS_FreeValue(ctx, j_errorClassName);
@@ -197,13 +204,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       JS_FreeCString(ctx, errorClassMessage);
       JS_FreeValue(ctx, j_exceptionVal);
 
-      VALUE r_error;
-      if (errorOriginalRubyObjectId > 0) {
-        r_error = rb_funcall(rb_const_get(rb_cClass, rb_intern("ObjectSpace")), rb_intern("_id2ref"), 1, INT2NUM(errorOriginalRubyObjectId));
-      } else {
-        r_error = rb_funcall(r_error_class, rb_intern("new"), 2, r_error_message, rb_str_new2(errorClassName));
-      }
-      rb_exc_raise(r_error);
+      rb_exc_raise(rb_funcall(r_error_class, rb_intern("new"), 2, r_error_message, rb_str_new2(errorClassName)));
     }
     else // exception without Error object
     {
