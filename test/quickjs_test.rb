@@ -303,9 +303,9 @@ class QuickjsTest < Test::Unit::TestCase
       end
 
       test "throws an internal error which will be converted to Quickjs::RubyFunctionError in JS world when Ruby function raises" do
-        @vm.define_function("errorable") { raise 'sady' }
+        @vm.define_function("errorable") { raise IOError, 'sad error happened within Ruby' }
 
-        assert_raise_with_message(Quickjs::RubyFunctionError, 'unintentional error is raised while executing the function by Ruby: `errorable`') { @vm.eval_code("errorable();") }
+        assert_raise_with_message(IOError, 'sad error happened within Ruby') { @vm.eval_code("errorable();") }
       end
     end
 

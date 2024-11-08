@@ -166,6 +166,12 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       JSValue j_errorClassMessage = JS_GetPropertyStr(ctx, j_exceptionVal, "message");
       const char *errorClassMessage = JS_ToCString(ctx, j_errorClassMessage);
 
+      JSValue j_errorOriginalRubyObjectId = JS_GetPropertyStr(ctx, j_exceptionVal, "rb_object_id");
+      int errorOriginalRubyObjectId = 0;
+      if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT) {
+        JS_ToInt32(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
+      }
+
       JS_FreeValue(ctx, j_errorClassMessage);
       JS_FreeValue(ctx, j_errorClassName);
 
@@ -179,11 +185,6 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
         r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR);
         r_error_message = rb_str_new2("Code evaluation is interrupted by the timeout or something");
       }
-      else if (strcmp(errorClassName, "InternalError") == 0 && strstr(errorClassMessage, "Ruby") != NULL)
-      {
-        r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_RUBY_FUNCTION_ERROR);
-      }
-
       else if (strcmp(errorClassName, "Quickjs::InterruptedError") == 0)
       {
         r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR);
@@ -196,7 +197,13 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       JS_FreeCString(ctx, errorClassMessage);
       JS_FreeValue(ctx, j_exceptionVal);
 
-      rb_exc_raise(rb_funcall(r_error_class, rb_intern("new"), 2, r_error_message, rb_str_new2(errorClassName)));
+      VALUE r_error;
+      if (errorOriginalRubyObjectId > 0) {
+        r_error = rb_funcall(rb_const_get(rb_cClass, rb_intern("ObjectSpace")), rb_intern("_id2ref"), 1, INT2NUM(errorOriginalRubyObjectId));
+      } else {
+        r_error = rb_funcall(r_error_class, rb_intern("new"), 2, r_error_message, rb_str_new2(errorClassName));
+      }
+      rb_exc_raise(r_error);
     }
     else // exception without Error object
     {
@@ -265,7 +272,14 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   JSValue j_result;
   if (sadnessHappened)
   {
-    j_result = JS_ThrowInternalError(ctx, "unintentional error is raised while executing the function by Ruby: `%s`", funcName);
+    VALUE r_error = rb_errinfo();
+
+    JSValue j_error = JS_NewError(ctx); // may wanna have custom error class to determine in JS' end
+    VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0, NULL);
+    VALUE r_exception_name = rb_funcall(r_error, rb_intern("object_id"), 0, NULL);
+    JS_SetPropertyStr(ctx, j_error, "rb_object_id", to_js_value(ctx, r_exception_name));
+    JS_SetPropertyStr(ctx, j_error, "message", to_js_value(ctx, r_exception_message));
+    return JS_Throw(ctx, j_error);
   }
   else
   {
