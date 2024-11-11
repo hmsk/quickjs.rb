@@ -87,6 +87,23 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   }
 }
 
+VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
+{
+  JSValue j_errorOriginalRubyObjectId = JS_GetPropertyStr(ctx, j_error, "rb_object_id");
+  int errorOriginalRubyObjectId = 0;
+  if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT)
+  {
+    JS_ToInt32(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
+    JS_FreeValue(ctx, j_errorOriginalRubyObjectId);
+    if (errorOriginalRubyObjectId > 0)
+    {
+      // may be nice if cover the case of object is missing
+      return rb_funcall(rb_const_get(rb_cClass, rb_intern("ObjectSpace")), rb_intern("_id2ref"), 1, INT2NUM(errorOriginalRubyObjectId));
+    }
+  }
+  return Qnil;
+}
+
 VALUE r_try_json_parse(VALUE r_str)
 {
   return rb_funcall(rb_const_get(rb_cClass, rb_intern("JSON")), rb_intern("parse"), 1, r_str);
@@ -135,19 +152,11 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
 
     if (JS_IsError(ctx, j_val))
     {
-      JSValue j_errorOriginalRubyObjectId = JS_GetPropertyStr(ctx, j_val, "rb_object_id");
-      int errorOriginalRubyObjectId = 0;
-      if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT)
-      {
-        JS_ToInt32(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
-        JS_FreeValue(ctx, j_errorOriginalRubyObjectId);
-        if (errorOriginalRubyObjectId > 0)
-        {
-          // may be nice if cover the case of object is missing
-          return rb_funcall(rb_const_get(rb_cClass, rb_intern("ObjectSpace")), rb_intern("_id2ref"), 1, INT2NUM(errorOriginalRubyObjectId));
-        }
+      VALUE r_maybe_ruby_error = find_ruby_error(ctx, j_val);
+      if (!NIL_P(r_maybe_ruby_error)) {
+        return r_maybe_ruby_error;
       }
-      // will support other errors
+      // will support other errors like just returning an instance of Error
     }
 
     JSValue j_global = JS_GetGlobalObject(ctx);
@@ -189,19 +198,11 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     JSValue j_exceptionVal = JS_GetException(ctx);
     if (JS_IsError(ctx, j_exceptionVal))
     {
-      JSValue j_errorOriginalRubyObjectId = JS_GetPropertyStr(ctx, j_exceptionVal, "rb_object_id");
-      int errorOriginalRubyObjectId = 0;
-      if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT)
-      {
-        JS_ToInt32(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
-        JS_FreeValue(ctx, j_errorOriginalRubyObjectId);
-        if (errorOriginalRubyObjectId > 0)
-        {
-          JS_FreeValue(ctx, j_exceptionVal);
-          // may be nice if cover the case of object is missing
-          rb_exc_raise(rb_funcall(rb_const_get(rb_cClass, rb_intern("ObjectSpace")), rb_intern("_id2ref"), 1, INT2NUM(errorOriginalRubyObjectId)));
-          return Qnil;
-        }
+      VALUE r_maybe_ruby_error = find_ruby_error(ctx, j_exceptionVal);
+      if (!NIL_P(r_maybe_ruby_error)) {
+        JS_FreeValue(ctx, j_exceptionVal);
+        rb_exc_raise(r_maybe_ruby_error);
+        return Qnil;
       }
 
       JSValue j_errorClassName = JS_GetPropertyStr(ctx, j_exceptionVal, "name");
