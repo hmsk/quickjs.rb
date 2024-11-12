@@ -411,5 +411,61 @@ class QuickjsTest < Test::Unit::TestCase
         assert_equal(@vm.logs.last.raw, ['log promise', 'Promise'])
       end
     end
+
+    class StackTraces < QuickjsVmTest
+      setup { @vm = Quickjs::VM.new }
+      teardown { @vm = nil }
+
+      test 'unhandled exception with an Error class should be logged with stack trace' do
+        assert_raises(Quickjs::ReferenceError) do
+          @vm.eval_code("
+            const a = 1;
+            const c = 3;
+            a + b;
+          ")
+        end
+        assert_equal(@vm.logs.size, 1)
+        assert_equal(@vm.logs.last.severity, :error)
+        assert_equal(
+          @vm.logs.last.raw.first.split("\n"),
+          [
+            "Uncaught ReferenceError: 'b' is not defined",
+            '    at <eval> (<code>:4)'
+          ]
+        )
+      end
+
+      test 'unhandled exception without any Error class should be logged with stack trace' do
+        assert_raises(Quickjs::RuntimeError) do
+          @vm.eval_code("
+            const a = 1;
+            throw 'Don\\'t wanna compute at all';
+          ")
+        end
+        assert_equal(@vm.logs.size, 1)
+        assert_equal(@vm.logs.last.severity, :error)
+        assert_equal(
+          @vm.logs.last.raw.first.split("\n"),
+          [
+            "Uncaught 'Don't wanna compute at all'"
+          ]
+        )
+      end
+
+      test 'should include multi layers of stack trace' do
+        @vm.import(['wrapError'], from: File.read('./test/fixture.esm.js'))
+        assert_raises(Quickjs::RuntimeError) do
+          @vm.eval_code('wrapError();')
+        end
+        assert_equal(@vm.logs.size, 1)
+        assert_equal(@vm.logs.last.severity, :error)
+        trace = @vm.logs.last.raw.first.split("\n")
+        assert_equal(trace.size, 4)
+        assert_equal(trace[0], 'Uncaught Error: unpleasant wrapped error')
+        assert_match(/at thrower \(\w{12}:6\)/, trace[1])
+        assert_match(/at wrapError \(\w{12}:10\)/, trace[2])
+        assert_equal('    at <eval> (<code>)', trace[3])
+      end
+    end
   end
 end

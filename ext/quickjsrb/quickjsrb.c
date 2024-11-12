@@ -153,7 +153,8 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     if (JS_IsError(ctx, j_val))
     {
       VALUE r_maybe_ruby_error = find_ruby_error(ctx, j_val);
-      if (!NIL_P(r_maybe_ruby_error)) {
+      if (!NIL_P(r_maybe_ruby_error))
+      {
         return r_maybe_ruby_error;
       }
       // will support other errors like just returning an instance of Error
@@ -199,7 +200,8 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     if (JS_IsError(ctx, j_exceptionVal))
     {
       VALUE r_maybe_ruby_error = find_ruby_error(ctx, j_exceptionVal);
-      if (!NIL_P(r_maybe_ruby_error)) {
+      if (!NIL_P(r_maybe_ruby_error))
+      {
         JS_FreeValue(ctx, j_exceptionVal);
         rb_exc_raise(r_maybe_ruby_error);
         return Qnil;
@@ -211,8 +213,30 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       JSValue j_errorClassMessage = JS_GetPropertyStr(ctx, j_exceptionVal, "message");
       const char *errorClassMessage = JS_ToCString(ctx, j_errorClassMessage);
 
+      JSValue j_stackTrace = JS_GetPropertyStr(ctx, j_exceptionVal, "stack");
+      const char *stackTrace = JS_ToCString(ctx, j_stackTrace);
+      const char *headlineTemplate = "Uncaught %s: %s\n%s";
+      int length = snprintf(NULL, 0, headlineTemplate, errorClassName, errorClassMessage, stackTrace);
+      char *headline = (char *)malloc(length + 1);
+      snprintf(headline, length + 1, headlineTemplate, errorClassName, errorClassMessage, stackTrace);
+
+      VMData *data = JS_GetContextOpaque(ctx);
+      VALUE r_log_class = rb_const_get(rb_const_get(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("VM")), rb_intern("Log"));
+      VALUE r_log = rb_funcall(r_log_class, rb_intern("new"), 0);
+      rb_iv_set(r_log, "@severity", ID2SYM(rb_intern("error")));
+      VALUE r_row = rb_ary_new();
+      VALUE r_loghash = rb_hash_new();
+      rb_hash_aset(r_loghash, ID2SYM(rb_intern("raw")), rb_str_new2(headline));
+      rb_hash_aset(r_loghash, ID2SYM(rb_intern("c")), rb_str_new2(headline));
+      rb_ary_push(r_row, r_loghash);
+      rb_iv_set(r_log, "@row", r_row);
+      rb_ary_push(data->logs, r_log);
+
       JS_FreeValue(ctx, j_errorClassMessage);
       JS_FreeValue(ctx, j_errorClassName);
+      JS_FreeValue(ctx, j_stackTrace);
+      JS_FreeCString(ctx, stackTrace);
+      free(headline);
 
       VALUE r_error_class, r_error_message = rb_str_new2(errorClassMessage);
       if (is_native_error_name(errorClassName))
@@ -241,8 +265,26 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     else // exception without Error object
     {
       const char *errorMessage = JS_ToCString(ctx, j_exceptionVal);
-      VALUE r_error_message = rb_sprintf("%s", errorMessage);
+      const char *headlineTemplate = "Uncaught '%s'";
+      int length = snprintf(NULL, 0, headlineTemplate, errorMessage);
+      char *headline = (char *)malloc(length + 1);
+      snprintf(headline, length + 1, headlineTemplate, errorMessage);
 
+      VMData *data = JS_GetContextOpaque(ctx);
+      VALUE r_log_class = rb_const_get(rb_const_get(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("VM")), rb_intern("Log"));
+      VALUE r_log = rb_funcall(r_log_class, rb_intern("new"), 0);
+      rb_iv_set(r_log, "@severity", ID2SYM(rb_intern("error")));
+      VALUE r_row = rb_ary_new();
+      VALUE r_loghash = rb_hash_new();
+      rb_hash_aset(r_loghash, ID2SYM(rb_intern("raw")), rb_str_new2(headline));
+      rb_hash_aset(r_loghash, ID2SYM(rb_intern("c")), rb_str_new2(headline));
+      rb_ary_push(r_row, r_loghash);
+      rb_iv_set(r_log, "@row", r_row);
+      rb_ary_push(data->logs, r_log);
+
+      free(headline);
+
+      VALUE r_error_message = rb_sprintf("%s", errorMessage);
       JS_FreeCString(ctx, errorMessage);
       JS_FreeValue(ctx, j_exceptionVal);
       rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
