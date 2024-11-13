@@ -221,16 +221,8 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       snprintf(headline, length + 1, headlineTemplate, errorClassName, errorClassMessage, stackTrace);
 
       VMData *data = JS_GetContextOpaque(ctx);
-      VALUE r_log_class = rb_const_get(rb_const_get(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("VM")), rb_intern("Log"));
-      VALUE r_log = rb_funcall(r_log_class, rb_intern("new"), 0);
-      rb_iv_set(r_log, "@severity", ID2SYM(rb_intern("error")));
-      VALUE r_row = rb_ary_new();
-      VALUE r_loghash = rb_hash_new();
-      rb_hash_aset(r_loghash, ID2SYM(rb_intern("raw")), rb_str_new2(headline));
-      rb_hash_aset(r_loghash, ID2SYM(rb_intern("c")), rb_str_new2(headline));
-      rb_ary_push(r_row, r_loghash);
-      rb_iv_set(r_log, "@row", r_row);
-      rb_ary_push(data->logs, r_log);
+      VALUE r_headline = rb_str_new2(headline);
+      rb_ary_push(data->logs, r_log_new("error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline))));
 
       JS_FreeValue(ctx, j_errorClassMessage);
       JS_FreeValue(ctx, j_errorClassName);
@@ -271,16 +263,8 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       snprintf(headline, length + 1, headlineTemplate, errorMessage);
 
       VMData *data = JS_GetContextOpaque(ctx);
-      VALUE r_log_class = rb_const_get(rb_const_get(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("VM")), rb_intern("Log"));
-      VALUE r_log = rb_funcall(r_log_class, rb_intern("new"), 0);
-      rb_iv_set(r_log, "@severity", ID2SYM(rb_intern("error")));
-      VALUE r_row = rb_ary_new();
-      VALUE r_loghash = rb_hash_new();
-      rb_hash_aset(r_loghash, ID2SYM(rb_intern("raw")), rb_str_new2(headline));
-      rb_hash_aset(r_loghash, ID2SYM(rb_intern("c")), rb_str_new2(headline));
-      rb_ary_push(r_row, r_loghash);
-      rb_iv_set(r_log, "@row", r_row);
-      rb_ary_push(data->logs, r_log);
+      VALUE r_headline = rb_str_new2(headline);
+      rb_ary_push(data->logs, r_log_new("error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline))));
 
       free(headline);
 
@@ -366,11 +350,6 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, J
   const char *severity = JS_ToCString(ctx, j_severity);
   JS_FreeValue(ctx, j_severity);
 
-  VALUE r_log_class = rb_const_get(rb_const_get(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("VM")), rb_intern("Log"));
-  VALUE r_log = rb_funcall(r_log_class, rb_intern("new"), 0);
-  rb_iv_set(r_log, "@severity", ID2SYM(rb_intern(severity)));
-  JS_FreeCString(ctx, severity);
-
   VALUE r_row = rb_ary_new();
   int i;
   JSValue j_length = JS_GetPropertyStr(ctx, argv[1], "length");
@@ -380,25 +359,18 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, J
 
   for (i = 0; i < count; i++)
   {
-    VALUE r_loghash = rb_hash_new();
     JSValue j_logged = JS_GetPropertyUint32(ctx, argv[1], i);
-    if (JS_VALUE_GET_NORM_TAG(j_logged) == JS_TAG_OBJECT && JS_PromiseState(ctx, j_logged) != -1)
-    {
-      rb_hash_aset(r_loghash, ID2SYM(rb_intern("raw")), rb_str_new2("Promise"));
-    }
-    else
-    {
-      rb_hash_aset(r_loghash, ID2SYM(rb_intern("raw")), to_rb_value(ctx, j_logged));
-    }
+    VALUE r_raw = JS_VALUE_GET_NORM_TAG(j_logged) == JS_TAG_OBJECT && JS_PromiseState(ctx, j_logged) != -1 ? rb_str_new2("Promise") : to_rb_value(ctx, j_logged);
     const char *body = JS_ToCString(ctx, j_logged);
     JS_FreeValue(ctx, j_logged);
-    rb_hash_aset(r_loghash, ID2SYM(rb_intern("c")), rb_str_new2(body));
+    VALUE r_c = rb_str_new2(body);
     JS_FreeCString(ctx, body);
-    rb_ary_push(r_row, r_loghash);
+
+    rb_ary_push(r_row, r_log_body_new(r_raw, r_c));
   }
 
-  rb_iv_set(r_log, "@row", r_row);
-  rb_ary_push(data->logs, r_log);
+  rb_ary_push(data->logs, r_log_new(severity, r_row));
+  JS_FreeCString(ctx, severity);
   return JS_UNDEFINED;
 }
 

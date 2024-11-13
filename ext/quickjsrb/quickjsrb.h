@@ -178,6 +178,23 @@ static VALUE r_define_log_class(VALUE r_parent_class)
   return r_log_class;
 }
 
+static VALUE r_log_new(const char *severity, VALUE r_row)
+{
+  VALUE r_log_class = rb_const_get(rb_const_get(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("VM")), rb_intern("Log"));
+  VALUE r_log = rb_funcall(r_log_class, rb_intern("new"), 0);
+  rb_iv_set(r_log, "@severity", ID2SYM(rb_intern(severity)));
+  rb_iv_set(r_log, "@row", r_row);
+  return r_log;
+}
+
+static VALUE r_log_body_new(VALUE r_raw, VALUE r_c)
+{
+  VALUE r_log_body = rb_hash_new();
+  rb_hash_aset(r_log_body, ID2SYM(rb_intern("raw")), r_raw);
+  rb_hash_aset(r_log_body, ID2SYM(rb_intern("c")), r_c);
+  return r_log_body;
+}
+
 // Exceptions
 
 #define QUICKJSRB_ROOT_RUNTIME_ERROR "RuntimeError"
