@@ -343,26 +343,15 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   return j_result;
 }
 
-static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, JSValueConst *argv)
+static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, const char *severity)
 {
   VMData *data = JS_GetContextOpaque(ctx);
-  JSValue j_severity = JS_ToString(ctx, argv[0]);
-  const char *severity = JS_ToCString(ctx, j_severity);
-  JS_FreeValue(ctx, j_severity);
-
   VALUE r_row = rb_ary_new();
-  int i;
-  JSValue j_length = JS_GetPropertyStr(ctx, argv[1], "length");
-  int count;
-  JS_ToInt32(ctx, &count, j_length);
-  JS_FreeValue(ctx, j_length);
-
-  for (i = 0; i < count; i++)
+  for (int i = 0; i < argc; i++)
   {
-    JSValue j_logged = JS_GetPropertyUint32(ctx, argv[1], i);
+    JSValue j_logged = argv[i];
     VALUE r_raw = JS_VALUE_GET_NORM_TAG(j_logged) == JS_TAG_OBJECT && JS_PromiseState(ctx, j_logged) != -1 ? rb_str_new2("Promise") : to_rb_value(ctx, j_logged);
     const char *body = JS_ToCString(ctx, j_logged);
-    JS_FreeValue(ctx, j_logged);
     VALUE r_c = rb_str_new2(body);
     JS_FreeCString(ctx, body);
 
@@ -370,8 +359,27 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int _argc, J
   }
 
   rb_ary_push(data->logs, r_log_new(severity, r_row));
-  JS_FreeCString(ctx, severity);
   return JS_UNDEFINED;
+}
+
+static JSValue js_console_info(JSContext *ctx, JSValueConst this, int argc, JSValueConst *argv)
+{
+  return js_quickjsrb_log(ctx, this, argc, argv, "info");
+}
+
+static JSValue js_console_verbose(JSContext *ctx, JSValueConst this, int argc, JSValueConst *argv)
+{
+  return js_quickjsrb_log(ctx, this, argc, argv, "verbose");
+}
+
+static JSValue js_console_warn(JSContext *ctx, JSValueConst this, int argc, JSValueConst *argv)
+{
+  return js_quickjsrb_log(ctx, this, argc, argv, "warning");
+}
+
+static JSValue js_console_error(JSContext *ctx, JSValueConst this, int argc, JSValueConst *argv)
+{
+  return js_quickjsrb_log(ctx, this, argc, argv, "error");
 }
 
 static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
@@ -455,18 +463,23 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   JSValue j_console = JS_NewObject(data->context);
   JS_SetPropertyStr(
-      data->context, j_quickjsrbGlobal, "log",
-      JS_NewCFunction(data->context, js_quickjsrb_log, "log", 2));
+      data->context, j_console, "log",
+      JS_NewCFunction(data->context, js_console_info, "log", 1));
+  JS_SetPropertyStr(
+      data->context, j_console, "debug",
+      JS_NewCFunction(data->context, js_console_verbose, "debug", 1));
+  JS_SetPropertyStr(
+      data->context, j_console, "info",
+      JS_NewCFunction(data->context, js_console_info, "info", 1));
+  JS_SetPropertyStr(
+      data->context, j_console, "warn",
+      JS_NewCFunction(data->context, js_console_warn, "warn", 1));
+  JS_SetPropertyStr(
+      data->context, j_console, "error",
+      JS_NewCFunction(data->context, js_console_error, "error", 1));
+
   JS_SetPropertyStr(data->context, j_global, "console", j_console);
   JS_FreeValue(data->context, j_global);
-
-  const char *defineLoggers = "console.log = (...args) => __quickjsrb.log('info', args);\n"
-                              "console.debug = (...args) => __quickjsrb.log('verbose', args);\n"
-                              "console.info = (...args) => __quickjsrb.log('info', args);\n"
-                              "console.warn = (...args) => __quickjsrb.log('warning', args);\n"
-                              "console.error = (...args) => __quickjsrb.log('error', args);\n";
-  JSValue j_defineLoggers = JS_Eval(data->context, defineLoggers, strlen(defineLoggers), "<vm>", JS_EVAL_TYPE_GLOBAL);
-  JS_FreeValue(data->context, j_defineLoggers);
 
   return r_self;
 }

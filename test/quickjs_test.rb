@@ -410,6 +410,10 @@ class QuickjsTest < Test::Unit::TestCase
         assert_equal(@vm.logs.last.to_s, ['log promise', '[object Promise]'].join(' '))
         assert_equal(@vm.logs.last.raw, ['log promise', 'Promise'])
       end
+
+      test "implemented as native code" do
+        assert_match(/native code/, @vm.eval_code('console.log.toString()'))
+      end
     end
 
     class StackTraces < QuickjsVmTest
