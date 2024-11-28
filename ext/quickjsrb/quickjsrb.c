@@ -308,39 +308,76 @@ static VALUE r_try_call_proc(VALUE r_try_args)
   );
 }
 
-static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int _argc, JSValueConst *argv)
+static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, int _magic, JSValue *func_data)
 {
-  VMData *data = JS_GetContextOpaque(ctx);
-  JSValue j_maybeFuncName = JS_ToString(ctx, argv[0]);
-  const char *funcName = JS_ToCString(ctx, j_maybeFuncName);
-  JS_FreeValue(ctx, j_maybeFuncName);
+  const char *funcName = JS_ToCString(ctx, func_data[0]);
 
+  VMData *data = JS_GetContextOpaque(ctx);
   VALUE r_proc = rb_hash_aref(data->defined_functions, rb_str_new2(funcName));
   if (r_proc == Qnil)
-  { // Shouldn't happen
-    return JS_ThrowReferenceError(ctx, "Proc `%s` is not defined", funcName);
+  {                                                                           // Shouldn't happen
+    return JS_ThrowReferenceError(ctx, "Proc `%s` is not defined", funcName); // TODO: Free funcnName
   }
+  JS_FreeCString(ctx, funcName);
 
   VALUE r_call_args = rb_ary_new();
   rb_ary_push(r_call_args, r_proc);
-  rb_ary_push(r_call_args, to_rb_value(ctx, argv[1]));
+
+  VALUE r_argv = rb_ary_new();
+  for (int i = 0; i < argc; i++)
+  {
+    rb_ary_push(r_argv, to_rb_value(ctx, argv[i]));
+  }
+  rb_ary_push(r_call_args, r_argv);
   rb_ary_push(r_call_args, ULONG2NUM(data->eval_time->limit * 1000 / CLOCKS_PER_SEC));
 
   int sadnessHappened;
-  VALUE r_result = rb_protect(r_try_call_proc, r_call_args, &sadnessHappened);
-  JSValue j_result;
-  if (sadnessHappened)
+
+  if (JS_ToBool(ctx, func_data[1]))
   {
-    VALUE r_error = rb_errinfo();
-    JSValue j_error = j_error_from_ruby_error(ctx, r_error);
-    return JS_Throw(ctx, j_error);
+    JSValue promise, resolving_funcs[2];
+    JSValue ret_val;
+
+    promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+    if (JS_IsException(promise))
+      return JS_EXCEPTION;
+
+    // Currently, it's blocking process but should be asynchronized
+    JSValue j_result;
+    VALUE r_result = rb_protect(r_try_call_proc, r_call_args, &sadnessHappened);
+    if (sadnessHappened)
+    {
+      VALUE r_error = rb_errinfo();
+      j_result = j_error_from_ruby_error(ctx, r_error);
+      ret_val = JS_Call(ctx, resolving_funcs[1], JS_UNDEFINED,
+                        1, (JSValueConst *)&j_result);
+    }
+    else
+    {
+      j_result = to_js_value(ctx, r_result);
+      ret_val = JS_Call(ctx, resolving_funcs[0], JS_UNDEFINED,
+                        1, (JSValueConst *)&j_result);
+    }
+    JS_FreeValue(ctx, j_result);
+    JS_FreeValue(ctx, ret_val);
+    JS_FreeValue(ctx, resolving_funcs[0]);
+    JS_FreeValue(ctx, resolving_funcs[1]);
+    return promise;
   }
   else
   {
-    j_result = to_js_value(ctx, r_result);
+    VALUE r_result = rb_protect(r_try_call_proc, r_call_args, &sadnessHappened);
+    if (sadnessHappened)
+    {
+      VALUE r_error = rb_errinfo();
+      JSValue j_error = j_error_from_ruby_error(ctx, r_error);
+      return JS_Throw(ctx, j_error);
+    }
+    else
+    {
+      return to_js_value(ctx, r_result);
+    }
   }
-  JS_FreeCString(ctx, funcName);
-  return j_result;
 }
 
 static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, const char *severity)
@@ -453,14 +490,6 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JS_FreeValue(data->context, j_timeoutEval);
   }
 
-  JSValue j_global = JS_GetGlobalObject(data->context);
-  JSValue j_quickjsrbGlobal = JS_NewObject(data->context);
-  JS_SetPropertyStr(
-      data->context, j_quickjsrbGlobal, "runRubyMethod",
-      JS_NewCFunction(data->context, js_quickjsrb_call_global, "runRubyMethod", 2));
-
-  JS_SetPropertyStr(data->context, j_global, "__quickjsrb", j_quickjsrbGlobal);
-
   JSValue j_console = JS_NewObject(data->context);
   JS_SetPropertyStr(
       data->context, j_console, "log",
@@ -478,6 +507,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
       data->context, j_console, "error",
       JS_NewCFunction(data->context, js_console_error, "error", 1));
 
+  JSValue j_global = JS_GetGlobalObject(data->context);
   JS_SetPropertyStr(data->context, j_global, "console", j_console);
   JS_FreeValue(data->context, j_global);
 
@@ -529,27 +559,23 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   VALUE r_block;
   rb_scan_args(argc, argv, "10*&", &r_name, &r_flags, &r_block);
 
-  const char *asyncKeyword =
-      RTEST(rb_funcall(r_flags, rb_intern("include?"), 1, ID2SYM(rb_intern("async")))) ? "async " : "";
-
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   rb_hash_aset(data->defined_functions, r_name, r_block);
   char *funcName = StringValueCStr(r_name);
 
-  const char *template = "globalThis['%s'] = %s(...args) => __quickjsrb.runRubyMethod('%s', args);\n";
-  int length = snprintf(NULL, 0, template, funcName, asyncKeyword, funcName);
-  char *result = (char *)malloc(length + 1);
-  snprintf(result, length + 1, template, funcName, asyncKeyword, funcName);
+  JSValueConst ruby_data[2];
+  ruby_data[0] = JS_NewString(data->context, funcName);
+  ruby_data[1] = JS_NewBool(data->context, RTEST(rb_funcall(r_flags, rb_intern("include?"), 1, ID2SYM(rb_intern("async")))));
 
-  JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), "<vm>", JS_EVAL_TYPE_MODULE);
+  JSValue j_global = JS_GetGlobalObject(data->context);
+  JS_SetPropertyStr(
+      data->context, j_global, funcName,
+      JS_NewCFunctionData(data->context, js_quickjsrb_call_global, 1, 0, 2, ruby_data));
+  JS_FreeValue(data->context, j_global);
 
-  free(result);
-  JS_FreeValue(data->context, j_codeResult);
   return rb_funcall(r_name, rb_intern("to_sym"), 0, NULL);
-
-  return Qnil;
 }
 
 static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)

@@ -303,6 +303,21 @@ class QuickjsTest < Test::Unit::TestCase
         assert_raise_with_message(Quickjs::InterruptedError, /Ruby runtime got timeout/) { @vm.eval_code("infinite();") }
       end
 
+      test "multiple functions can be defined" do
+        @vm.define_function("first_ruby") { "hi" }
+        @vm.define_function("second_ruby") { "yo" }
+
+        assert_equal(@vm.eval_code("first_ruby()"), "hi")
+        assert_equal(@vm.eval_code("second_ruby()"), "yo")
+      end
+
+      test "same name function is overwritten" do
+        @vm.define_function("first_ruby") { "hi" }
+        @vm.define_function("first_ruby") { "yo" }
+
+        assert_equal(@vm.eval_code("first_ruby()"), "yo")
+      end
+
       test ":async keyword lets global function be defined as async" do
         @vm.define_function "unblocked", :async do
           'asynchronous return'
@@ -310,10 +325,24 @@ class QuickjsTest < Test::Unit::TestCase
         assert_equal(@vm.eval_code("const awaited = await unblocked().then((result) => result + '!'); awaited;"), 'asynchronous return!')
       end
 
+      test ":async function can throw" do
+        @vm.define_function "unblocked", :async do
+          raise 'asynchronous sadness'
+        end
+
+        assert_equal(@vm.eval_code("const awaited = await unblocked().catch((result) => result + '!'); awaited;"), 'Error: asynchronous sadness!')
+      end
+
       test "throws an internal error which will be converted to Quickjs::RubyFunctionError in JS world when Ruby function raises" do
         @vm.define_function("errorable") { raise IOError, 'sad error happened within Ruby' }
 
         assert_raise_with_message(IOError, 'sad error happened within Ruby') { @vm.eval_code("errorable();") }
+      end
+
+      test "implemented as native code" do
+        @vm.define_function("a_ruby") { "hi" }
+
+        assert_match(/native code/, @vm.eval_code('a_ruby.toString()'))
       end
     end
 
