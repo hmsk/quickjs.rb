@@ -158,6 +158,6 @@ vm,logs.last.raw #=> ['log me', nil]
 
 ## License
 
-Every file in `ext/quickjsrb/quickjs` is licensed under [the MIT License Copyright 2017-2021 by Fabrice Bellard and Charlie Goron](/ext/quickjsrb/quickjs/LICENSE).
+Every file in `ext/quickjsrb/quickjs` is licensed under [the MIT License Copyright 2017-2021 by Fabrice Bellard and Charlie Gordon](https://github.com/bellard/quickjs/blob/6e2e68fd0896957f92eb6c242a2e048c1ef3cae0/LICENSE).
 
 For otherwise, [the MIT License, Copyright 2024 by Kengo Hamasaki](/LICENSE).
