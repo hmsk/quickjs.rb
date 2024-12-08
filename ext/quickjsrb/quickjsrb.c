@@ -135,10 +135,30 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
   }
   case JS_TAG_STRING:
   {
-    const char *msg = JS_ToCString(ctx, j_val);
+    JSValue j_global = JS_GetGlobalObject(ctx);
+    JSValue j_jsonClass = JS_GetPropertyStr(ctx, j_global, "JSON");
+    JSValue j_stringifyFunc = JS_GetPropertyStr(ctx, j_jsonClass, "stringify");
+    JSValue j_stringified = JS_Call(ctx, j_stringifyFunc, j_jsonClass, 1, &j_val);
+
+    const char *msg = JS_ToCString(ctx, j_stringified);
     VALUE r_str = rb_str_new2(msg);
     JS_FreeCString(ctx, msg);
-    return r_str;
+
+    JS_FreeValue(ctx, j_stringified);
+    JS_FreeValue(ctx, j_stringifyFunc);
+    JS_FreeValue(ctx, j_jsonClass);
+    JS_FreeValue(ctx, j_global);
+
+    int couldntParse;
+    VALUE r_result = rb_protect(r_try_json_parse, r_str, &couldntParse);
+    if (couldntParse)
+    {
+      return Qnil;
+    }
+    else
+    {
+      return r_result;
+    }
   }
   case JS_TAG_OBJECT:
   {
@@ -314,8 +334,9 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
 
   VMData *data = JS_GetContextOpaque(ctx);
   VALUE r_proc = rb_hash_aref(data->defined_functions, rb_str_new2(funcName));
+  // Shouldn't happen
   if (r_proc == Qnil)
-  {                                                                           // Shouldn't happen
+  {
     return JS_ThrowReferenceError(ctx, "Proc `%s` is not defined", funcName); // TODO: Free funcnName
   }
   JS_FreeCString(ctx, funcName);

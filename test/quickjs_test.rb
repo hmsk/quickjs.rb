@@ -32,6 +32,10 @@ class QuickjsTest < Test::Unit::TestCase
       assert_code("const promise = new Promise((res) => { res('awaited yo') });await promise", "awaited yo")
     end
 
+    test "non-ascii string even becomes String" do
+      assert_code("'ボーナス'", "ボーナス")
+    end
+
     test "number for integer becomes Integer" do
       assert_code("2+3", 5)
       assert_code("18014398509481982n", 18014398509481982)
