@@ -109,6 +109,25 @@ VALUE r_try_json_parse(VALUE r_str)
   return rb_funcall(rb_const_get(rb_cClass, rb_intern("JSON")), rb_intern("parse"), 1, r_str);
 }
 
+VALUE to_r_json(JSContext *ctx, JSValue j_val)
+{
+  JSValue j_global = JS_GetGlobalObject(ctx);
+  JSValue j_jsonClass = JS_GetPropertyStr(ctx, j_global, "JSON");
+  JSValue j_stringifyFunc = JS_GetPropertyStr(ctx, j_jsonClass, "stringify");
+  JSValue j_strigified = JS_Call(ctx, j_stringifyFunc, j_jsonClass, 1, &j_val);
+
+  const char *msg = JS_ToCString(ctx, j_strigified);
+  VALUE r_str = rb_str_new2(msg);
+  JS_FreeCString(ctx, msg);
+
+  JS_FreeValue(ctx, j_strigified);
+  JS_FreeValue(ctx, j_stringifyFunc);
+  JS_FreeValue(ctx, j_jsonClass);
+  JS_FreeValue(ctx, j_global);
+
+  return r_str;
+}
+
 VALUE to_rb_value(JSContext *ctx, JSValue j_val)
 {
   switch (JS_VALUE_GET_NORM_TAG(j_val))
@@ -135,22 +154,8 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
   }
   case JS_TAG_STRING:
   {
-    JSValue j_global = JS_GetGlobalObject(ctx);
-    JSValue j_jsonClass = JS_GetPropertyStr(ctx, j_global, "JSON");
-    JSValue j_stringifyFunc = JS_GetPropertyStr(ctx, j_jsonClass, "stringify");
-    JSValue j_stringified = JS_Call(ctx, j_stringifyFunc, j_jsonClass, 1, &j_val);
-
-    const char *msg = JS_ToCString(ctx, j_stringified);
-    VALUE r_str = rb_str_new2(msg);
-    JS_FreeCString(ctx, msg);
-
-    JS_FreeValue(ctx, j_stringified);
-    JS_FreeValue(ctx, j_stringifyFunc);
-    JS_FreeValue(ctx, j_jsonClass);
-    JS_FreeValue(ctx, j_global);
-
     int couldntParse;
-    VALUE r_result = rb_protect(r_try_json_parse, r_str, &couldntParse);
+    VALUE r_result = rb_protect(r_try_json_parse, to_r_json(ctx, j_val), &couldntParse);
     if (couldntParse)
     {
       return Qnil;
@@ -179,20 +184,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       }
       // will support other errors like just returning an instance of Error
     }
-
-    JSValue j_global = JS_GetGlobalObject(ctx);
-    JSValue j_jsonClass = JS_GetPropertyStr(ctx, j_global, "JSON");
-    JSValue j_stringifyFunc = JS_GetPropertyStr(ctx, j_jsonClass, "stringify");
-    JSValue j_strigified = JS_Call(ctx, j_stringifyFunc, j_jsonClass, 1, &j_val);
-
-    const char *msg = JS_ToCString(ctx, j_strigified);
-    VALUE r_str = rb_str_new2(msg);
-    JS_FreeCString(ctx, msg);
-
-    JS_FreeValue(ctx, j_strigified);
-    JS_FreeValue(ctx, j_stringifyFunc);
-    JS_FreeValue(ctx, j_jsonClass);
-    JS_FreeValue(ctx, j_global);
+    VALUE r_str = to_r_json(ctx, j_val);
 
     if (rb_funcall(r_str, rb_intern("=="), 1, rb_str_new2("undefined")))
     {
