@@ -587,6 +587,8 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
       data->context, j_global, funcName,
       JS_NewCFunctionData(data->context, js_quickjsrb_call_global, 1, 0, 2, ruby_data));
   JS_FreeValue(data->context, j_global);
+  JS_FreeValue(data->context, ruby_data[0]);
+  JS_FreeValue(data->context, ruby_data[1]);
 
   return rb_funcall(r_name, rb_intern("to_sym"), 0, NULL);
 }
