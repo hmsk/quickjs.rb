@@ -29,7 +29,7 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
     JSValue j_global = JS_GetGlobalObject(ctx);
     JSValue j_numberClass = JS_GetPropertyStr(ctx, j_global, "Number");
     JSValue j_str = JS_NewString(ctx, str);
-    JSValue j_stringified = JS_Call(ctx, j_numberClass, JS_UNDEFINED, 1, &j_str);
+    JSValue j_stringified = JS_Call(ctx, j_numberClass, JS_UNDEFINED, 1, (JSValueConst *)&j_str);
     JS_FreeValue(ctx, j_global);
     JS_FreeValue(ctx, j_numberClass);
     JS_FreeValue(ctx, j_str);
@@ -62,7 +62,7 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
     JSValue j_jsonClass = JS_GetPropertyStr(ctx, j_global, "JSON");
     JSValue j_parseFunc = JS_GetPropertyStr(ctx, j_jsonClass, "parse");
     JSValue j_str = JS_NewString(ctx, str);
-    JSValue j_stringified = JS_Call(ctx, j_parseFunc, j_jsonClass, 1, &j_str);
+    JSValue j_stringified = JS_Call(ctx, j_parseFunc, j_jsonClass, 1, (JSValueConst *)&j_str);
     JS_FreeValue(ctx, j_global);
     JS_FreeValue(ctx, j_jsonClass);
     JS_FreeValue(ctx, j_parseFunc);
@@ -114,7 +114,7 @@ VALUE to_r_json(JSContext *ctx, JSValue j_val)
   JSValue j_global = JS_GetGlobalObject(ctx);
   JSValue j_jsonClass = JS_GetPropertyStr(ctx, j_global, "JSON");
   JSValue j_stringifyFunc = JS_GetPropertyStr(ctx, j_jsonClass, "stringify");
-  JSValue j_strigified = JS_Call(ctx, j_stringifyFunc, j_jsonClass, 1, &j_val);
+  JSValue j_strigified = JS_Call(ctx, j_stringifyFunc, j_jsonClass, 1, (JSValueConst *)&j_val);
 
   const char *msg = JS_ToCString(ctx, j_strigified);
   VALUE r_str = rb_str_new2(msg);
