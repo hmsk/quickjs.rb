@@ -101,6 +101,10 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
       return rb_funcall(rb_const_get(rb_cClass, rb_intern("ObjectSpace")), rb_intern("_id2ref"), 1, INT2NUM(errorOriginalRubyObjectId));
     }
   }
+  else
+  {
+    JS_FreeValue(ctx, j_errorOriginalRubyObjectId);
+  }
   return Qnil;
 }
 
@@ -339,7 +343,9 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   VALUE r_argv = rb_ary_new();
   for (int i = 0; i < argc; i++)
   {
-    rb_ary_push(r_argv, to_rb_value(ctx, argv[i]));
+    JSValue j_v = JS_DupValue(ctx, argv[i]);
+    rb_ary_push(r_argv, to_rb_value(ctx, j_v));
+    JS_FreeValue(ctx, j_v);
   }
   rb_ary_push(r_call_args, r_argv);
   rb_ary_push(r_call_args, ULONG2NUM(data->eval_time->limit * 1000 / CLOCKS_PER_SEC));
@@ -399,11 +405,12 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JS
   VALUE r_row = rb_ary_new();
   for (int i = 0; i < argc; i++)
   {
-    JSValue j_logged = argv[i];
+    JSValue j_logged = JS_DupValue(ctx, argv[i]);
     VALUE r_raw = JS_VALUE_GET_NORM_TAG(j_logged) == JS_TAG_OBJECT && JS_PromiseState(ctx, j_logged) != -1 ? rb_str_new2("Promise") : to_rb_value(ctx, j_logged);
     const char *body = JS_ToCString(ctx, j_logged);
     VALUE r_c = rb_str_new2(body);
     JS_FreeCString(ctx, body);
+    JS_FreeValue(ctx, j_logged);
 
     rb_ary_push(r_row, r_log_body_new(r_raw, r_c));
   }
