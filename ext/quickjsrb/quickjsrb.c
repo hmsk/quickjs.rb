@@ -115,19 +115,13 @@ VALUE r_try_json_parse(VALUE r_str)
 
 VALUE to_r_json(JSContext *ctx, JSValue j_val)
 {
-  JSValue j_global = JS_GetGlobalObject(ctx);
-  JSValue j_jsonClass = JS_GetPropertyStr(ctx, j_global, "JSON");
-  JSValue j_stringifyFunc = JS_GetPropertyStr(ctx, j_jsonClass, "stringify");
-  JSValue j_strigified = JS_Call(ctx, j_stringifyFunc, j_jsonClass, 1, (JSValueConst *)&j_val);
+  JSValue j_stringified = JS_JSONStringify(ctx, j_val, JS_UNDEFINED, JS_UNDEFINED);
 
-  const char *msg = JS_ToCString(ctx, j_strigified);
+  const char *msg = JS_ToCString(ctx, j_stringified);
   VALUE r_str = rb_str_new2(msg);
   JS_FreeCString(ctx, msg);
 
-  JS_FreeValue(ctx, j_strigified);
-  JS_FreeValue(ctx, j_stringifyFunc);
-  JS_FreeValue(ctx, j_jsonClass);
-  JS_FreeValue(ctx, j_global);
+  JS_FreeValue(ctx, j_stringified);
 
   return r_str;
 }

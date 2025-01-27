@@ -34,6 +34,7 @@ class QuickjsTest < Test::Unit::TestCase
 
     test "non-ascii string even becomes String" do
       assert_code("'ボーナス'", "ボーナス")
+      assert_code("'🆔'", "🆔")
     end
 
     test "number for integer becomes Integer" do
