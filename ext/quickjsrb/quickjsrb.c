@@ -58,17 +58,9 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   {
     VALUE r_json_str = rb_funcall(r_value, rb_intern("to_json"), 0, NULL);
     char *str = StringValueCStr(r_json_str);
-    JSValue j_global = JS_GetGlobalObject(ctx);
-    JSValue j_jsonClass = JS_GetPropertyStr(ctx, j_global, "JSON");
-    JSValue j_parseFunc = JS_GetPropertyStr(ctx, j_jsonClass, "parse");
-    JSValue j_str = JS_NewString(ctx, str);
-    JSValue j_stringified = JS_Call(ctx, j_parseFunc, j_jsonClass, 1, (JSValueConst *)&j_str);
-    JS_FreeValue(ctx, j_global);
-    JS_FreeValue(ctx, j_jsonClass);
-    JS_FreeValue(ctx, j_parseFunc);
-    JS_FreeValue(ctx, j_str);
+    JSValue j_parsed = JS_ParseJSON(ctx, str, strlen(str), "<quickjsrb.c>");
 
-    return j_stringified;
+    return j_parsed;
   }
   default:
   {
