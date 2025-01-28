@@ -124,9 +124,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
   {
   case JS_TAG_INT:
   {
-    int int_res = 0;
-    JS_ToInt32(ctx, &int_res, j_val);
-    return INT2NUM(int_res);
+    return INT2NUM(JS_VALUE_GET_INT(j_val));
   }
   case JS_TAG_FLOAT64:
   {
@@ -134,9 +132,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     {
       return QUICKJSRB_SYM(nanId);
     }
-    double double_res;
-    JS_ToFloat64(ctx, &double_res, j_val);
-    return DBL2NUM(double_res);
+    return DBL2NUM(JS_VALUE_GET_FLOAT64(j_val));
   }
   case JS_TAG_BOOL:
   {
