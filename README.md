@@ -153,7 +153,7 @@ vm.eval_code('console.log("log me", null)')
 vm.logs #=> Array of Quickjs::VM::Log
 vm.logs.last.severity #=> :info
 vm.logs.last.to_s #=> 'log me null'
-vm,logs.last.raw #=> ['log me', nil]
+vm.logs.last.raw #=> ['log me', nil]
 ```
 
 ## License
