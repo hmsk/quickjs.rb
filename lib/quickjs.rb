@@ -48,4 +48,9 @@ module Quickjs
     end
   end
   module_function :_build_import
+
+  def _polyfill_intl
+    @@_polyfill_intl ||= File.read File.join(File.dirname(__FILE__), '../vendor/intl-polyfill.js')
+  end
+  module_function :_polyfill_intl
 end

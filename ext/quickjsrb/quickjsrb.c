@@ -637,6 +637,26 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   return Qtrue;
 }
 
+static VALUE vm_m_import_polyfill_intl(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  const char *defineIntl = "Object.defineProperty(globalThis, 'Intl', { value: {} });\n";
+  JSValue j_defineIntl = JS_Eval(data->context, defineIntl, strlen(defineIntl), "<vm>", JS_EVAL_TYPE_GLOBAL);
+  JS_FreeValue(data->context, j_defineIntl);
+
+  VALUE r_polyfill_intl = rb_funcall(
+      rb_const_get(rb_cClass, rb_intern("Quickjs")),
+      rb_intern("_polyfill_intl"), 0);
+  char *polyfill = StringValueCStr(r_polyfill_intl);
+
+  JSValue func = JS_Eval(data->context, polyfill, strlen(polyfill), "polyfill-intl.min.js", JS_EVAL_TYPE_GLOBAL);
+  JS_FreeValue(data->context, func);
+
+  return Qtrue;
+}
+
 static VALUE vm_m_logs(VALUE r_self)
 {
   VMData *data;
@@ -660,6 +680,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, 1);
   rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
+  rb_define_method(r_class_vm, "import_polyfill_intl", vm_m_import_polyfill_intl, 0);
   rb_define_method(r_class_vm, "logs", vm_m_logs, 0);
   r_define_log_class(r_class_vm);
 }
