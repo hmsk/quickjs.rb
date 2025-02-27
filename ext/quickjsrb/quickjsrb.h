@@ -12,6 +12,9 @@
 #include <string.h>
 #include <time.h>
 
+extern const uint32_t qjsc_polyfill_intl_en_min_size;
+extern const uint8_t qjsc_polyfill_intl_en_min;
+
 const char *featureStdId = "feature_std";
 const char *featureOsId = "feature_os";
 const char *featureOsTimeoutId = "feature_os_timeout";
