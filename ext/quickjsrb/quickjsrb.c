@@ -388,7 +388,40 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JS
   for (int i = 0; i < argc; i++)
   {
     JSValue j_logged = JS_DupValue(ctx, argv[i]);
-    VALUE r_raw = JS_VALUE_GET_NORM_TAG(j_logged) == JS_TAG_OBJECT && JS_PromiseState(ctx, j_logged) != -1 ? rb_str_new2("Promise") : to_rb_value(ctx, j_logged);
+    VALUE r_raw;
+    if (JS_VALUE_GET_NORM_TAG(j_logged) == JS_TAG_OBJECT && JS_PromiseState(ctx, j_logged) != -1)
+    {
+      r_raw = rb_str_new2("Promise");
+    }
+    else if (JS_IsError(ctx, j_logged))
+    {
+      JSValue j_errorClassName = JS_GetPropertyStr(ctx, j_logged, "name");
+      const char *errorClassName = JS_ToCString(ctx, j_errorClassName);
+      JS_FreeValue(ctx, j_errorClassName);
+
+      JSValue j_errorClassMessage = JS_GetPropertyStr(ctx, j_logged, "message");
+      const char *errorClassMessage = JS_ToCString(ctx, j_errorClassMessage);
+      JS_FreeValue(ctx, j_errorClassMessage);
+
+      JSValue j_stackTrace = JS_GetPropertyStr(ctx, j_logged, "stack");
+      const char *stackTrace = JS_ToCString(ctx, j_stackTrace);
+      JS_FreeValue(ctx, j_stackTrace);
+
+      const char *headlineTemplate = "%s: %s\n%s";
+      int length = snprintf(NULL, 0, headlineTemplate, errorClassName, errorClassMessage, stackTrace);
+      char *headline = (char *)malloc(length + 1);
+      snprintf(headline, length + 1, headlineTemplate, errorClassName, errorClassMessage, stackTrace);
+      JS_FreeCString(ctx, errorClassName);
+      JS_FreeCString(ctx, errorClassMessage);
+      JS_FreeCString(ctx, stackTrace);
+
+      r_raw = rb_str_new2(headline);
+      free(headline);
+    }
+    else
+    {
+      r_raw = to_rb_value(ctx, j_logged);
+    }
     const char *body = JS_ToCString(ctx, j_logged);
     VALUE r_c = rb_str_new2(body);
     JS_FreeCString(ctx, body);

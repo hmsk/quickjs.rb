@@ -421,19 +421,19 @@ class QuickjsTest < Test::Unit::TestCase
 
       test "can give multiple arguments" do
         @vm.eval_code('const variable = "var!";')
-        @vm.eval_code('console.log(128, "str", variable, undefined, null, { key: "value" }, [1, 2, 3])')
+        @vm.eval_code('console.log(128, "str", variable, undefined, null, { key: "value" }, [1, 2, 3], new Error("hey"))')
 
         assert_equal(@vm.logs.last.to_s, [
-          "128", "str", "var!", "undefined", "null", "[object Object]", "1,2,3"
+          "128", "str", "var!", "undefined", "null", "[object Object]", "1,2,3", "Error: hey"
         ].join(' '))
       end
 
       test "can give converted given data as 'raw'" do
         @vm.eval_code('const variable = "var!";')
-        @vm.eval_code('console.log(128, "str", variable, undefined, null, { key: "value" }, [1, 2, 3])')
+        @vm.eval_code('console.log(128, "str", variable, undefined, null, { key: "value" }, [1, 2, 3], new Error("hey"))')
 
         assert_equal(@vm.logs.last.raw, [
-          128, "str", "var!", Quickjs::Value::UNDEFINED, nil, { "key" => "value" }, [1,2,3]
+          128, "str", "var!", Quickjs::Value::UNDEFINED, nil, { "key" => "value" }, [1,2,3], "Error: hey\n    at <eval> (<code>)\n"
         ])
       end
 
@@ -443,6 +443,14 @@ class QuickjsTest < Test::Unit::TestCase
 
         assert_equal(@vm.logs.last.to_s, ['log promise', '[object Promise]'].join(' '))
         assert_equal(@vm.logs.last.raw, ['log promise', 'Promise'])
+      end
+
+      test "can log exception instance from Ruby like JS Error" do
+        @vm.define_function("get_exception") { raise IOError.new("io") }
+        @vm.eval_code('try { get_exception() } catch (e) { console.log(e) }')
+
+        assert_equal(@vm.logs.last.to_s, 'Error: io')
+        assert_equal(@vm.logs.last.raw, ["Error: io\n    at <eval> (<code>)\n"])
       end
 
       test "implemented as native code" do
