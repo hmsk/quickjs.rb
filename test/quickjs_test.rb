@@ -152,6 +152,19 @@ class QuickjsTest < Test::Unit::TestCase
     assert_equal(::Quickjs.eval_code("!!setTimeout && !!clearTimeout", { features: [::Quickjs::FEATURES_TIMEOUT] }), true)
   end
 
+  test "Intl polyfill can be injected" do
+    code = "new Date('2025-03-11').toLocaleString()"
+
+    assert_match(
+      /^03\/1/, # 03/11/2025
+      ::Quickjs.eval_code(code)
+    )
+    assert_match(
+      /^3\/1/, # 03/11/2025 (en locale)
+      ::Quickjs.eval_code(code, { features: [::Quickjs::POLYFILL_INTL] })
+    )
+  end
+
   class QuickjsVmTest < Test::Unit::TestCase
     class WithPlainVM < QuickjsVmTest
       setup { @vm = Quickjs::VM.new }

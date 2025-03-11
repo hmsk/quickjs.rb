@@ -492,14 +492,6 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   JS_SetModuleLoaderFunc(runtime, NULL, js_module_loader, NULL);
   js_std_init_handlers(runtime);
 
-  const char *defineIntl = "Object.defineProperty(globalThis, 'Intl', { value:{} });\n";
-  JSValue j_defineIntl = JS_Eval(data->context, defineIntl, strlen(defineIntl), "<vm>", JS_EVAL_TYPE_GLOBAL);
-  JS_FreeValue(data->context, j_defineIntl);
-
-  JSValue obj = JS_ReadObject(data->context, &qjsc_polyfill_intl_en_min, qjsc_polyfill_intl_en_min_size, JS_READ_OBJ_BYTECODE);
-  JSValue val = JS_EvalFunction(data->context, obj); // Frees obj
-  JS_FreeValue(data->context, val);
-
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featureStdId))))
   {
     js_init_module_std(data->context, "std");
@@ -531,6 +523,17 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JSValue j_timeoutEval = JS_Eval(data->context, enableTimeout, strlen(enableTimeout), "<vm>", JS_EVAL_TYPE_MODULE);
     free(enableTimeout);
     JS_FreeValue(data->context, j_timeoutEval);
+  }
+
+  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillIntlId))))
+  {
+    const char *defineIntl = "Object.defineProperty(globalThis, 'Intl', { value:{} });\n";
+    JSValue j_defineIntl = JS_Eval(data->context, defineIntl, strlen(defineIntl), "<vm>", JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(data->context, j_defineIntl);
+
+    JSValue j_polyfillIntlObject = JS_ReadObject(data->context, &qjsc_polyfill_intl_en_min, qjsc_polyfill_intl_en_min_size, JS_READ_OBJ_BYTECODE);
+    JSValue j_polyfillIntlResult = JS_EvalFunction(data->context, j_polyfillIntlObject); // Frees polyfillIntlObject
+    JS_FreeValue(data->context, j_polyfillIntlResult);
   }
 
   JSValue j_console = JS_NewObject(data->context);
