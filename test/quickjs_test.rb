@@ -624,6 +624,12 @@ class QuickjsTest < Test::Unit::TestCase
         end
       end
 
+      test 'awaiting setTimeout2 is fine' do
+        assert_sleep_a_sec_within_thread do
+          @vm.eval_code('await new Promise(resolve => setTimeout2(resolve, 1000));')
+        end
+      end
+
       test 'awaiting os.setTimeout messes' do
         refute_sleep_a_sec_within_thread do
           @vm.eval_code('await new Promise(resolve => os.setTimeout(resolve, 1000));')

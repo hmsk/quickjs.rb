@@ -381,6 +381,35 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   }
 }
 
+static JSValue js_delay_and_eval_job(JSContext *ctx, int argc, JSValueConst *argv)
+{
+  VALUE rb_delay_msec = to_rb_value(ctx, argv[1]);
+  VALUE rb_delay_sec = rb_funcall(rb_delay_msec, rb_intern("/"), 1, rb_float_new(1000));
+  rb_thread_wait_for(rb_time_interval(rb_delay_sec));
+  JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
+
+  return JS_UNDEFINED;
+}
+
+static JSValue js_quickjsrb_set_timeout(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv)
+{
+  JSValueConst func;
+  int64_t delay;
+
+  func = argv[0];
+  if (!JS_IsFunction(ctx, func))
+    return JS_ThrowTypeError(ctx, "not a function");
+  if (JS_ToInt64(ctx, &delay, argv[1]))
+    return JS_EXCEPTION;
+
+  JSValueConst args[2];
+  args[0] = func;
+  args[1] = argv[1]; // delay
+  JS_EnqueueJob(ctx, js_delay_and_eval_job, 2, args);
+
+  return JS_UNDEFINED;
+}
+
 static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, const char *severity)
 {
   VMData *data = JS_GetContextOpaque(ctx);
@@ -536,6 +565,11 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JS_FreeValue(data->context, j_polyfillIntlResult);
   }
 
+  JSValue j_global = JS_GetGlobalObject(data->context);
+  JS_SetPropertyStr(
+      data->context, j_global, "setTimeout2",
+      JS_NewCFunction(data->context, js_quickjsrb_set_timeout, "setTimeout2", 2));
+
   JSValue j_console = JS_NewObject(data->context);
   JS_SetPropertyStr(
       data->context, j_console, "log",
@@ -553,7 +587,6 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
       data->context, j_console, "error",
       JS_NewCFunction(data->context, js_console_error, "error", 1));
 
-  JSValue j_global = JS_GetGlobalObject(data->context);
   JS_SetPropertyStr(data->context, j_global, "console", j_console);
   JS_FreeValue(data->context, j_global);
 
