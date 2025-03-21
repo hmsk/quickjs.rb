@@ -583,7 +583,7 @@ class QuickjsTest < Test::Unit::TestCase
 
     def run_threads(&block)
       result = []
-      t1 = Thread.new { 5.times { |i| result << 't1'; sleep 0.1 } }
+      t1 = Thread.new { 5.times { |i| result << 't1'; sleep 0.01 } }
       t2 = Thread.new { block.call; result << 't2' }
       [t1, t2].each { |t| t.join }
       result
@@ -615,35 +615,35 @@ class QuickjsTest < Test::Unit::TestCase
         end
 
         assert_sleep_a_sec_within_thread do
-          @vm.eval_code('await rbsleep(1);')
+          @vm.eval_code('await rbsleep(0.2);')
         end
 
         assert_sleep_a_sec_within_thread do
-          @vm.eval_code('async function top () { await new Promise(async resolve => { rbsleep(1); resolve(); }); } await top();')
+          @vm.eval_code('async function top () { await new Promise(async resolve => { rbsleep(0.2); resolve(); }); } await top();')
         end
       end
 
       test 'os sleep messes' do
         refute_sleep_a_sec_within_thread do
-          @vm.eval_code('os.sleep(1000);')
+          @vm.eval_code('os.sleep(200);')
         end
       end
 
       test 'awaiting os.setTimeout messes' do
         refute_sleep_a_sec_within_thread do
-          @vm.eval_code('await new Promise(resolve => os.setTimeout(resolve, 1000));')
+          @vm.eval_code('await new Promise(resolve => os.setTimeout(resolve, 200));')
         end
       end
 
       test 'awaiting async function which wraps os.setTimeout messes' do
         refute_sleep_a_sec_within_thread do
-          @vm.eval_code('async function top () { await new Promise(resolve => os.setTimeout(resolve, 1000)); } await top();')
+          @vm.eval_code('async function top () { await new Promise(resolve => os.setTimeout(resolve, 200)); } await top();')
         end
       end
 
       test 'awaiting os.sleepAsync messes' do
         refute_sleep_a_sec_within_thread do
-          @vm.eval_code('async function top () { await os.sleepAsync(1000); } await top();');
+          @vm.eval_code('async function top () { await os.sleepAsync(200); } await top();');
         end
       end
     end
@@ -656,7 +656,7 @@ class QuickjsTest < Test::Unit::TestCase
 
       test 'awaiting setTimeout does not block other threads' do
         assert_sleep_a_sec_within_thread do
-          @vm.eval_code('await new Promise(resolve => setTimeout(resolve, 1000));')
+          @vm.eval_code('await new Promise(resolve => setTimeout(resolve, 200));')
         end
       end
     end
