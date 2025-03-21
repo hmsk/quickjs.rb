@@ -152,6 +152,74 @@ class QuickjsTest < Test::Unit::TestCase
     assert_equal(::Quickjs.eval_code("!!setTimeout && !!clearTimeout", { features: [::Quickjs::FEATURES_TIMEOUT] }), true)
   end
 
+  class QuickjsPolyfillIntlTest < Test::Unit::TestCase
+    setup { @options_to_enable_polyfill = { features: [::Quickjs::POLYFILL_INTL] } }
+
+    test "Intl.DateTimeFormat polyfill is provided by the feature" do
+      code = "new Date('2025-03-11T00:00:00.000+09:00').toLocaleString('en-US', { timeZone: 'UTC', timeStyle: 'long', dateStyle: 'short' })"
+
+      assert_match(
+        /^03\/1(1|0)\/2025,\s/, # quickjs core doesn't respect options for toLocaleString and apply the timezone of machine's local
+        ::Quickjs.eval_code(code)
+      )
+      assert_equal(
+        '3/10/25, 3:00:00 PM UTC',
+        ::Quickjs.eval_code(code, @options_to_enable_polyfill).gsub(/[[:space:]]/, ' ') # TODO  deal with inconsistent charcode for white space
+      )
+    end
+
+    # TODO: correct polyfill or configure the default?
+    test "Intl.DateTimeFormat polyfill is a bit diff from common behavior for default options" do
+      code = "new Date('2025-03-11T00:00:00.000+09:00').toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })"
+
+      assert_equal(
+        '3/10/2025', # lose other options. The modern browsers and Node.js returns '3/10/2025, 3:00:00 PM'
+        ::Quickjs.eval_code(code, @options_to_enable_polyfill)
+      )
+    end
+
+    # TODO: correct polyfill or configure the default?
+    test "Intl.DateTimeFormat polyfill is a bit diff from common behavior for delimiter of time format" do
+      code = "new Date('2025-03-11T00:00:00.000+09:00').toLocaleString('en-US', { timeZone: 'America/Los_Angeles', timeStyle: 'long', dateStyle: 'long' })"
+
+      assert_equal(
+        'March 10, 2025, 8:00:00 AM PDT', # the delimiter between date and time is a comma. The modern browsers and Node.js returns 'at' like 'March 10, 2025 at 8:00:00 AM PDT'
+        ::Quickjs.eval_code(code, @options_to_enable_polyfill)
+      )
+    end
+
+    test "Intl.Locale polyfill is provided" do
+      code = 'new Intl.Locale("ja-Jpan-JP-u-ca-japanese-hc-h12").toString()'
+
+      assert_raise_with_message(Quickjs::ReferenceError, "'Intl' is not defined") { ::Quickjs.eval_code(code) }
+      assert_equal(
+        'ja-Jpan-JP-u-ca-japanese-hc-h12',
+        ::Quickjs.eval_code(code, @options_to_enable_polyfill)
+      )
+    end
+
+    test "Intl.PluralRules polyfill is provided" do
+      code = 'new Intl.PluralRules("en-US").select(1);'
+
+      assert_raise_with_message(Quickjs::ReferenceError, "'Intl' is not defined") { ::Quickjs.eval_code(code) }
+      assert_equal(
+        'one',
+        ::Quickjs.eval_code(code, @options_to_enable_polyfill)
+      )
+    end
+
+    test "Intl.NumberFormat polyfill is provided" do
+      code = "new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(12345)"
+
+      assert_raise_with_message(Quickjs::ReferenceError, "'Intl' is not defined") { ::Quickjs.eval_code(code) }
+      assert_equal(
+        '$12,345.00',
+        ::Quickjs.eval_code(code, @options_to_enable_polyfill)
+      )
+    end
+
+  end
+
   class QuickjsVmTest < Test::Unit::TestCase
     class WithPlainVM < QuickjsVmTest
       setup { @vm = Quickjs::VM.new }

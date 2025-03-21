@@ -11,11 +11,11 @@ $srcs = [
   'cutils.c',
   'quickjs.c',
   'quickjs-libc.c',
+  'polyfill-intl-en.min.c',
   'quickjsrb.c',
 ]
 
 append_cflags('-I$(srcdir)/quickjs')
-
 
 append_cflags('-g')
 append_cflags('-O2')
@@ -51,4 +51,17 @@ abort('could not find quickjs-libc.h') unless find_header('quickjs-libc.h')
 append_cflags('-fvisibility=hidden')
 $warnflags = ''
 
-create_makefile('quickjs/quickjsrb')
+create_makefile('quickjs/quickjsrb') do |conf|
+  conf.push <<COMPILE_POLYFILL
+QJS_LIB_OBJS= quickjs.o libregexp.o libunicode.o cutils.o quickjs-libc.o libbf.o
+POLYFILL_OPTS=-fno-string-normalize -fno-typedarray -fno-typedarray -fno-eval -fno-proxy -fno-module-loader -fno-bigint
+
+qjsc: ./qjsc.o $(QJS_LIB_OBJS)
+		$(CC) -g -o $@ $^ -lm -ldl -lpthread
+polyfill-intl-en.min.js:
+		$(COPY) $(srcdir)/vendor/$@ $@
+polyfill-intl-en.min.c: ./qjsc polyfill-intl-en.min.js
+		./qjsc $(POLYFILL_OPTS) -c -M polyfill/intl-en.so,intlen -m -o $@ polyfill-intl-en.min.js
+COMPILE_POLYFILL
+  conf
+end
