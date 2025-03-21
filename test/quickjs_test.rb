@@ -148,8 +148,7 @@ class QuickjsTest < Test::Unit::TestCase
 
   test "js timeout funcs can be injected" do
     assert_code("typeof setTimeout === 'undefined'", true)
-    assert_code("typeof clearTimeout === 'undefined'", true)
-    assert_equal(::Quickjs.eval_code("!!setTimeout && !!clearTimeout", { features: [::Quickjs::FEATURES_TIMEOUT] }), true)
+    assert_equal(::Quickjs.eval_code("!!setTimeout", { features: [::Quickjs::FEATURES_TIMEOUT] }), true)
   end
 
   class QuickjsPolyfillIntlTest < Test::Unit::TestCase
@@ -582,27 +581,27 @@ class QuickjsTest < Test::Unit::TestCase
       end
     end
 
+    def run_threads(&block)
+      result = []
+      t1 = Thread.new { 5.times { |i| result << 't1'; sleep 0.1 } }
+      t2 = Thread.new { block.call; result << 't2' }
+      [t1, t2].each { |t| t.join }
+      result
+    end
+
+    def assert_sleep_a_sec_within_thread(&block)
+      assert_equal(run_threads(&block), %w(t1 t1 t1 t1 t1 t2))
+    end
+
+    def refute_sleep_a_sec_within_thread(&block)
+      refute_equal(run_threads(&block), %w(t1 t1 t1 t1 t1 t2))
+    end
+
     class ProcessBlocking < QuickjsVmTest
       setup do
         @vm = Quickjs::VM.new(timeout_msec: 1200, features: [::Quickjs::MODULE_OS])
       end
       teardown { @vm = nil }
-
-      def run_threads(&block)
-        result = []
-        t1 = Thread.new { 5.times { |i| result << 't1'; sleep 0.1 } }
-        t2 = Thread.new { block.call; result << 't2' }
-        [t1, t2].each { |t| t.join }
-        result
-      end
-
-      def assert_sleep_a_sec_within_thread(&block)
-        assert_equal(run_threads(&block), %w(t1 t1 t1 t1 t1 t2))
-      end
-
-      def refute_sleep_a_sec_within_thread(&block)
-        refute_equal(run_threads(&block), %w(t1 t1 t1 t1 t1 t2))
-      end
 
       test 'ensure Kernel#sleep is fine' do
         assert_sleep_a_sec_within_thread do
@@ -624,9 +623,9 @@ class QuickjsTest < Test::Unit::TestCase
         end
       end
 
-      test 'awaiting setTimeout2 is fine' do
-        assert_sleep_a_sec_within_thread do
-          @vm.eval_code('await new Promise(resolve => setTimeout2(resolve, 1000));')
+      test 'os sleep messes' do
+        refute_sleep_a_sec_within_thread do
+          @vm.eval_code('os.sleep(1000);')
         end
       end
 
@@ -645,6 +644,19 @@ class QuickjsTest < Test::Unit::TestCase
       test 'awaiting os.sleepAsync messes' do
         refute_sleep_a_sec_within_thread do
           @vm.eval_code('async function top () { await os.sleepAsync(1000); } await top();');
+        end
+      end
+    end
+
+    class OSLessSetTimeout < QuickjsVmTest
+      setup do
+        @vm = Quickjs::VM.new(timeout_msec: 1200, features: [::Quickjs::FEATURES_TIMEOUT])
+      end
+      teardown { @vm = nil }
+
+      test 'awaiting setTimeout does not block other threads' do
+        assert_sleep_a_sec_within_thread do
+          @vm.eval_code('await new Promise(resolve => setTimeout(resolve, 1000));')
         end
       end
     end

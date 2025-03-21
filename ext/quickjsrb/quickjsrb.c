@@ -399,12 +399,14 @@ static JSValue js_quickjsrb_set_timeout(JSContext *ctx, JSValueConst _this, int 
   func = argv[0];
   if (!JS_IsFunction(ctx, func))
     return JS_ThrowTypeError(ctx, "not a function");
-  if (JS_ToInt64(ctx, &delay, argv[1]))
+  if (JS_ToInt64(ctx, &delay, argv[1])) // TODO: should be lower than global timeout
     return JS_EXCEPTION;
 
   JSValueConst args[2];
   args[0] = func;
   args[1] = argv[1]; // delay
+  // TODO: implement timer manager and poll with quickjs' queue
+  // Currently, queueing multiple js_delay_and_eval_job is not parallelized
   JS_EnqueueJob(ctx, js_delay_and_eval_job, 2, args);
 
   return JS_UNDEFINED;
@@ -520,6 +522,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   JS_SetModuleLoaderFunc(runtime, NULL, js_module_loader, NULL);
   js_std_init_handlers(runtime);
+  JSValue j_global = JS_GetGlobalObject(data->context);
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featureStdId))))
   {
@@ -540,18 +543,9 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   }
   else if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featureOsTimeoutId))))
   {
-    char *filename = random_string();
-    js_init_module_os(data->context, filename); // Better if this is limited just only for setTimeout and clearTimeout
-    const char *enableTimeoutTemplate = "import * as _os from '%s';\n"
-                                        "globalThis.setTimeout = _os.setTimeout;\n"
-                                        "globalThis.clearTimeout = _os.clearTimeout;\n";
-    int length = snprintf(NULL, 0, enableTimeoutTemplate, filename);
-    char *enableTimeout = (char *)malloc(length + 1);
-    snprintf(enableTimeout, length + 1, enableTimeoutTemplate, filename);
-
-    JSValue j_timeoutEval = JS_Eval(data->context, enableTimeout, strlen(enableTimeout), "<vm>", JS_EVAL_TYPE_MODULE);
-    free(enableTimeout);
-    JS_FreeValue(data->context, j_timeoutEval);
+    JS_SetPropertyStr(
+        data->context, j_global, "setTimeout",
+        JS_NewCFunction(data->context, js_quickjsrb_set_timeout, "setTimeout", 2));
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillIntlId))))
@@ -564,11 +558,6 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JSValue j_polyfillIntlResult = JS_EvalFunction(data->context, j_polyfillIntlObject); // Frees polyfillIntlObject
     JS_FreeValue(data->context, j_polyfillIntlResult);
   }
-
-  JSValue j_global = JS_GetGlobalObject(data->context);
-  JS_SetPropertyStr(
-      data->context, j_global, "setTimeout2",
-      JS_NewCFunction(data->context, js_quickjsrb_set_timeout, "setTimeout2", 2));
 
   JSValue j_console = JS_NewObject(data->context);
   JS_SetPropertyStr(
