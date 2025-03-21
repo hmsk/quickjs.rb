@@ -49,20 +49,22 @@ Quickjs.eval_code(code, { memory_limit: 1024 ** 3 })
 Quickjs.eval_code(code, { max_stack_size: 1024 ** 2 })
 ```
 
-#### Built-in modules
-
-To enable [std module](https://bellard.org/quickjs/quickjs.html#std-module) and [os module](https://bellard.org/quickjs/quickjs.html#os-module) selectively.
+#### Toggle features
 
 ```rb
-# enable std module
-Quickjs.eval_code(code, { features: [Quickjs::MODULE_STD] })
+# Enable `std` module by quickjs: https://bellard.org/quickjs/quickjs.html#std-module
+vm = Quickjs.eval_code(features: [::Quickjs::MODULE_STD])
 
-# enable os module
-Quickjs.eval_code(code, { features: [Quickjs::MODULE_OS] })
+# Enable `os` module by quickjs: https://bellard.org/quickjs/quickjs.html#os-module
+vm = Quickjs.eval_code(features: [::Quickjs::MODULE_OS])
 
-# enable timeout features `setTimeout`, `clearTimeout` from os module specifically
-Quickjs.eval_code(code, { features: [Quickjs::FEATURES_TIMEOUT] })
+# Expose `os.setTimouet` and `os.clearTimeout` from `os` module
+vm = Quickjs.eval_code(features: [::Quickjs::FEATURES_TIMEOUT])
+
+# Inject the polyfill of Intl
+vm = Quickjs.eval_code(features: [::Quickjs::POLYFILL_INTL])
 ```
+
 </details>
 
 ### `Quickjs::VM`: Maintain a consistent VM/runtime
@@ -87,19 +89,20 @@ vm = Quickjs::VM.new(
 )
 ```
 
-#### Built-in modules
-
-To enable [std module](https://bellard.org/quickjs/quickjs.html#std-module) and [os module](https://bellard.org/quickjs/quickjs.html#os-module) selectively.
+#### Toggle features
 
 ```rb
-# enable std module
+# Enable `std` module by quickjs: https://bellard.org/quickjs/quickjs.html#std-module
 vm = Quickjs::VM.new(features: [::Quickjs::MODULE_STD])
 
-# enable os module
+# Enable `os` module by quickjs: https://bellard.org/quickjs/quickjs.html#os-module
 vm = Quickjs::VM.new(features: [::Quickjs::MODULE_OS])
 
-# enable timeout features `setTimeout`, `clearTimeout`
+# Expose `os.setTimouet` and `os.clearTimeout` from `os` module
 vm = Quickjs::VM.new(features: [::Quickjs::FEATURES_TIMEOUT])
+
+# Inject the polyfill of Intl
+vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_INTL])
 ```
 
 #### VM timeout
@@ -158,6 +161,16 @@ vm.logs.last.raw #=> ['log me', nil]
 
 ## License
 
-Every file in `ext/quickjsrb/quickjs` is licensed under [the MIT License Copyright 2017-2021 by Fabrice Bellard and Charlie Gordon](https://github.com/bellard/quickjs/blob/6e2e68fd0896957f92eb6c242a2e048c1ef3cae0/LICENSE).
+- `ext/quickjsrb/quickjs`
+  - [MIT License Copyright (c) 2017-2021 by Fabrice Bellard and Charlie Gordon](https://github.com/bellard/quickjs/blob/6e2e68fd0896957f92eb6c242a2e048c1ef3cae0/LICENSE).
+- `ext/quickjsrb/vendor/polyfill-intl-en.min.js`
+  - MIT License Copyright (c) 2023 FormatJS
+    - `[@formatjs/intl-getcanonicallocales](https://github.com/formatjs/formatjs/blob/main/packages/intl-getcanonicallocales/LICENSE.md)
+    - `[@formatjs/intl-locale](https://github.com/formatjs/formatjs/blob/main/packages/intl-locale/LICENSE.md)
+    - `[@formatjs/intl-pluralrules](https://github.com/formatjs/formatjs/blob/main/packages/intl-pluralrules/LICENSE.md)
+    - `[@formatjs/intl-numberformat](https://github.com/formatjs/formatjs/blob/main/packages/intl-numberformat/LICENSE.md)
+    - `[@formatjs/intl-datetimeformat](https://github.com/formatjs/formatjs/blob/main/packages/intl-datetimeformat/LICENSE.md)
+  - MIT License Copyright (c) 2025 Michael Mclaughlin
+    - [decimal.js](https://www.npmjs.com/package/decimal.js)
 
-For otherwise, [the MIT License, Copyright 2024 by Kengo Hamasaki](/LICENSE).
+Otherwise, [the MIT License, Copyright 2024 by Kengo Hamasaki](/LICENSE).
