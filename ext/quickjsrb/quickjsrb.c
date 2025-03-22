@@ -588,6 +588,53 @@ static int interrupt_handler(JSRuntime *runtime, void *opaque)
   return clock() >= eval_time->started_at + eval_time->limit ? 1 : 0;
 }
 
+JSValue await_value(JSContext *ctx, JSValue promise)
+{
+  JSValue ret;
+  for (;;)
+  {
+    int state = JS_PromiseState(ctx, promise);
+    if (state == JS_PROMISE_FULFILLED)
+    {
+      ret = JS_PromiseResult(ctx, promise);
+      JS_FreeValue(ctx, promise);
+      break;
+    }
+    else if (state == JS_PROMISE_REJECTED)
+    {
+      ret = JS_Throw(ctx, JS_PromiseResult(ctx, promise));
+      JS_FreeValue(ctx, promise);
+      break;
+    }
+    else if (state == JS_PROMISE_PENDING)
+    {
+
+      // Run all pending jobs in a loop (not recursively)
+      JSContext *ctx1;
+      int err;
+      do
+      {
+        err = JS_ExecutePendingJob(JS_GetRuntime(ctx), &ctx1);
+        if (err < 0)
+        {
+          js_std_dump_error(ctx1);
+          break;
+        }
+      } while (err > 0);
+    }
+    else
+    {
+      ret = promise; // not promise
+      break;
+    }
+
+    // Brief sleep to avoid 100% CPU spin
+    struct timespec ts = {0, 1000000}; // 1ms
+    nanosleep(&ts, NULL);
+  }
+  return ret;
+}
+
 static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
 {
   VMData *data;
@@ -599,7 +646,7 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
   char *code = StringValueCStr(r_code);
   JSValue j_codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
   js_std_loop(data->context);
-  JSValue j_awaitedResult = js_std_await(data->context, j_codeResult); // This frees j_codeResult
+  JSValue j_awaitedResult = await_value(data->context, j_codeResult); // This frees j_codeResult
   JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
   // Do this by rescuing to_rb_value
   if (JS_VALUE_GET_NORM_TAG(j_returnedValue) == JS_TAG_OBJECT && JS_PromiseState(data->context, j_returnedValue) != -1)
