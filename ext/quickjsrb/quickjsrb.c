@@ -598,6 +598,7 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
 
   char *code = StringValueCStr(r_code);
   JSValue j_codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
+  js_std_loop(data->context);
   JSValue j_awaitedResult = js_std_await(data->context, j_codeResult); // This frees j_codeResult
   JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
   // Do this by rescuing to_rb_value
