@@ -4,11 +4,11 @@ JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
   JSValue j_error = JS_NewError(ctx); // may wanna have custom error class to determine in JS' end
 
-  VALUE r_object_id = rb_funcall(r_error, rb_intern("object_id"), 0, NULL);
+  VALUE r_object_id = rb_funcall(r_error, rb_intern("object_id"), 0);
   int objectId = NUM2INT(r_object_id);
   JS_SetPropertyStr(ctx, j_error, "rb_object_id", JS_NewInt32(ctx, objectId));
 
-  VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0, NULL);
+  VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0);
   const char *errorMessage = StringValueCStr(r_exception_message);
   JS_SetPropertyStr(ctx, j_error, "message", JS_NewString(ctx, errorMessage));
 
@@ -24,7 +24,7 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   case T_FIXNUM:
   case T_FLOAT:
   {
-    VALUE r_str = rb_funcall(r_value, rb_intern("to_s"), 0, NULL);
+    VALUE r_str = rb_funcall(r_value, rb_intern("to_s"), 0);
     char *str = StringValueCStr(r_str);
     JSValue j_global = JS_GetGlobalObject(ctx);
     JSValue j_numberClass = JS_GetPropertyStr(ctx, j_global, "Number");
@@ -44,7 +44,7 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   }
   case T_SYMBOL:
   {
-    VALUE r_str = rb_funcall(r_value, rb_intern("to_s"), 0, NULL);
+    VALUE r_str = rb_funcall(r_value, rb_intern("to_s"), 0);
     char *str = StringValueCStr(r_str);
 
     return JS_NewString(ctx, str);
@@ -56,7 +56,7 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   case T_HASH:
   case T_ARRAY:
   {
-    VALUE r_json_str = rb_funcall(r_value, rb_intern("to_json"), 0, NULL);
+    VALUE r_json_str = rb_funcall(r_value, rb_intern("to_json"), 0);
     char *str = StringValueCStr(r_json_str);
     JSValue j_parsed = JS_ParseJSON(ctx, str, strlen(str), "<quickjsrb.c>");
 
@@ -71,7 +71,7 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
     {
       return j_error_from_ruby_error(ctx, r_value);
     }
-    VALUE r_inspect_str = rb_funcall(r_value, rb_intern("inspect"), 0, NULL);
+    VALUE r_inspect_str = rb_funcall(r_value, rb_intern("inspect"), 0);
     char *str = StringValueCStr(r_inspect_str);
 
     return JS_NewString(ctx, str);
@@ -284,7 +284,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     JS_FreeValue(ctx, j_strigified);
     JS_FreeCString(ctx, msg);
 
-    return rb_funcall(r_str, rb_intern("to_i"), 0, NULL);
+    return rb_funcall(r_str, rb_intern("to_i"), 0);
   }
   case JS_TAG_BIG_FLOAT:
   case JS_TAG_BIG_DECIMAL:
@@ -623,7 +623,7 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   JS_FreeValue(data->context, ruby_data[0]);
   JS_FreeValue(data->context, ruby_data[1]);
 
-  return rb_funcall(r_name, rb_intern("to_sym"), 0, NULL);
+  return rb_funcall(r_name, rb_intern("to_sym"), 0);
 }
 
 static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
