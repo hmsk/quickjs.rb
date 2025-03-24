@@ -18,6 +18,7 @@ extern const uint8_t qjsc_polyfill_intl_en_min;
 const char *featureStdId = "feature_std";
 const char *featureOsId = "feature_os";
 const char *featureOsTimeoutId = "feature_os_timeout";
+const char *featureOsTimeoutBetaId = "feature_os_timeout_beta";
 const char *featurePolyfillIntlId = "feature_polyfill_intl";
 
 const char *undefinedId = "undefined";
@@ -137,6 +138,7 @@ static void r_define_constants(VALUE r_parent_class)
   rb_define_const(r_parent_class, "MODULE_STD", QUICKJSRB_SYM(featureStdId));
   rb_define_const(r_parent_class, "MODULE_OS", QUICKJSRB_SYM(featureOsId));
   rb_define_const(r_parent_class, "FEATURES_TIMEOUT", QUICKJSRB_SYM(featureOsTimeoutId));
+  rb_define_const(r_parent_class, "FEATURES_TIMEOUT_BETA", QUICKJSRB_SYM(featureOsTimeoutBetaId));
   rb_define_const(r_parent_class, "POLYFILL_INTL", QUICKJSRB_SYM(featurePolyfillIntlId));
 
   VALUE rb_cQuickjsValue = rb_define_class_under(r_parent_class, "Value", rb_cObject);

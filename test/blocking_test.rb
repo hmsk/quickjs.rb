@@ -21,7 +21,7 @@ class QuickjsBlockingTest < Test::Unit::TestCase
 
   class ProcessBlocking < QuickjsBlockingTest
     setup do
-      @vm = Quickjs::VM.new(timeout_msec: 1200, features: [::Quickjs::MODULE_OS])
+      @vm = Quickjs::VM.new(timeout_msec: 500, features: [::Quickjs::MODULE_OS])
     end
     teardown { @vm = nil }
 
@@ -66,6 +66,19 @@ class QuickjsBlockingTest < Test::Unit::TestCase
     test 'awaiting os.sleepAsync messes' do
       refute_sleep_a_sec_within_thread do
         @vm.eval_code('async function top () { await os.sleepAsync(100); } await top();');
+      end
+    end
+  end
+
+  class RubyBasedTimeout < QuickjsBlockingTest
+    setup do
+      @vm = Quickjs::VM.new(timeout_msec: 500, features: [::Quickjs::FEATURES_TIMEOUT_BETA])
+    end
+    teardown { @vm = nil }
+
+    test 'awaiting setTimeout does not block other threads' do
+      assert_sleep_a_sec_within_thread do
+        @vm.eval_code('await new Promise(resolve => setTimeout(resolve, 100));')
       end
     end
   end
