@@ -542,22 +542,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JSValue j_osEval = JS_Eval(data->context, enableOs, strlen(enableOs), "<vm>", JS_EVAL_TYPE_MODULE);
     JS_FreeValue(data->context, j_osEval);
   }
-  else if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featureOsTimeoutId))))
-  {
-    char *filename = random_string();
-    js_init_module_os(data->context, filename); // Better if this is limited just only for setTimeout and clearTimeout
-    const char *enableTimeoutTemplate = "import * as _os from '%s';\n"
-                                        "globalThis.setTimeout = _os.setTimeout;\n"
-                                        "globalThis.clearTimeout = _os.clearTimeout;\n";
-    int length = snprintf(NULL, 0, enableTimeoutTemplate, filename);
-    char *enableTimeout = (char *)malloc(length + 1);
-    snprintf(enableTimeout, length + 1, enableTimeoutTemplate, filename);
-
-    JSValue j_timeoutEval = JS_Eval(data->context, enableTimeout, strlen(enableTimeout), "<vm>", JS_EVAL_TYPE_MODULE);
-    free(enableTimeout);
-    JS_FreeValue(data->context, j_timeoutEval);
-  }
-  else if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featureOsTimeoutBetaId))))
+  else if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featureTimeoutId))))
   {
     JS_SetPropertyStr(
         data->context, j_global, "setTimeout",

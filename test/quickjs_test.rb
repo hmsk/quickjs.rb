@@ -146,10 +146,10 @@ class QuickjsTest < Test::Unit::TestCase
     assert_equal(::Quickjs.eval_code("!!os.kill", { features: [::Quickjs::MODULE_OS] }), true)
   end
 
-  test "js timeout funcs can be injected" do
+  test "only setTimeout is provided per the flag" do
     assert_code("typeof setTimeout === 'undefined'", true)
-    assert_code("typeof clearTimeout === 'undefined'", true)
-    assert_equal(::Quickjs.eval_code("!!setTimeout && !!clearTimeout", { features: [::Quickjs::FEATURES_TIMEOUT] }), true)
+    # assert_code("typeof clearTimeout === 'undefined'", true)
+    assert_equal(::Quickjs.eval_code("typeof setTimeout", { features: [::Quickjs::FEATURE_TIMEOUT] }), 'function')
   end
 
   class QuickjsPolyfillIntlTest < Test::Unit::TestCase

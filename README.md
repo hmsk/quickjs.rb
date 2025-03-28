@@ -58,8 +58,8 @@ vm = Quickjs.eval_code(features: [::Quickjs::MODULE_STD])
 # Enable `os` module by quickjs: https://bellard.org/quickjs/quickjs.html#os-module
 vm = Quickjs.eval_code(features: [::Quickjs::MODULE_OS])
 
-# Expose `os.setTimouet` and `os.clearTimeout` from `os` module
-vm = Quickjs.eval_code(features: [::Quickjs::FEATURES_TIMEOUT])
+# Provide `setTimeout` managed by CRuby
+vm = Quickjs.eval_code(features: [::Quickjs::FEATURE_TIMEOUT])
 
 # Inject the polyfill of Intl
 vm = Quickjs.eval_code(features: [::Quickjs::POLYFILL_INTL])
@@ -98,8 +98,8 @@ vm = Quickjs::VM.new(features: [::Quickjs::MODULE_STD])
 # Enable `os` module by quickjs: https://bellard.org/quickjs/quickjs.html#os-module
 vm = Quickjs::VM.new(features: [::Quickjs::MODULE_OS])
 
-# Expose `os.setTimouet` and `os.clearTimeout` from `os` module
-vm = Quickjs::VM.new(features: [::Quickjs::FEATURES_TIMEOUT])
+# Provide `setTimeout` managed by CRuby
+vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
 
 # Inject the polyfill of Intl
 vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_INTL])

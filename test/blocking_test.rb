@@ -82,7 +82,7 @@ class QuickjsBlockingTest < Test::Unit::TestCase
 
   class RubyBasedTimeout < QuickjsBlockingTest
     setup do
-      @vm = Quickjs::VM.new(timeout_msec: 500, features: [::Quickjs::FEATURES_TIMEOUT_BETA])
+      @vm = Quickjs::VM.new(timeout_msec: 500, features: [::Quickjs::FEATURE_TIMEOUT])
     end
     teardown { @vm = nil }
 
