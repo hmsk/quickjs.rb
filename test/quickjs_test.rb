@@ -341,6 +341,13 @@ class QuickjsTest < Test::Unit::TestCase
         end
       end
 
+      test "returns a symbol" do
+        assert_equal(
+          @vm.define_function('should_be_sym') { true },
+          :should_be_sym
+        )
+      end
+
       [
         ["'symsym'", :symsym],
         ["null", nil],
