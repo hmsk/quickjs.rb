@@ -335,6 +335,12 @@ class QuickjsTest < Test::Unit::TestCase
         assert(@vm.eval_code('sym()'))
       end
 
+      test "function's name can't be others than a symbol nor a string" do
+        assert_raise_with_message(TypeError, "function's name should be a Symbol or a String") do
+          @vm.define_function([:sym_in_ary]) { 'never reach' }
+        end
+      end
+
       [
         ["'symsym'", :symsym],
         ["null", nil],

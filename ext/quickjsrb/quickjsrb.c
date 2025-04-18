@@ -628,6 +628,11 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   VALUE r_block;
   rb_scan_args(argc, argv, "10*&", &r_name, &r_flags, &r_block);
 
+  if (!(SYMBOL_P(r_name) || RB_TYPE_P(r_name, T_STRING)))
+  {
+    rb_raise(rb_eTypeError, "function's name should be a Symbol or a String");
+  }
+
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
