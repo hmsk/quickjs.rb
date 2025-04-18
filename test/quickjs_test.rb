@@ -330,6 +330,11 @@ class QuickjsTest < Test::Unit::TestCase
         end
       end
 
+      test "function's name can be a symbol" do
+        @vm.define_function(:sym) { true }
+        assert(@vm.eval_code('sym()'))
+      end
+
       [
         ["'symsym'", :symsym],
         ["null", nil],

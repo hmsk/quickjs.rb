@@ -311,7 +311,7 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   const char *funcName = JS_ToCString(ctx, func_data[0]);
 
   VMData *data = JS_GetContextOpaque(ctx);
-  VALUE r_proc = rb_hash_aref(data->defined_functions, rb_str_new2(funcName));
+  VALUE r_proc = rb_hash_aref(data->defined_functions, ID2SYM(rb_intern(funcName)));
   // Shouldn't happen
   if (r_proc == Qnil)
   {
@@ -631,8 +631,11 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
-  rb_hash_aset(data->defined_functions, r_name, r_block);
-  char *funcName = StringValueCStr(r_name);
+  VALUE r_name_sym = rb_funcall(r_name, rb_intern("to_sym"), 0);
+
+  rb_hash_aset(data->defined_functions, r_name_sym, r_block);
+  VALUE r_name_str = rb_funcall(r_name, rb_intern("to_s"), 0);
+  char *funcName = StringValueCStr(r_name_str);
 
   JSValueConst ruby_data[2];
   ruby_data[0] = JS_NewString(data->context, funcName);
@@ -646,7 +649,7 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   JS_FreeValue(data->context, ruby_data[0]);
   JS_FreeValue(data->context, ruby_data[1]);
 
-  return rb_funcall(r_name, rb_intern("to_sym"), 0);
+  return r_name_sym;
 }
 
 static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
