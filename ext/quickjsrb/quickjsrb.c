@@ -671,9 +671,14 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
 
   char *filename = random_string();
   char *source = StringValueCStr(r_from);
-  JSValue func = JS_Eval(data->context, source, strlen(source), filename, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-  js_module_set_import_meta(data->context, func, TRUE, FALSE);
-  JS_FreeValue(data->context, func);
+  JSValue module = JS_Eval(data->context, source, strlen(source), filename, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  if (JS_IsException(module))
+  {
+    JS_FreeValue(data->context, module);
+    return to_rb_value(data->context, module);
+  }
+  js_module_set_import_meta(data->context, module, TRUE, FALSE);
+  JS_FreeValue(data->context, module);
 
   VALUE r_import_settings = rb_funcall(
       rb_const_get(rb_cClass, rb_intern("Quickjs")),

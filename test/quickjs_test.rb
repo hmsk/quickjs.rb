@@ -475,6 +475,12 @@ class QuickjsTest < Test::Unit::TestCase
         assert_equal(@vm.eval_code('RenamedImported()'), 'I am a default export of ESM.')
         assert_equal(@vm.eval_code('!!globalThis.Imported'), false)
       end
+
+      test "imports a script which throws error result raising an exception" do
+        assert_raise_with_message(Quickjs::SyntaxError, /expecting/) do
+          @vm.import('* as all', from: 'should be syntax error')
+        end
+      end
     end
 
     class ConsoleLoggers < QuickjsVmTest
