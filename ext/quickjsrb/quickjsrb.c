@@ -274,6 +274,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     return Qnil;
   }
   case JS_TAG_BIG_INT:
+  case JS_TAG_SHORT_BIG_INT:
   {
     JSValue j_toStringFunc = JS_GetPropertyStr(ctx, j_val, "toString");
     JSValue j_strigified = JS_Call(ctx, j_toStringFunc, j_val, 0, NULL);
@@ -286,8 +287,6 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
 
     return rb_funcall(r_str, rb_intern("to_i"), 0);
   }
-  case JS_TAG_BIG_FLOAT:
-  case JS_TAG_BIG_DECIMAL:
   case JS_TAG_SYMBOL:
   default:
     return Qnil;
@@ -514,11 +513,6 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   JS_SetMemoryLimit(runtime, NUM2UINT(r_memory_limit));
   JS_SetMaxStackSize(runtime, NUM2UINT(r_max_stack_size));
-
-  JS_AddIntrinsicBigFloat(data->context);
-  JS_AddIntrinsicBigDecimal(data->context);
-  JS_AddIntrinsicOperators(data->context);
-  JS_EnableBignumExt(data->context, TRUE);
 
   JS_SetModuleLoaderFunc(runtime, NULL, js_module_loader, NULL);
   js_std_init_handlers(runtime);

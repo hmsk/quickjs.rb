@@ -5,8 +5,8 @@ require 'mkmf'
 $VPATH << "$(srcdir)/quickjs"
 
 $srcs = [
+  'dtoa.c',
   'libunicode.c',
-  'libbf.c',
   'libregexp.c',
   'cutils.c',
   'quickjs.c',
@@ -37,9 +37,7 @@ else
 end
 
 append_cflags('-fwrapv')
-#$defs.push('-D_GNU_SOURCE -DCONFIG_VERSION=\"2024-02-14\"')
-#$defs.push('-DCONFIG_BIGNUM')
-$CFLAGS << ' ' << '-D_GNU_SOURCE -DCONFIG_VERSION=\"2024-02-14\" -DCONFIG_BIGNUM'
+$CFLAGS << ' ' << '-D_GNU_SOURCE -DCONFIG_VERSION=\"2024-02-14\"'
 
 abort('could not find quickjs.h') unless find_header('quickjs.h')
 abort('could not find cutils.h') unless find_header('cutils.h')
@@ -53,8 +51,8 @@ $warnflags = ''
 
 create_makefile('quickjs/quickjsrb') do |conf|
   conf.push <<COMPILE_POLYFILL
-QJS_LIB_OBJS= quickjs.o libregexp.o libunicode.o cutils.o quickjs-libc.o libbf.o
-POLYFILL_OPTS=-fno-string-normalize -fno-typedarray -fno-typedarray -fno-eval -fno-proxy -fno-module-loader -fno-bigint
+QJS_LIB_OBJS= quickjs.o dtoa.o libregexp.o libunicode.o cutils.o quickjs-libc.o
+POLYFILL_OPTS=-fno-string-normalize -fno-typedarray -fno-typedarray -fno-eval -fno-proxy -fno-module-loader
 
 qjsc: ./qjsc.o $(QJS_LIB_OBJS)
 		$(CC) -g -o $@ $^ -lm -ldl -lpthread
