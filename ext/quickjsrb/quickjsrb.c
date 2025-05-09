@@ -613,6 +613,108 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
   }
 }
 
+static int hexchar_to_val(char c)
+{
+  if ('0' <= c && c <= '9')
+    return c - '0';
+  if ('a' <= c && c <= 'f')
+    return 10 + (c - 'a');
+  if ('A' <= c && c <= 'F')
+    return 10 + (c - 'A');
+  return -1;
+}
+
+static VALUE vm_m_evalRunnable(VALUE r_self, VALUE r_hexcode)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  data->eval_time->started_at = clock();
+  JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
+
+  const char *hexstr = RSTRING_PTR(r_hexcode);
+  long len = RSTRING_LEN(r_hexcode);
+  long byte_len = len / 2;
+  uint8_t *buf = ALLOCA_N(uint8_t, byte_len);
+  for (long i = 0; i < byte_len; i++)
+  {
+    int hi = hexchar_to_val(hexstr[i * 2]);
+    int lo = hexchar_to_val(hexstr[i * 2 + 1]);
+    if (hi == -1 || lo == -1)
+    {
+      rb_raise(rb_eArgError, "invalid hex character at %ld", i * 2);
+    }
+    buf[i] = (hi << 4) | lo;
+  }
+
+  JSValue j_decodedFunction = JS_ReadObject(data->context, buf, byte_len, JS_READ_OBJ_BYTECODE);
+  JSValue j_codeResult = JS_EvalFunction(data->context, j_decodedFunction); // This frees j_decodedFunction
+  // JSValue j_awaitedResult = js_std_await(data->context, j_codeResult);      // This frees j_codeResult
+  // JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
+  // Do this by rescuing to_rb_value
+  if (JS_VALUE_GET_NORM_TAG(j_codeResult) == JS_TAG_OBJECT && JS_PromiseState(data->context, j_codeResult) != -1)
+  {
+    JS_FreeValue(data->context, j_codeResult);
+    // JS_FreeValue(data->context, j_awaitedResult);
+    VALUE r_error_message = rb_str_new2("An unawaited Promise was returned to the top-level");
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_NO_AWAIT_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
+    return Qnil;
+  }
+  else
+  {
+    VALUE result = to_rb_value(data->context, j_codeResult);
+    JS_FreeValue(data->context, j_codeResult);
+    // JS_FreeValue(data->context, j_awaitedResult);
+    return result;
+  }
+}
+
+bool to_hex(char *dest, size_t dest_len, const uint8_t *values, size_t val_len)
+{
+  static const char hex_table[] = "0123456789ABCDEF";
+  if (dest_len < (val_len * 2 + 1))
+    return false;
+  while (val_len--)
+  {
+    *dest++ = hex_table[*values >> 4];
+    *dest++ = hex_table[*values++ & 0xF];
+  }
+  *dest = 0;
+  return true;
+}
+
+static VALUE vm_m_compile(VALUE r_self, VALUE r_code)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  data->eval_time->started_at = clock();
+  JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
+
+  char *code = StringValueCStr(r_code);
+  JSValue j_codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_FLAG_COMPILE_ONLY);
+  // TODO: detect module
+  // TODO: raise if result is exception
+  uint8_t *out_buf;
+  size_t out_buf_len;
+  out_buf = JS_WriteObject(data->context, &out_buf_len, j_codeResult, JS_WRITE_OBJ_BYTECODE);
+  char buf[out_buf_len * 2 + 1];
+  JS_FreeValue(data->context, j_codeResult);
+  if (to_hex(buf, sizeof(buf), out_buf, out_buf_len))
+  {
+    VALUE r_hex = rb_str_new2(buf);
+    VALUE r_m_quickjs = rb_const_get(rb_cClass, rb_intern("Quickjs"));
+    VALUE r_c_runnable = rb_const_get(r_m_quickjs, rb_intern("Runnable"));
+    VALUE r_runnable = rb_funcall(r_c_runnable, rb_intern("new"), 1, r_hex);
+
+    return r_runnable;
+  }
+  else
+  {
+    return Qnil;
+  }
+}
+
 static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
 {
   rb_need_block();
@@ -732,6 +834,8 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_alloc_func(r_class_vm, vm_alloc);
   rb_define_method(r_class_vm, "initialize", vm_m_initialize, -1);
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, 1);
+  rb_define_method(r_class_vm, "eval_runnable", vm_m_evalRunnable, 1);
+  rb_define_method(r_class_vm, "compile", vm_m_compile, 1);
   rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
   rb_define_method(r_class_vm, "logs", vm_m_logs, 0);

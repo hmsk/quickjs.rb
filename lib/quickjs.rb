@@ -2,6 +2,7 @@
 
 require "timeout"
 require_relative "quickjs/version"
+require_relative "quickjs/runnable"
 require_relative "quickjs/quickjsrb"
 
 module Quickjs
