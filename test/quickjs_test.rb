@@ -525,7 +525,7 @@ class QuickjsTest < Test::Unit::TestCase
         @vm.eval_code('console.log(128, "str", variable, undefined, null, { key: "value" }, [1, 2, 3], new Error("hey"))')
 
         assert_equal(@vm.logs.last.raw, [
-          128, "str", "var!", Quickjs::Value::UNDEFINED, nil, { "key" => "value" }, [1,2,3], "Error: hey\n    at <eval> (<code>)\n"
+          128, "str", "var!", Quickjs::Value::UNDEFINED, nil, { "key" => "value" }, [1,2,3], "Error: hey\n    at <eval> (<code>:1:90)\n"
         ])
       end
 
@@ -542,7 +542,7 @@ class QuickjsTest < Test::Unit::TestCase
         @vm.eval_code('try { get_exception() } catch (e) { console.log(e) }')
 
         assert_equal(@vm.logs.last.to_s, 'Error: io')
-        assert_equal(@vm.logs.last.raw, ["Error: io\n    at <eval> (<code>)\n"])
+        assert_equal(@vm.logs.last.raw, ["Error: io\n    at <eval> (<code>:1:20)\n"])
       end
 
       test "implemented as native code" do
@@ -568,7 +568,7 @@ class QuickjsTest < Test::Unit::TestCase
           @vm.logs.last.raw.first.split("\n"),
           [
             "Uncaught ReferenceError: 'b' is not defined",
-            '    at <eval> (<code>:4)'
+            '    at <eval> (<code>:4:17)'
           ]
         )
       end
@@ -600,9 +600,9 @@ class QuickjsTest < Test::Unit::TestCase
         trace = @vm.logs.last.raw.first.split("\n")
         assert_equal(trace.size, 4)
         assert_equal(trace[0], 'Uncaught Error: unpleasant wrapped error')
-        assert_match(/at thrower \(\w{12}:6\)/, trace[1])
-        assert_match(/at wrapError \(\w{12}:10\)/, trace[2])
-        assert_equal('    at <eval> (<code>)', trace[3])
+        assert_match(/at thrower \(\w{12}:6:18\)/, trace[1])
+        assert_match(/at wrapError \(\w{12}:10:10\)/, trace[2])
+        assert_equal('    at <eval> (<code>:1:10)', trace[3])
       end
     end
   end
