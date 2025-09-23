@@ -514,7 +514,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   JS_SetMemoryLimit(runtime, NUM2UINT(r_memory_limit));
   JS_SetMaxStackSize(runtime, NUM2UINT(r_max_stack_size));
 
-  JS_SetModuleLoaderFunc(runtime, NULL, js_module_loader, NULL);
+  JS_SetModuleLoaderFunc2(runtime, NULL, js_module_loader, js_module_check_attributes, NULL);
   js_std_init_handlers(runtime);
 
   JSValue j_global = JS_GetGlobalObject(data->context);
