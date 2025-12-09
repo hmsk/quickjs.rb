@@ -860,6 +860,17 @@ static VALUE vm_m_logs(VALUE r_self)
   return data->logs;
 }
 
+static VALUE vm_m_updateStackTop(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  JSRuntime *runtime = JS_GetRuntime(data->context);
+  JS_UpdateStackTop(runtime);
+
+  return Qnil;
+}
+
 RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
 {
   rb_require("json");
@@ -877,5 +888,6 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
   rb_define_method(r_class_vm, "logs", vm_m_logs, 0);
   rb_define_method(r_class_vm, "on_log", vm_m_on_log, 0);
+  rb_define_method(r_class_vm, "update_stack_top", vm_m_updateStackTop, 0);
   r_define_log_class(r_class_vm);
 }

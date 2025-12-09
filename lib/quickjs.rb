@@ -22,7 +22,11 @@ module Quickjs
   module_function :eval_code
 
   def _with_timeout(msec, proc, args)
-    Timeout.timeout(msec / 1_000.0) { proc.call(*args) }
+    # Use Thread.handle_interrupt to ensure timeout exceptions are only
+    # raised at safe points, preventing stack corruption on Linux/Ubuntu
+    Thread.handle_interrupt(Timeout::Error => :on_blocking) do
+      Timeout.timeout(msec / 1_000.0) { proc.call(*args) }
+    end
   rescue Timeout::Error
     raise Quickjs::InterruptedError.new('Ruby runtime got timeout', nil)
   rescue
