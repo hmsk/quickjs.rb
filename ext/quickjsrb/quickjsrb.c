@@ -588,6 +588,12 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
+  if (!RB_TYPE_P(r_code, T_STRING))
+  {
+    VALUE r_code_class = rb_class_name(CLASS_OF(r_code));
+    rb_raise(rb_eTypeError, "JavaScript code must be a String, got %s", StringValueCStr(r_code_class));
+  }
+
   data->eval_time->started_at = clock();
   JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
 

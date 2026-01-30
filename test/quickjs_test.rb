@@ -134,6 +134,16 @@ class QuickjsTest < Test::Unit::TestCase
       assert_equal("An unawaited Promise was returned to the top-level", err.message)
       assert_equal(nil, err.js_name)
     end
+
+    test "throws TypeError if nil is passed to eval_code" do
+      err = assert_raises(TypeError) { ::Quickjs.eval_code(nil) }
+      assert_equal("JavaScript code must be a String, got NilClass", err.message)
+    end
+
+    test "throws TypeError if Hash is passed to eval_code" do
+      err = assert_raises(TypeError) { ::Quickjs.eval_code({ code: "test" }) }
+      assert_equal("JavaScript code must be a String, got Hash", err.message)
+    end
   end
 
   test "std module can be enabled" do
@@ -241,6 +251,16 @@ class QuickjsTest < Test::Unit::TestCase
         assert_equal(@vm.eval_code("typeof __loadScript === 'undefined'"), true)
         assert_equal(@vm.eval_code("typeof scriptArgs === 'undefined'"), true)
         assert_equal(@vm.eval_code("typeof print === 'undefined'"), true)
+      end
+
+      test "throws TypeError when eval_code receives nil" do
+        err = assert_raises(TypeError) { @vm.eval_code(nil) }
+        assert_equal("JavaScript code must be a String, got NilClass", err.message)
+      end
+
+      test "throws TypeError when eval_code receives Hash" do
+        err = assert_raises(TypeError) { @vm.eval_code({ test: true }) }
+        assert_equal("JavaScript code must be a String, got Hash", err.message)
       end
     end
 
