@@ -616,9 +616,12 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
   }
   else
   {
+    // Free j_awaitedResult before to_rb_value because to_rb_value may
+    // raise (longjmp) for JS exceptions, which would skip any cleanup
+    // after it and leak JS GC objects.
+    JS_FreeValue(data->context, j_awaitedResult);
     VALUE result = to_rb_value(data->context, j_returnedValue);
     JS_FreeValue(data->context, j_returnedValue);
-    JS_FreeValue(data->context, j_awaitedResult);
     return result;
   }
 }
