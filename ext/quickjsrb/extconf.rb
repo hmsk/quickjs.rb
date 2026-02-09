@@ -37,7 +37,8 @@ else
 end
 
 append_cflags('-fwrapv')
-$CFLAGS << ' ' << '-D_GNU_SOURCE -DCONFIG_VERSION=\"2024-02-14\"'
+# NDEBUG: suppress QuickJS debug assertions that conflict with Ruby 4.0 GC
+$CFLAGS << ' ' << '-D_GNU_SOURCE -DCONFIG_VERSION=\"2024-02-14\" -DNDEBUG'
 
 abort('could not find quickjs.h') unless find_header('quickjs.h')
 abort('could not find cutils.h') unless find_header('cutils.h')

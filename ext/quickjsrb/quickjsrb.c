@@ -8,6 +8,10 @@ JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
   int objectId = NUM2INT(r_object_id);
   JS_SetPropertyStr(ctx, j_error, "rb_object_id", JS_NewInt32(ctx, objectId));
 
+  // Keep the error alive in VMData to prevent GC before find_ruby_error retrieves it
+  VMData *data = JS_GetContextOpaque(ctx);
+  rb_hash_aset(data->alive_errors, r_object_id, r_error);
+
   VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0);
   const char *errorMessage = StringValueCStr(r_exception_message);
   JS_SetPropertyStr(ctx, j_error, "message", JS_NewString(ctx, errorMessage));
@@ -89,8 +93,11 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
     JS_FreeValue(ctx, j_errorOriginalRubyObjectId);
     if (errorOriginalRubyObjectId > 0)
     {
-      // may be nice if cover the case of object is missing
-      return rb_funcall(rb_const_get(rb_cClass, rb_intern("ObjectSpace")), rb_intern("_id2ref"), 1, INT2NUM(errorOriginalRubyObjectId));
+      VMData *data = JS_GetContextOpaque(ctx);
+      VALUE r_key = INT2NUM(errorOriginalRubyObjectId);
+      VALUE r_error = rb_hash_aref(data->alive_errors, r_key);
+      rb_hash_delete(data->alive_errors, r_key);
+      return r_error;
     }
   }
   else
@@ -616,9 +623,12 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
   }
   else
   {
+    // Free j_awaitedResult before to_rb_value because to_rb_value may
+    // raise (longjmp) for JS exceptions, which would skip any cleanup
+    // after it and leak JS GC objects.
+    JS_FreeValue(data->context, j_awaitedResult);
     VALUE result = to_rb_value(data->context, j_returnedValue);
     JS_FreeValue(data->context, j_returnedValue);
-    JS_FreeValue(data->context, j_awaitedResult);
     return result;
   }
 }
