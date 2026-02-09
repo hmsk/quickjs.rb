@@ -39,8 +39,8 @@ const char *native_errors[] = {
 
 typedef struct EvalTime
 {
-  clock_t limit;
-  clock_t started_at;
+  int64_t limit_ms;
+  struct timespec started_at;
 } EvalTime;
 
 typedef struct VMData

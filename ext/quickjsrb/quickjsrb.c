@@ -329,7 +329,7 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
     JS_FreeValue(ctx, j_v);
   }
   rb_ary_push(r_call_args, r_argv);
-  rb_ary_push(r_call_args, ULONG2NUM(data->eval_time->limit * 1000 / CLOCKS_PER_SEC));
+  rb_ary_push(r_call_args, ULONG2NUM(data->eval_time->limit_ms));
 
   int sadnessHappened;
 
@@ -507,7 +507,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
-  data->eval_time->limit = (clock_t)(CLOCKS_PER_SEC * NUM2UINT(r_timeout_msec) / 1000);
+  data->eval_time->limit_ms = (int64_t)NUM2UINT(r_timeout_msec);
   JS_SetContextOpaque(data->context, data);
   JSRuntime *runtime = JS_GetRuntime(data->context);
 
@@ -580,7 +580,11 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 static int interrupt_handler(JSRuntime *runtime, void *opaque)
 {
   EvalTime *eval_time = opaque;
-  return clock() >= eval_time->started_at + eval_time->limit ? 1 : 0;
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  int64_t elapsed_ms = (int64_t)(now.tv_sec - eval_time->started_at.tv_sec) * 1000
+                     + (now.tv_nsec - eval_time->started_at.tv_nsec) / 1000000;
+  return elapsed_ms >= eval_time->limit_ms ? 1 : 0;
 }
 
 static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
@@ -594,7 +598,7 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
     rb_raise(rb_eTypeError, "JavaScript code must be a String, got %s", StringValueCStr(r_code_class));
   }
 
-  data->eval_time->started_at = clock();
+  clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
   JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
 
   char *code = StringValueCStr(r_code);
