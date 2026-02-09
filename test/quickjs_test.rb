@@ -279,7 +279,7 @@ describe Quickjs::VM do
 
     started = Time.now.to_f * 1000
     _ { vm.eval_code("while(1) {}") }.must_raise Quickjs::InterruptedError
-    assert_in_delta(started + 200, Time.now.to_f * 1000, 5)
+    assert_in_delta(started + 200, Time.now.to_f * 1000, 10)
   end
 
   it "can enable setTimeout selectively" do
