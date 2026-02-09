@@ -57,3 +57,5 @@ build-iPhoneSimulator/
 *.bundle
 
 *.local.json
+
+polyfills/node_modules/

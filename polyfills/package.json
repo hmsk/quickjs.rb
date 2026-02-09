@@ -1,0 +1,18 @@
+{
+  "name": "quickjs-rb-polyfills",
+  "version": "0.11.1",
+  "private": true,
+  "scripts": {
+    "build": "rolldown -c rolldown.config.mjs"
+  },
+  "devDependencies": {
+    "rolldown": "^1.0.0-rc.3"
+  },
+  "dependencies": {
+    "@formatjs/intl-getcanonicallocales": "^3.2.1",
+    "@formatjs/intl-locale": "^5.2.1",
+    "@formatjs/intl-pluralrules": "^6.2.2",
+    "@formatjs/intl-numberformat": "^9.2.2",
+    "@formatjs/intl-datetimeformat": "^7.2.1"
+  }
+}
