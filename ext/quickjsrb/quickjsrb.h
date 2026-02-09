@@ -77,12 +77,20 @@ static void vm_mark(void *ptr)
   rb_gc_mark_movable(data->logs);
 }
 
+static void vm_compact(void *ptr)
+{
+  VMData *data = (VMData *)ptr;
+  data->defined_functions = rb_gc_location(data->defined_functions);
+  data->logs = rb_gc_location(data->logs);
+}
+
 static const rb_data_type_t vm_type = {
     .wrap_struct_name = "quickjsvm",
     .function = {
         .dmark = vm_mark,
         .dfree = vm_free,
         .dsize = vm_size,
+        .dcompact = vm_compact,
     },
     .flags = RUBY_TYPED_FREE_IMMEDIATELY,
 };
