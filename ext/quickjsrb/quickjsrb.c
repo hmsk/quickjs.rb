@@ -561,6 +561,13 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JS_FreeValue(data->context, j_polyfillIntlResult);
   }
 
+  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
+  {
+    JSValue j_polyfillFileObject = JS_ReadObject(data->context, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, JS_READ_OBJ_BYTECODE);
+    JSValue j_polyfillFileResult = JS_EvalFunction(data->context, j_polyfillFileObject);
+    JS_FreeValue(data->context, j_polyfillFileResult);
+  }
+
   JSValue j_console = JS_NewObject(data->context);
   JS_SetPropertyStr(
       data->context, j_console, "log",
