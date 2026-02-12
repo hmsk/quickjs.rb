@@ -53,7 +53,7 @@ typedef struct VMData
   struct EvalTime *eval_time;
   VALUE logs;
   VALUE log_listener;
-  VALUE alive_errors;
+  VALUE alive_objects;
 } VMData;
 
 static void vm_free(void *ptr)
@@ -81,7 +81,7 @@ static void vm_mark(void *ptr)
   rb_gc_mark_movable(data->defined_functions);
   rb_gc_mark_movable(data->logs);
   rb_gc_mark_movable(data->log_listener);
-  rb_gc_mark_movable(data->alive_errors);
+  rb_gc_mark_movable(data->alive_objects);
 }
 
 static void vm_compact(void *ptr)
@@ -90,7 +90,7 @@ static void vm_compact(void *ptr)
   data->defined_functions = rb_gc_location(data->defined_functions);
   data->logs = rb_gc_location(data->logs);
   data->log_listener = rb_gc_location(data->log_listener);
-  data->alive_errors = rb_gc_location(data->alive_errors);
+  data->alive_objects = rb_gc_location(data->alive_objects);
 }
 
 static const rb_data_type_t vm_type = {
@@ -111,7 +111,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->defined_functions = rb_hash_new();
   data->logs = rb_ary_new();
   data->log_listener = Qnil;
-  data->alive_errors = rb_hash_new();
+  data->alive_objects = rb_hash_new();
 
   EvalTime *eval_time = malloc(sizeof(EvalTime));
   data->eval_time = eval_time;
