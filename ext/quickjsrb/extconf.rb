@@ -14,6 +14,7 @@ $srcs = [
   'polyfill-intl-en.min.c',
   'polyfill-file.min.c',
   'quickjsrb.c',
+  'quickjsrb_file.c',
 ]
 
 append_cflags('-I$(srcdir)/quickjs')

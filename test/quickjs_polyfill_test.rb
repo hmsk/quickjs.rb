@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
+require "tempfile"
 
 describe "PolyfillIntl" do
   before do
@@ -278,6 +279,76 @@ describe "PolyfillFile" do
 
     it "has correct toStringTag" do
       _(::Quickjs.eval_code("Object.prototype.toString.call(new File([], 'x'))", @options)).must_equal '[object File]'
+    end
+  end
+end
+
+describe "RubyFileProxy" do
+  before do
+    @tempfile = Tempfile.new(['test', '.txt'])
+    @tempfile.write('hello world')
+    @tempfile.flush
+    @file = File.open(@tempfile.path, 'r')
+  end
+
+  after do
+    @file.close
+    @tempfile.close
+    @tempfile.unlink
+  end
+
+  describe "with POLYFILL_FILE feature" do
+    it "is an instance of File" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file() instanceof File")).must_equal true
+    end
+
+    it "is an instance of Blob" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file() instanceof Blob")).must_equal true
+    end
+
+    it "returns correct name (basename)" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      result = vm.eval_code("get_file().name")
+      _(result).must_equal File.basename(@file.path)
+    end
+
+    it "returns correct size" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file().size")).must_equal 11
+    end
+
+    it "returns empty string for type" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file().type")).must_equal ''
+    end
+
+    it "returns lastModified as a number" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      result = vm.eval_code("typeof get_file().lastModified")
+      _(result).must_equal 'number'
+    end
+
+    it "has correct toStringTag" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("Object.prototype.toString.call(get_file())")).must_equal '[object File]'
+    end
+  end
+
+  describe "without POLYFILL_FILE feature" do
+    it "falls through to inspect string" do
+      vm = Quickjs::VM.new
+      vm.define_function(:get_file) { @file }
+      result = vm.eval_code("get_file()")
+      _(result).must_include '#<File:'
     end
   end
 end

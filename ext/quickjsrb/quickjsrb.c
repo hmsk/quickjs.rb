@@ -1,4 +1,23 @@
 #include "quickjsrb.h"
+#include "quickjsrb_file.h"
+
+const char *featureStdId = "feature_std";
+const char *featureOsId = "feature_os";
+const char *featureTimeoutId = "feature_timeout";
+const char *featurePolyfillIntlId = "feature_polyfill_intl";
+const char *featurePolyfillFileId = "feature_polyfill_file";
+
+const char *undefinedId = "undefined";
+const char *nanId = "NaN";
+
+const char *native_errors[] = {
+    "SyntaxError",
+    "TypeError",
+    "ReferenceError",
+    "RangeError",
+    "EvalError",
+    "URIError",
+    "AggregateError"};
 
 static int dispatch_log(VMData *data, const char *severity, VALUE r_row);
 
@@ -70,6 +89,12 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   }
   default:
   {
+    if (rb_obj_is_kind_of(r_value, rb_cFile))
+    {
+      VMData *data = JS_GetContextOpaque(ctx);
+      if (!JS_IsUndefined(data->j_file_proxy_creator))
+        return quickjsrb_file_to_js(ctx, r_value);
+    }
     if (TYPE(r_value) == T_OBJECT && RTEST(rb_funcall(
                                          r_value,
                                          rb_intern("is_a?"),
@@ -612,6 +637,8 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JSValue j_polyfillFileObject = JS_ReadObject(data->context, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, JS_READ_OBJ_BYTECODE);
     JSValue j_polyfillFileResult = JS_EvalFunction(data->context, j_polyfillFileObject);
     JS_FreeValue(data->context, j_polyfillFileResult);
+
+    quickjsrb_init_file_proxy(data);
   }
 
   JSValue j_console = JS_NewObject(data->context);
