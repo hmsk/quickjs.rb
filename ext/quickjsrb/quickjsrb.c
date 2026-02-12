@@ -12,7 +12,7 @@ JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 
   // Keep the error alive in VMData to prevent GC before find_ruby_error retrieves it
   VMData *data = JS_GetContextOpaque(ctx);
-  rb_hash_aset(data->alive_errors, r_object_id, r_error);
+  rb_hash_aset(data->alive_objects, r_object_id, r_error);
 
   VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0);
   const char *errorMessage = StringValueCStr(r_exception_message);
@@ -97,8 +97,8 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
     {
       VMData *data = JS_GetContextOpaque(ctx);
       VALUE r_key = INT2NUM(errorOriginalRubyObjectId);
-      VALUE r_error = rb_hash_aref(data->alive_errors, r_key);
-      rb_hash_delete(data->alive_errors, r_key);
+      VALUE r_error = rb_hash_aref(data->alive_objects, r_key);
+      rb_hash_delete(data->alive_objects, r_key);
       return r_error;
     }
   }
