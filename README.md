@@ -63,6 +63,9 @@ vm = Quickjs.eval_code(features: [::Quickjs::FEATURE_TIMEOUT])
 
 # Inject the polyfill of Intl
 vm = Quickjs.eval_code(features: [::Quickjs::POLYFILL_INTL])
+
+# Inject the polyfill of Blob and File (W3C File API)
+vm = Quickjs.eval_code(features: [::Quickjs::POLYFILL_FILE])
 ```
 
 </details>
@@ -103,6 +106,9 @@ vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
 
 # Inject the polyfill of Intl
 vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_INTL])
+
+# Inject the polyfill of Blob and File (W3C File API)
+vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_FILE])
 ```
 
 #### VM timeout
