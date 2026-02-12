@@ -47,10 +47,62 @@ static JSValue js_ruby_file_last_modified(JSContext *ctx, JSValueConst _this, in
   return JS_NewFloat64(ctx, epoch_ms);
 }
 
+static JSValue js_ruby_file_text(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv)
+{
+  VALUE r_file = r_find_alive_rb_file(ctx, argv[0]);
+  if (NIL_P(r_file))
+    return JS_UNDEFINED;
+
+  JSValue promise, resolving_funcs[2];
+  promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+  if (JS_IsException(promise))
+    return JS_EXCEPTION;
+
+  rb_funcall(r_file, rb_intern("rewind"), 0);
+  VALUE r_content = rb_funcall(r_file, rb_intern("read"), 0);
+  JSValue j_content = JS_NewString(ctx, StringValueCStr(r_content));
+
+  JSValue ret = JS_Call(ctx, resolving_funcs[0], JS_UNDEFINED, 1, &j_content);
+  JS_FreeValue(ctx, j_content);
+  JS_FreeValue(ctx, ret);
+  JS_FreeValue(ctx, resolving_funcs[0]);
+  JS_FreeValue(ctx, resolving_funcs[1]);
+
+  return promise;
+}
+
+static JSValue js_ruby_file_array_buffer(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv)
+{
+  VALUE r_file = r_find_alive_rb_file(ctx, argv[0]);
+  if (NIL_P(r_file))
+    return JS_UNDEFINED;
+
+  JSValue promise, resolving_funcs[2];
+  promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+  if (JS_IsException(promise))
+    return JS_EXCEPTION;
+
+  rb_funcall(r_file, rb_intern("rewind"), 0);
+  VALUE r_content = rb_funcall(r_file, rb_intern("read"), 0);
+  rb_funcall(r_content, rb_intern("force_encoding"), 1, rb_str_new_cstr("BINARY"));
+  long len = RSTRING_LEN(r_content);
+  const char *ptr = RSTRING_PTR(r_content);
+
+  JSValue j_buf = JS_NewArrayBufferCopy(ctx, (const uint8_t *)ptr, len);
+
+  JSValue ret = JS_Call(ctx, resolving_funcs[0], JS_UNDEFINED, 1, &j_buf);
+  JS_FreeValue(ctx, j_buf);
+  JS_FreeValue(ctx, ret);
+  JS_FreeValue(ctx, resolving_funcs[0]);
+  JS_FreeValue(ctx, resolving_funcs[1]);
+
+  return promise;
+}
+
 void quickjsrb_init_file_proxy(VMData *data)
 {
   const char *factory_src =
-      "(function(getName, getSize, getType, getLastModified) {\n"
+      "(function(getName, getSize, getType, getLastModified, getText, getArrayBuffer) {\n"
       "  return function(handle) {\n"
       "    return new Proxy(Object.create(File.prototype), {\n"
       "      getPrototypeOf: function() { return File.prototype; },\n"
@@ -59,6 +111,8 @@ void quickjsrb_init_file_proxy(VMData *data)
       "        if (prop === 'size') return getSize(handle);\n"
       "        if (prop === 'type') return getType(handle);\n"
       "        if (prop === 'lastModified') return getLastModified(handle);\n"
+      "        if (prop === 'text') return function() { return getText(handle); };\n"
+      "        if (prop === 'arrayBuffer') return function() { return getArrayBuffer(handle); };\n"
       "        if (prop === Symbol.toStringTag) return 'File';\n"
       "        if (prop === 'toString') return function() { return '[object File]'; };\n"
       "        return Reflect.get(target, prop, receiver);\n"
@@ -68,16 +122,18 @@ void quickjsrb_init_file_proxy(VMData *data)
       "})";
   JSValue j_factory_fn = JS_Eval(data->context, factory_src, strlen(factory_src), "<file-proxy>", JS_EVAL_TYPE_GLOBAL);
 
-  JSValue j_helpers[4];
+  JSValue j_helpers[6];
   j_helpers[0] = JS_NewCFunction(data->context, js_ruby_file_name, "__rb_file_name", 1);
   j_helpers[1] = JS_NewCFunction(data->context, js_ruby_file_size, "__rb_file_size", 1);
   j_helpers[2] = JS_NewCFunction(data->context, js_ruby_file_type, "__rb_file_type", 1);
   j_helpers[3] = JS_NewCFunction(data->context, js_ruby_file_last_modified, "__rb_file_last_modified", 1);
+  j_helpers[4] = JS_NewCFunction(data->context, js_ruby_file_text, "__rb_file_text", 1);
+  j_helpers[5] = JS_NewCFunction(data->context, js_ruby_file_array_buffer, "__rb_file_array_buffer", 1);
 
-  data->j_file_proxy_creator = JS_Call(data->context, j_factory_fn, JS_UNDEFINED, 4, j_helpers);
+  data->j_file_proxy_creator = JS_Call(data->context, j_factory_fn, JS_UNDEFINED, 6, j_helpers);
 
   JS_FreeValue(data->context, j_factory_fn);
-  for (int i = 0; i < 4; i++)
+  for (int i = 0; i < 6; i++)
     JS_FreeValue(data->context, j_helpers[i]);
 }
 
