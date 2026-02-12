@@ -82,3 +82,129 @@ describe "PolyfillIntl" do
     end
   end
 end
+
+describe "PolyfillBlob" do
+  before do
+    @options = { features: [::Quickjs::POLYFILL_BLOB] }
+  end
+
+  it "is not available without the polyfill" do
+    _ { ::Quickjs.eval_code("new Blob()") }.must_raise Quickjs::ReferenceError
+  end
+
+  describe "constructor" do
+    it "creates an empty blob with no arguments" do
+      _(::Quickjs.eval_code("new Blob().size", @options)).must_equal 0
+    end
+
+    it "creates a blob from string parts" do
+      _(::Quickjs.eval_code("new Blob(['hello', ' ', 'world']).size", @options)).must_equal 11
+    end
+
+    it "creates a blob with type option" do
+      _(::Quickjs.eval_code("new Blob([], { type: 'text/plain' }).type", @options)).must_equal 'text/plain'
+    end
+
+    it "normalizes type to lowercase" do
+      _(::Quickjs.eval_code("new Blob([], { type: 'Text/Plain' }).type", @options)).must_equal 'text/plain'
+    end
+
+    it "rejects type with non-ASCII characters" do
+      _(::Quickjs.eval_code("new Blob([], { type: 'text/plàin' }).type", @options)).must_equal ''
+    end
+
+    it "creates a blob from ArrayBuffer" do
+      code = "const buf = new ArrayBuffer(4); new Uint8Array(buf).set([1,2,3,4]); new Blob([buf]).size"
+      _(::Quickjs.eval_code(code, @options)).must_equal 4
+    end
+
+    it "creates a blob from Uint8Array" do
+      code = "new Blob([new Uint8Array([72, 105])]).size"
+      _(::Quickjs.eval_code(code, @options)).must_equal 2
+    end
+
+    it "creates a blob from mixed parts including another Blob" do
+      code = <<~JS
+        const b1 = new Blob(['hello']);
+        const b2 = new Blob([b1, ' world']);
+        await b2.text()
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'hello world'
+    end
+
+    it "throws TypeError for non-array argument" do
+      _ { ::Quickjs.eval_code("new Blob('hello')", @options) }.must_raise Quickjs::TypeError
+    end
+  end
+
+  describe "size and type" do
+    it "returns correct size for multibyte UTF-8" do
+      # "café" is 5 bytes in UTF-8 (é is 2 bytes)
+      _(::Quickjs.eval_code("new Blob(['café']).size", @options)).must_equal 5
+    end
+
+    it "returns empty string type by default" do
+      _(::Quickjs.eval_code("new Blob().type", @options)).must_equal ''
+    end
+  end
+
+  describe "slice" do
+    it "slices a blob" do
+      code = "await new Blob(['hello world']).slice(0, 5).text()"
+      _(::Quickjs.eval_code(code, @options)).must_equal 'hello'
+    end
+
+    it "slices with negative start" do
+      code = "await new Blob(['hello world']).slice(-5).text()"
+      _(::Quickjs.eval_code(code, @options)).must_equal 'world'
+    end
+
+    it "slices with content type" do
+      code = "new Blob(['test']).slice(0, 4, 'text/plain').type"
+      _(::Quickjs.eval_code(code, @options)).must_equal 'text/plain'
+    end
+
+    it "returns empty blob for out-of-range slice" do
+      code = "new Blob(['hi']).slice(10, 20).size"
+      _(::Quickjs.eval_code(code, @options)).must_equal 0
+    end
+  end
+
+  describe "text" do
+    it "returns text content" do
+      code = "await new Blob(['hello']).text()"
+      _(::Quickjs.eval_code(code, @options)).must_equal 'hello'
+    end
+
+    it "handles multibyte characters" do
+      code = "await new Blob(['日本語']).text()"
+      _(::Quickjs.eval_code(code, @options)).must_equal '日本語'
+    end
+  end
+
+  describe "arrayBuffer" do
+    it "returns an ArrayBuffer with correct length" do
+      code = "const buf = await new Blob(['hi']).arrayBuffer(); buf.byteLength"
+      _(::Quickjs.eval_code(code, @options)).must_equal 2
+    end
+
+    it "returns correct bytes" do
+      code = <<~JS
+        const buf = await new Blob(['AB']).arrayBuffer();
+        const arr = new Uint8Array(buf);
+        [arr[0], arr[1]].join(',')
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal '65,66'
+    end
+  end
+
+  describe "toString and toStringTag" do
+    it "has correct toString" do
+      _(::Quickjs.eval_code("new Blob().toString()", @options)).must_equal '[object Blob]'
+    end
+
+    it "has correct toStringTag" do
+      _(::Quickjs.eval_code("Object.prototype.toString.call(new Blob())", @options)).must_equal '[object Blob]'
+    end
+  end
+end

@@ -30,7 +30,7 @@ def check_polyfill_version!
 end
 
 namespace :polyfills do
-  desc 'Build Intl polyfill bundle with rolldown and recompile'
+  desc 'Build polyfill bundles with rolldown and recompile'
   task build: :clobber do
     require 'json'
     require_relative 'lib/quickjs/version'
