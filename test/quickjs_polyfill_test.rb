@@ -377,6 +377,38 @@ describe "RubyFileProxy" do
     end
   end
 
+  describe "slice()" do
+    it "returns Blob with correct size" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file().slice(0, 5).size")).must_equal 5
+    end
+
+    it "returns correct substring via text()" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("await get_file().slice(0, 5).text()")).must_equal 'hello'
+    end
+
+    it "supports negative start" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("await get_file().slice(-5).text()")).must_equal 'world'
+    end
+
+    it "supports content type" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file().slice(0, 5, 'text/plain').type")).must_equal 'text/plain'
+    end
+
+    it "returns instanceof Blob" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file().slice(0, 5) instanceof Blob")).must_equal true
+    end
+  end
+
   describe "without POLYFILL_FILE feature" do
     it "falls through to inspect string" do
       vm = Quickjs::VM.new
