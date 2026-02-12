@@ -19,24 +19,18 @@ extern const uint8_t qjsc_polyfill_file_min;
 extern const uint32_t qjsc_polyfill_encoding_min_size;
 extern const uint8_t qjsc_polyfill_encoding_min;
 
-const char *featureStdId = "feature_std";
-const char *featureOsId = "feature_os";
-const char *featureTimeoutId = "feature_timeout";
-const char *featurePolyfillIntlId = "feature_polyfill_intl";
-const char *featurePolyfillFileId = "feature_polyfill_file";
-const char *featurePolyfillEncodingId = "feature_polyfill_encoding";
+extern const char *featureStdId;
+extern const char *featureOsId;
+extern const char *featureTimeoutId;
+extern const char *featurePolyfillIntlId;
+extern const char *featurePolyfillFileId;
+extern const char *featurePolyfillEncodingId;
 
-const char *undefinedId = "undefined";
-const char *nanId = "NaN";
+extern const char *undefinedId;
+extern const char *nanId;
 
-const char *native_errors[] = {
-    "SyntaxError",
-    "TypeError",
-    "ReferenceError",
-    "RangeError",
-    "EvalError",
-    "URIError",
-    "AggregateError"};
+extern const char *native_errors[];
+extern const int num_native_errors;
 
 #define QUICKJSRB_SYM(id) \
   (VALUE) { ID2SYM(rb_intern(id)) }
@@ -57,12 +51,16 @@ typedef struct VMData
   VALUE logs;
   VALUE log_listener;
   VALUE alive_objects;
+  JSValue j_file_proxy_creator;
 } VMData;
 
 static void vm_free(void *ptr)
 {
   VMData *data = (VMData *)ptr;
   free(data->eval_time);
+
+  if (!JS_IsUndefined(data->j_file_proxy_creator))
+    JS_FreeValue(data->context, data->j_file_proxy_creator);
 
   JSRuntime *runtime = JS_GetRuntime(data->context);
   JS_SetInterruptHandler(runtime, NULL, NULL);
@@ -73,7 +71,7 @@ static void vm_free(void *ptr)
   xfree(ptr);
 }
 
-size_t vm_size(const void *data)
+static size_t vm_size(const void *data)
 {
   return sizeof(VMData);
 }
@@ -115,6 +113,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->logs = rb_ary_new();
   data->log_listener = Qnil;
   data->alive_objects = rb_hash_new();
+  data->j_file_proxy_creator = JS_UNDEFINED;
 
   EvalTime *eval_time = malloc(sizeof(EvalTime));
   data->eval_time = eval_time;
@@ -139,17 +138,12 @@ static char *random_string()
 
 static bool is_native_error_name(const char *error_name)
 {
-  bool is_native_error = false;
-  int numStrings = sizeof(native_errors) / sizeof(native_errors[0]);
-  for (int i = 0; i < numStrings; i++)
+  for (int i = 0; i < num_native_errors; i++)
   {
     if (strcmp(native_errors[i], error_name) == 0)
-    {
-      is_native_error = true;
-      break;
-    }
+      return true;
   }
-  return is_native_error;
+  return false;
 }
 
 // Constants
@@ -233,7 +227,7 @@ static VALUE r_log_body_new(VALUE r_raw, VALUE r_c)
 #define QUICKJSRB_ERROR_FOR(name) \
   (VALUE) { rb_const_get(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern(name)) }
 
-VALUE vm_m_initialize_quickjs_error(VALUE self, VALUE r_message, VALUE r_js_name)
+static VALUE vm_m_initialize_quickjs_error(VALUE self, VALUE r_message, VALUE r_js_name)
 {
   rb_call_super(1, &r_message);
   rb_iv_set(self, "@js_name", r_js_name);
@@ -247,9 +241,7 @@ static void r_define_exception_classes(VALUE r_parent_class)
   rb_define_method(r_runtime_error, "initialize", vm_m_initialize_quickjs_error, 2);
   rb_define_attr(r_runtime_error, "js_name", 1, 0);
 
-  // JS native errors
-  int numStrings = sizeof(native_errors) / sizeof(native_errors[0]);
-  for (int i = 0; i < numStrings; i++)
+  for (int i = 0; i < num_native_errors; i++)
   {
     rb_define_class_under(r_parent_class, native_errors[i], r_runtime_error);
   }
