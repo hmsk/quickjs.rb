@@ -1,5 +1,5 @@
-// W3C Blob polyfill for QuickJS
-// Spec: https://www.w3.org/TR/FileAPI/#blob-section
+// W3C Blob and File polyfill for QuickJS
+// Spec: https://www.w3.org/TR/FileAPI/
 
 class Blob {
   #bytes;
@@ -176,4 +176,43 @@ function decodeUTF8(bytes) {
   return str;
 }
 
+class File extends Blob {
+  #name;
+  #lastModified;
+
+  constructor(fileBits, fileName, options) {
+    if (arguments.length < 2) {
+      throw new TypeError(
+        "Failed to construct 'File': 2 arguments required, but only " +
+          arguments.length +
+          " present."
+      );
+    }
+
+    super(fileBits, options);
+    this.#name = String(fileName);
+    this.#lastModified =
+      options?.lastModified !== undefined
+        ? Number(options.lastModified)
+        : Date.now();
+  }
+
+  get name() {
+    return this.#name;
+  }
+
+  get lastModified() {
+    return this.#lastModified;
+  }
+
+  toString() {
+    return "[object File]";
+  }
+
+  get [Symbol.toStringTag]() {
+    return "File";
+  }
+}
+
 globalThis.Blob = Blob;
+globalThis.File = File;

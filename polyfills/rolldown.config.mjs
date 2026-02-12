@@ -10,9 +10,9 @@ export default [
     },
   }),
   defineConfig({
-    input: "src/blob.js",
+    input: "src/file.js",
     output: {
-      file: "../ext/quickjsrb/vendor/polyfill-blob.min.js",
+      file: "../ext/quickjsrb/vendor/polyfill-file.min.js",
       format: "iife",
       minify: true,
     },

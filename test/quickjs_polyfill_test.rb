@@ -85,7 +85,7 @@ end
 
 describe "PolyfillBlob" do
   before do
-    @options = { features: [::Quickjs::POLYFILL_BLOB] }
+    @options = { features: [::Quickjs::POLYFILL_FILE] }
   end
 
   it "is not available without the polyfill" do
@@ -205,6 +205,79 @@ describe "PolyfillBlob" do
 
     it "has correct toStringTag" do
       _(::Quickjs.eval_code("Object.prototype.toString.call(new Blob())", @options)).must_equal '[object Blob]'
+    end
+  end
+end
+
+describe "PolyfillFile" do
+  before do
+    @options = { features: [::Quickjs::POLYFILL_FILE] }
+  end
+
+  it "is not available without the polyfill" do
+    _ { ::Quickjs.eval_code("new File([], 'test.txt')") }.must_raise Quickjs::ReferenceError
+  end
+
+  describe "constructor" do
+    it "creates a file with name" do
+      _(::Quickjs.eval_code("new File(['hello'], 'test.txt').name", @options)).must_equal 'test.txt'
+    end
+
+    it "creates a file with content from parts" do
+      code = "await new File(['hello', ' world'], 'test.txt').text()"
+      _(::Quickjs.eval_code(code, @options)).must_equal 'hello world'
+    end
+
+    it "has correct size" do
+      _(::Quickjs.eval_code("new File(['abc'], 'test.txt').size", @options)).must_equal 3
+    end
+
+    it "accepts type option" do
+      _(::Quickjs.eval_code("new File([], 'test.txt', { type: 'text/plain' }).type", @options)).must_equal 'text/plain'
+    end
+
+    it "has lastModified defaulting to now" do
+      code = <<~JS
+        const before = Date.now();
+        const f = new File([], 'test.txt');
+        const after = Date.now();
+        f.lastModified >= before && f.lastModified <= after
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal true
+    end
+
+    it "accepts custom lastModified" do
+      _(::Quickjs.eval_code("new File([], 'test.txt', { lastModified: 1234567890 }).lastModified", @options)).must_equal 1234567890
+    end
+
+    it "throws TypeError with fewer than 2 arguments" do
+      _ { ::Quickjs.eval_code("new File([])", @options) }.must_raise Quickjs::TypeError
+    end
+  end
+
+  describe "inheritance from Blob" do
+    it "is an instance of Blob" do
+      _(::Quickjs.eval_code("new File([], 'test.txt') instanceof Blob", @options)).must_equal true
+    end
+
+    it "supports slice" do
+      code = "await new File(['hello world'], 'test.txt').slice(0, 5).text()"
+      _(::Quickjs.eval_code(code, @options)).must_equal 'hello'
+    end
+
+    it "supports arrayBuffer" do
+      code = "const buf = await new File(['AB'], 'test.txt').arrayBuffer(); buf.byteLength"
+      _(::Quickjs.eval_code(code, @options)).must_equal 2
+    end
+  end
+
+  describe "toString and toStringTag" do
+    it "has correct toString" do
+      _(::Quickjs.eval_code("new File([], 'test.txt').toString()", @options)).must_equal '[object File]'
+    end
+
+    it "has correct toStringTag" do
+      _(::Quickjs.eval_code("Object.prototype.toString.call(new File([], 'x'))", @options)).must_equal '[object File]'
     end
   end
 end
