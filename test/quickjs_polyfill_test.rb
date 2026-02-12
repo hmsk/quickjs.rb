@@ -343,6 +343,40 @@ describe "RubyFileProxy" do
     end
   end
 
+  describe "text()" do
+    it "returns file content as string" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("await get_file().text()")).must_equal 'hello world'
+    end
+
+    it "can be called multiple times" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("await get_file().text()")).must_equal 'hello world'
+      _(vm.eval_code("await get_file().text()")).must_equal 'hello world'
+    end
+  end
+
+  describe "arrayBuffer()" do
+    it "returns ArrayBuffer with correct byteLength" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("(await get_file().arrayBuffer()).byteLength")).must_equal 11
+    end
+
+    it "returns correct bytes" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      code = <<~JS
+        const buf = await get_file().arrayBuffer();
+        const arr = new Uint8Array(buf);
+        [arr[0], arr[1], arr[2], arr[3], arr[4]].join(',')
+      JS
+      _(vm.eval_code(code)).must_equal '104,101,108,108,111' # "hello"
+    end
+  end
+
   describe "without POLYFILL_FILE feature" do
     it "falls through to inspect string" do
       vm = Quickjs::VM.new
