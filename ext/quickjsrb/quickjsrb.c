@@ -204,6 +204,29 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       }
       // will support other errors like just returning an instance of Error
     }
+
+    // Check for Ruby object proxy (e.g., File proxy with rb_object_id on target)
+    {
+      JSValue j_rb_id = JS_GetPropertyStr(ctx, j_val, "rb_object_id");
+      if (JS_VALUE_GET_NORM_TAG(j_rb_id) == JS_TAG_INT || JS_VALUE_GET_NORM_TAG(j_rb_id) == JS_TAG_FLOAT64)
+      {
+        int64_t object_id;
+        JS_ToInt64(ctx, &object_id, j_rb_id);
+        JS_FreeValue(ctx, j_rb_id);
+        if (object_id > 0)
+        {
+          VMData *data = JS_GetContextOpaque(ctx);
+          VALUE r_obj = rb_hash_aref(data->alive_objects, LONG2NUM(object_id));
+          if (!NIL_P(r_obj) && !rb_obj_is_kind_of(r_obj, rb_eException))
+            return r_obj;
+        }
+      }
+      else
+      {
+        JS_FreeValue(ctx, j_rb_id);
+      }
+    }
+
     VALUE r_str = to_r_json(ctx, j_val);
 
     if (rb_funcall(r_str, rb_intern("=="), 1, rb_str_new2("undefined")))

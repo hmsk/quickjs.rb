@@ -409,6 +409,17 @@ describe "RubyFileProxy" do
     end
   end
 
+  describe "round-trip" do
+    it "returns the original Ruby File object" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.define_function(:receive_file) { |f| f }
+      result = vm.eval_code("receive_file(get_file())")
+      _(result).must_be_kind_of File
+      _(result.object_id).must_equal @file.object_id
+    end
+  end
+
   describe "without POLYFILL_FILE feature" do
     it "falls through to inspect string" do
       vm = Quickjs::VM.new
