@@ -181,7 +181,9 @@ void quickjsrb_init_file_proxy(VMData *data)
   const char *factory_src =
       "(function(getName, getSize, getType, getLastModified, getText, getArrayBuffer, getSlice) {\n"
       "  return function(handle) {\n"
-      "    return new Proxy(Object.create(File.prototype), {\n"
+      "    var target = Object.create(File.prototype);\n"
+      "    Object.defineProperty(target, 'rb_object_id', { value: handle, enumerable: false });\n"
+      "    return new Proxy(target, {\n"
       "      getPrototypeOf: function() { return File.prototype; },\n"
       "      get: function(target, prop, receiver) {\n"
       "        if (prop === 'name') return getName(handle);\n"
