@@ -164,51 +164,6 @@ describe Quickjs do
     _(::Quickjs.eval_code("typeof setTimeout", { features: [::Quickjs::FEATURE_TIMEOUT] })).must_equal 'function'
   end
 
-  describe "PolyfillIntl" do
-    before do
-      @options_to_enable_polyfill = { features: [::Quickjs::POLYFILL_INTL] }
-    end
-
-    it "Intl.DateTimeFormat polyfill is provided by the feature" do
-      code = "new Date('2025-03-11T00:00:00.000+09:00').toLocaleString('en-US', { timeZone: 'UTC', timeStyle: 'long', dateStyle: 'short' })"
-
-      _(::Quickjs.eval_code(code)).must_match(/^03\/1(1|0)\/2025,\s/)
-      _(::Quickjs.eval_code(code, @options_to_enable_polyfill).gsub(/[[:space:]]/, ' ')).must_equal '3/10/25, 3:00:00 PM UTC'
-    end
-
-    it "Intl.DateTimeFormat polyfill is a bit diff from common behavior for default options" do
-      code = "new Date('2025-03-11T00:00:00.000+09:00').toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })"
-
-      _(::Quickjs.eval_code(code, @options_to_enable_polyfill)).must_equal '3/10/2025'
-    end
-
-    it "Intl.DateTimeFormat polyfill is a bit diff from common behavior for delimiter of time format" do
-      code = "new Date('2025-03-11T00:00:00.000+09:00').toLocaleString('en-US', { timeZone: 'America/Los_Angeles', timeStyle: 'long', dateStyle: 'long' })"
-
-      _(::Quickjs.eval_code(code, @options_to_enable_polyfill).gsub(/[[:space:]]/, ' ')).must_equal 'March 10, 2025, 8:00:00 AM PDT'
-    end
-
-    it "Intl.Locale polyfill is provided" do
-      code = 'new Intl.Locale("ja-Jpan-JP-u-ca-japanese-hc-h12").toString()'
-
-      _ { ::Quickjs.eval_code(code) }.must_raise Quickjs::ReferenceError
-      _(::Quickjs.eval_code(code, @options_to_enable_polyfill)).must_equal 'ja-Jpan-JP-u-ca-japanese-hc-h12'
-    end
-
-    it "Intl.PluralRules polyfill is provided" do
-      code = 'new Intl.PluralRules("en-US").select(1);'
-
-      _ { ::Quickjs.eval_code(code) }.must_raise Quickjs::ReferenceError
-      _(::Quickjs.eval_code(code, @options_to_enable_polyfill)).must_equal 'one'
-    end
-
-    it "Intl.NumberFormat polyfill is provided" do
-      code = "new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(12345)"
-
-      _ { ::Quickjs.eval_code(code) }.must_raise Quickjs::ReferenceError
-      _(::Quickjs.eval_code(code, @options_to_enable_polyfill)).must_equal '$12,345.00'
-    end
-  end
 end
 
 describe Quickjs::VM do

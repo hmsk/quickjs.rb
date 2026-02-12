@@ -163,7 +163,7 @@ vm.logs.last.raw #=> ['log me', nil]
 
 - `ext/quickjsrb/quickjs`
   - [MIT License Copyright (c) 2017-2021 by Fabrice Bellard and Charlie Gordon](https://github.com/bellard/quickjs/blob/6e2e68fd0896957f92eb6c242a2e048c1ef3cae0/LICENSE).
-- `ext/quickjsrb/vendor/polyfill-intl-en.min.js` (bundled and minified)
+- `ext/quickjsrb/vendor/polyfill-intl-en.min.js` ([bundled and minified from `polyfills/`](https://github.com/hmsk/quickjs.rb/tree/main/polyfills))
   - MIT License Copyright (c) 2023 FormatJS
     - [@formatjs/intl-getcanonicallocales](https://github.com/formatjs/formatjs/blob/main/packages/intl-getcanonicallocales/LICENSE.md)
     - [@formatjs/intl-locale](https://github.com/formatjs/formatjs/blob/main/packages/intl-locale/LICENSE.md)
