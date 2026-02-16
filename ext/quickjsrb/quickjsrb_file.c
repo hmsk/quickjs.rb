@@ -228,3 +228,105 @@ JSValue quickjsrb_file_to_js(JSContext *ctx, VALUE r_file)
   JS_FreeValue(ctx, j_handle);
   return j_proxy;
 }
+
+static VALUE r_extract_blob_content(JSContext *ctx, JSValue j_val)
+{
+  JSValue j_ab_fn = JS_GetPropertyStr(ctx, j_val, "arrayBuffer");
+  JSValue j_promise = JS_Call(ctx, j_ab_fn, j_val, 0, NULL);
+  JS_FreeValue(ctx, j_ab_fn);
+
+  JSContext *ctx2;
+  while (JS_ExecutePendingJob(JS_GetRuntime(ctx), &ctx2) > 0)
+  {
+  }
+
+  VALUE r_content = rb_str_new("", 0);
+  if (JS_PromiseState(ctx, j_promise) == JS_PROMISE_FULFILLED)
+  {
+    JSValue j_result = JS_PromiseResult(ctx, j_promise);
+    size_t buf_len;
+    uint8_t *buf = JS_GetArrayBuffer(ctx, &buf_len, j_result);
+    if (buf)
+      r_content = rb_str_new((const char *)buf, buf_len);
+    JS_FreeValue(ctx, j_result);
+  }
+  JS_FreeValue(ctx, j_promise);
+
+  rb_funcall(r_content, rb_intern("force_encoding"), 1, rb_str_new_cstr("BINARY"));
+  return r_content;
+}
+
+static void r_populate_blob_attrs(JSContext *ctx, JSValue j_val, VALUE r_obj)
+{
+  JSValue j_size = JS_GetPropertyStr(ctx, j_val, "size");
+  int64_t size_val;
+  JS_ToInt64(ctx, &size_val, j_size);
+  rb_iv_set(r_obj, "@size", LONG2NUM(size_val));
+  JS_FreeValue(ctx, j_size);
+
+  JSValue j_type = JS_GetPropertyStr(ctx, j_val, "type");
+  const char *type_str = JS_ToCString(ctx, j_type);
+  rb_iv_set(r_obj, "@type", rb_str_new_cstr(type_str ? type_str : ""));
+  JS_FreeCString(ctx, type_str);
+  JS_FreeValue(ctx, j_type);
+
+  rb_iv_set(r_obj, "@content", r_extract_blob_content(ctx, j_val));
+}
+
+VALUE quickjsrb_try_convert_js_file(JSContext *ctx, JSValue j_val)
+{
+  JSValue j_global = JS_GetGlobalObject(ctx);
+
+  // Check File first (File extends Blob, so instanceof Blob is also true for Files)
+  JSValue j_file_ctor = JS_GetPropertyStr(ctx, j_global, "File");
+  if (!JS_IsUndefined(j_file_ctor) && !JS_IsException(j_file_ctor))
+  {
+    int is_file = JS_IsInstanceOf(ctx, j_val, j_file_ctor);
+    JS_FreeValue(ctx, j_file_ctor);
+    if (is_file > 0)
+    {
+      JS_FreeValue(ctx, j_global);
+
+      VALUE r_quickjs_mod = rb_const_get(rb_cClass, rb_intern("Quickjs"));
+      VALUE r_file = rb_funcall(rb_const_get(r_quickjs_mod, rb_intern("File")), rb_intern("new"), 0);
+      r_populate_blob_attrs(ctx, j_val, r_file);
+
+      JSValue j_name = JS_GetPropertyStr(ctx, j_val, "name");
+      const char *name_str = JS_ToCString(ctx, j_name);
+      rb_iv_set(r_file, "@name", rb_str_new_cstr(name_str ? name_str : ""));
+      JS_FreeCString(ctx, name_str);
+      JS_FreeValue(ctx, j_name);
+
+      JSValue j_last_modified = JS_GetPropertyStr(ctx, j_val, "lastModified");
+      double last_modified_val;
+      JS_ToFloat64(ctx, &last_modified_val, j_last_modified);
+      rb_iv_set(r_file, "@last_modified", DBL2NUM(last_modified_val));
+      JS_FreeValue(ctx, j_last_modified);
+
+      return r_file;
+    }
+  }
+  else
+  {
+    JS_FreeValue(ctx, j_file_ctor);
+  }
+
+  JSValue j_blob_ctor = JS_GetPropertyStr(ctx, j_global, "Blob");
+  JS_FreeValue(ctx, j_global);
+  if (JS_IsUndefined(j_blob_ctor) || JS_IsException(j_blob_ctor))
+  {
+    JS_FreeValue(ctx, j_blob_ctor);
+    return Qnil;
+  }
+
+  int is_blob = JS_IsInstanceOf(ctx, j_val, j_blob_ctor);
+  JS_FreeValue(ctx, j_blob_ctor);
+  if (is_blob <= 0)
+    return Qnil;
+
+  VALUE r_quickjs_mod = rb_const_get(rb_cClass, rb_intern("Quickjs"));
+  VALUE r_blob = rb_funcall(rb_const_get(r_quickjs_mod, rb_intern("Blob")), rb_intern("new"), 0);
+  r_populate_blob_attrs(ctx, j_val, r_blob);
+
+  return r_blob;
+}
