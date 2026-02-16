@@ -429,3 +429,104 @@ describe "RubyFileProxy" do
     end
   end
 end
+
+describe "JS File to Ruby" do
+  before do
+    @options = { features: [Quickjs::POLYFILL_FILE] }
+  end
+
+  it "converts a JS-native File to Quickjs::File" do
+    result = Quickjs.eval_code("new File(['hello'], 'test.txt')", @options)
+    _(result).must_be_kind_of Quickjs::File
+  end
+
+  it "extracts name" do
+    result = Quickjs.eval_code("new File(['hello'], 'test.txt')", @options)
+    _(result.name).must_equal 'test.txt'
+  end
+
+  it "extracts size" do
+    result = Quickjs.eval_code("new File(['hello'], 'test.txt')", @options)
+    _(result.size).must_equal 5
+  end
+
+  it "extracts type" do
+    result = Quickjs.eval_code("new File(['data'], 'f', { type: 'text/plain' })", @options)
+    _(result.type).must_equal 'text/plain'
+  end
+
+  it "extracts lastModified" do
+    result = Quickjs.eval_code("new File([], 'f', { lastModified: 1234567890 })", @options)
+    _(result.last_modified).must_equal 1234567890
+  end
+
+  it "extracts content as binary string" do
+    result = Quickjs.eval_code("new File(['hello world'], 'test.txt')", @options)
+    _(result.content).must_equal 'hello world'
+    _(result.content.encoding).must_equal Encoding::BINARY
+  end
+
+  it "extracts content from binary data" do
+    code = "new File([new Uint8Array([72, 101, 108, 108, 111])], 'test.bin')"
+    result = Quickjs.eval_code(code, @options)
+    _(result.content).must_equal 'Hello'
+    _(result.size).must_equal 5
+  end
+
+  it "returns empty content for empty File" do
+    result = Quickjs.eval_code("new File([], 'empty.txt')", @options)
+    _(result.content).must_equal ''
+    _(result.size).must_equal 0
+  end
+
+  it "converts Blob to Quickjs::Blob (not Quickjs::File)" do
+    result = Quickjs.eval_code("new Blob(['hello'])", @options)
+    _(result).must_be_kind_of Quickjs::Blob
+    _(result).wont_be_kind_of Quickjs::File
+  end
+
+  it "Quickjs::File is a subclass of Quickjs::Blob" do
+    result = Quickjs.eval_code("new File(['hello'], 'test.txt')", @options)
+    _(result).must_be_kind_of Quickjs::Blob
+    _(result).must_be_kind_of Quickjs::File
+  end
+end
+
+describe "JS Blob to Ruby" do
+  before do
+    @options = { features: [Quickjs::POLYFILL_FILE] }
+  end
+
+  it "converts a JS Blob to Quickjs::Blob" do
+    result = Quickjs.eval_code("new Blob(['hello world'])", @options)
+    _(result).must_be_kind_of Quickjs::Blob
+  end
+
+  it "extracts size" do
+    result = Quickjs.eval_code("new Blob(['hello'])", @options)
+    _(result.size).must_equal 5
+  end
+
+  it "extracts type" do
+    result = Quickjs.eval_code("new Blob(['x'], { type: 'image/png' })", @options)
+    _(result.type).must_equal 'image/png'
+  end
+
+  it "extracts content" do
+    result = Quickjs.eval_code("new Blob(['hello world'])", @options)
+    _(result.content).must_equal 'hello world'
+    _(result.content.encoding).must_equal Encoding::BINARY
+  end
+
+  it "extracts binary content" do
+    result = Quickjs.eval_code("new Blob([new Uint8Array([0, 1, 2, 255])])", @options)
+    _(result.content.bytes).must_equal [0, 1, 2, 255]
+    _(result.size).must_equal 4
+  end
+
+  it "handles empty Blob" do
+    result = Quickjs.eval_code("new Blob()", @options)
+    _(result.content).must_equal ''
+    _(result.size).must_equal 0
+  end
+end

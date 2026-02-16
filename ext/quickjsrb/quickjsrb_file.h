@@ -8,4 +8,9 @@
 void quickjsrb_init_file_proxy(VMData *data);
 JSValue quickjsrb_file_to_js(JSContext *ctx, VALUE r_file);
 
+// Check if a JS value is a File instance and convert to Quickjs::File
+// Returns Qnil if not a File
+VALUE quickjsrb_try_convert_js_file(JSContext *ctx, JSValue j_val);
+
+
 #endif /* QUICKJSRB_FILE_H */

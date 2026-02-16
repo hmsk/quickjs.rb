@@ -5,6 +5,14 @@ require_relative "quickjs/version"
 require_relative "quickjs/quickjsrb"
 
 module Quickjs
+  class Blob
+    attr_reader :size, :type, :content
+  end
+
+  class File < Blob
+    attr_reader :name, :last_modified
+  end
+
   def eval_code(code, overwrite_opts = {})
     vm = Quickjs::VM.new(**overwrite_opts)
     res = vm.eval_code(code)

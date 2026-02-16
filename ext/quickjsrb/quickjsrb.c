@@ -227,6 +227,13 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       }
     }
 
+    // JS File → Quickjs::File
+    {
+      VALUE r_maybe_file = quickjsrb_try_convert_js_file(ctx, j_val);
+      if (!NIL_P(r_maybe_file))
+        return r_maybe_file;
+    }
+
     VALUE r_str = to_r_json(ctx, j_val);
 
     if (rb_funcall(r_str, rb_intern("=="), 1, rb_str_new2("undefined")))
