@@ -92,6 +92,11 @@ describe "PolyfillBlob" do
     _ { ::Quickjs.eval_code("new Blob()") }.must_raise Quickjs::ReferenceError
   end
 
+  it "implicitly enables btoa and atob" do
+    _(::Quickjs.eval_code("btoa('hello')", @options)).must_equal 'aGVsbG8='
+    _(::Quickjs.eval_code("atob('aGVsbG8=')", @options)).must_equal 'hello'
+  end
+
   describe "constructor" do
     it "creates an empty blob with no arguments" do
       _(::Quickjs.eval_code("new Blob().size", @options)).must_equal 0

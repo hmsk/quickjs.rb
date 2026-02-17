@@ -607,7 +607,8 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JS_FreeValue(data->context, j_polyfillIntlResult);
   }
 
-  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillHtmlBase64Id))))
+  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillHtmlBase64Id))) ||
+      RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
   {
     JSValue j_polyfillHtmlBase64Object = JS_ReadObject(data->context, &qjsc_polyfill_html_base64_min, qjsc_polyfill_html_base64_min_size, JS_READ_OBJ_BYTECODE);
     JSValue j_polyfillHtmlBase64Result = JS_EvalFunction(data->context, j_polyfillHtmlBase64Object);
