@@ -767,6 +767,8 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
 
 static VALUE vm_m_logs(VALUE r_self)
 {
+  rb_category_warn(RB_WARN_CATEGORY_DEPRECATED, "Quickjs::VM#logs is deprecated; use Quickjs::VM#on_log instead");
+
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 

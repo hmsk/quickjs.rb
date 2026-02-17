@@ -439,6 +439,12 @@ describe Quickjs::VM do
   describe "ConsoleLoggers" do
     before do
       @vm = Quickjs::VM.new
+      @original_deprecated = Warning[:deprecated]
+      Warning[:deprecated] = false
+    end
+
+    after do
+      Warning[:deprecated] = @original_deprecated
     end
 
     it "there are functions for some severities" do
@@ -502,6 +508,20 @@ describe Quickjs::VM do
     it "implemented as native code" do
       _(@vm.eval_code('console.log.toString()')).must_match(/native code/)
     end
+
+    it "vm.logs emits a deprecation warning" do
+      @vm.eval_code('console.log("test")')
+      warning = nil
+      Warning[:deprecated] = true
+      old_warn = Warning.method(:warn)
+      Warning.define_method(:warn) { |msg, **kwargs| warning = msg }
+      begin
+        @vm.logs
+      ensure
+        Warning.define_singleton_method(:warn, old_warn)
+      end
+      _(warning).must_match(/Quickjs::VM#logs is deprecated/)
+    end
   end
 
   describe "OnLog" do
@@ -544,7 +564,9 @@ describe Quickjs::VM do
 
       @vm.eval_code('console.log("should not accumulate")')
 
+      Warning[:deprecated] = false
       _(@vm.logs.size).must_equal 0
+      Warning[:deprecated] = true
     end
 
     it "receives error logs from unhandled exceptions" do
@@ -575,6 +597,12 @@ describe Quickjs::VM do
   describe "StackTraces" do
     before do
       @vm = Quickjs::VM.new
+      @original_deprecated = Warning[:deprecated]
+      Warning[:deprecated] = false
+    end
+
+    after do
+      Warning[:deprecated] = @original_deprecated
     end
 
     it "unhandled exception with an Error class should be logged with stack trace" do
