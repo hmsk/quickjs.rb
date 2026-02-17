@@ -17,4 +17,12 @@ export default [
       minify: true,
     },
   }),
+  defineConfig({
+    input: "src/html-base64.js",
+    output: {
+      file: "../ext/quickjsrb/vendor/polyfill-html-base64.min.js",
+      format: "iife",
+      minify: true,
+    },
+  }),
 ];

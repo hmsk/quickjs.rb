@@ -13,6 +13,7 @@ $srcs = [
   'quickjs-libc.c',
   'polyfill-intl-en.min.c',
   'polyfill-file.min.c',
+  'polyfill-html-base64.min.c',
   'quickjsrb.c',
 ]
 
@@ -66,6 +67,10 @@ polyfill-file.min.js:
 		$(COPY) $(srcdir)/vendor/$@ $@
 polyfill-file.min.c: ./qjsc polyfill-file.min.js
 		./qjsc -fno-string-normalize -fno-eval -fno-proxy -fno-module-loader -c -M polyfill/file.so,file -m -o $@ polyfill-file.min.js
+polyfill-html-base64.min.js:
+		$(COPY) $(srcdir)/vendor/$@ $@
+polyfill-html-base64.min.c: ./qjsc polyfill-html-base64.min.js
+		./qjsc -fno-string-normalize -fno-eval -fno-proxy -fno-module-loader -c -M polyfill/html-base64.so,htmlbase64 -m -o $@ polyfill-html-base64.min.js
 COMPILE_POLYFILL
   conf
 end

@@ -581,3 +581,79 @@ describe "PolyfillFileReader" do
     end
   end
 end
+
+describe "PolyfillHtmlBase64" do
+  before do
+    @options = { features: [::Quickjs::POLYFILL_HTML_BASE64] }
+  end
+
+  it "is not available without the polyfill" do
+    _ { ::Quickjs.eval_code("btoa('hello')") }.must_raise Quickjs::ReferenceError
+    _ { ::Quickjs.eval_code("atob('aGVsbG8=')") }.must_raise Quickjs::ReferenceError
+  end
+
+  describe "btoa" do
+    it "encodes ASCII string" do
+      _(::Quickjs.eval_code("btoa('hello')", @options)).must_equal 'aGVsbG8='
+    end
+
+    it "encodes empty string" do
+      _(::Quickjs.eval_code("btoa('')", @options)).must_equal ''
+    end
+
+    it "encodes string with padding" do
+      _(::Quickjs.eval_code("btoa('a')", @options)).must_equal 'YQ=='
+      _(::Quickjs.eval_code("btoa('ab')", @options)).must_equal 'YWI='
+      _(::Quickjs.eval_code("btoa('abc')", @options)).must_equal 'YWJj'
+    end
+
+    it "encodes Latin1 characters" do
+      _(::Quickjs.eval_code("btoa('\\xFF\\xFE')", @options)).must_equal '//4='
+    end
+
+    it "throws on multi-byte characters" do
+      error = _ { ::Quickjs.eval_code("btoa('こんにちは')", @options) }.must_raise Quickjs::RuntimeError
+      _(error.message).must_include 'Latin1'
+    end
+
+    it "throws with no arguments" do
+      _ { ::Quickjs.eval_code("btoa()", @options) }.must_raise Quickjs::TypeError
+    end
+  end
+
+  describe "atob" do
+    it "decodes base64 string" do
+      _(::Quickjs.eval_code("atob('aGVsbG8=')", @options)).must_equal 'hello'
+    end
+
+    it "decodes empty string" do
+      _(::Quickjs.eval_code("atob('')", @options)).must_equal ''
+    end
+
+    it "decodes base64 without padding" do
+      _(::Quickjs.eval_code("atob('YWJj')", @options)).must_equal 'abc'
+    end
+
+    it "throws on invalid base64" do
+      _ { ::Quickjs.eval_code("atob('!')", @options) }.must_raise Quickjs::RuntimeError
+    end
+
+    it "throws with no arguments" do
+      _ { ::Quickjs.eval_code("atob()", @options) }.must_raise Quickjs::TypeError
+    end
+  end
+
+  describe "round-trip" do
+    it "round-trips ASCII strings" do
+      _(::Quickjs.eval_code("atob(btoa('Hello, World!'))", @options)).must_equal 'Hello, World!'
+    end
+
+    it "round-trips binary data" do
+      code = <<~JS
+        const binary = String.fromCharCode(0, 1, 2, 128, 255);
+        atob(btoa(binary)) === binary ? 'ok' : 'fail';
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'ok'
+    end
+  end
+end
