@@ -592,6 +592,28 @@ describe Quickjs::VM do
       _(received.size).must_equal 1
       _(received.first.severity).must_equal :error
     end
+
+    it "listener exception is catchable in JS try/catch" do
+      @vm.on_log { |_log| raise IOError, "listener broke" }
+
+      result = @vm.eval_code('try { console.log("boom"); "no error"; } catch(e) { e.message; }')
+      _(result).must_equal "listener broke"
+    end
+
+    it "listener exception propagates as Ruby error when uncaught in JS" do
+      @vm.on_log { |_log| raise IOError, "listener broke" }
+
+      err = _ { @vm.eval_code('console.log("boom")') }.must_raise IOError
+      _(err.message).must_equal "listener broke"
+    end
+
+    it "listener exception in error path does not interfere with original exception" do
+      @vm.on_log { |_log| raise IOError, "listener broke" }
+
+      _ {
+        @vm.eval_code('a + b;')
+      }.must_raise Quickjs::ReferenceError
+    end
   end
 
   describe "StackTraces" do

@@ -1,6 +1,6 @@
 #include "quickjsrb.h"
 
-static void dispatch_log(VMData *data, const char *severity, VALUE r_row);
+static int dispatch_log(VMData *data, const char *severity, VALUE r_row);
 
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
@@ -420,17 +420,29 @@ static JSValue js_quickjsrb_set_timeout(JSContext *ctx, JSValueConst _this, int 
   return JS_UNDEFINED;
 }
 
-static void dispatch_log(VMData *data, const char *severity, VALUE r_row)
+static VALUE r_try_call_listener(VALUE r_args)
+{
+  VALUE r_listener = RARRAY_AREF(r_args, 0);
+  VALUE r_log = RARRAY_AREF(r_args, 1);
+  return rb_funcall(r_listener, rb_intern("call"), 1, r_log);
+}
+
+static int dispatch_log(VMData *data, const char *severity, VALUE r_row)
 {
   VALUE r_log = r_log_new(severity, r_row);
   if (!NIL_P(data->log_listener))
   {
-    rb_funcall(data->log_listener, rb_intern("call"), 1, r_log);
+    VALUE r_args = rb_ary_new3(2, data->log_listener, r_log);
+    int error;
+    rb_protect(r_try_call_listener, r_args, &error);
+    if (error)
+      return error;
   }
   else
   {
     rb_ary_push(data->logs, r_log);
   }
+  return 0;
 }
 
 static VALUE vm_m_on_log(VALUE r_self)
@@ -494,7 +506,14 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JS
     rb_ary_push(r_row, r_log_body_new(r_raw, r_c));
   }
 
-  dispatch_log(data, severity, r_row);
+  int error = dispatch_log(data, severity, r_row);
+  if (error)
+  {
+    VALUE r_error = rb_errinfo();
+    rb_set_errinfo(Qnil);
+    JSValue j_error = j_error_from_ruby_error(ctx, r_error);
+    return JS_Throw(ctx, j_error);
+  }
   return JS_UNDEFINED;
 }
 
