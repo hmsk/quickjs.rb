@@ -504,6 +504,74 @@ describe Quickjs::VM do
     end
   end
 
+  describe "OnLog" do
+    before do
+      @vm = Quickjs::VM.new
+    end
+
+    it "receives log entries via listener for each severity" do
+      received = []
+      @vm.on_log { |log| received << log }
+
+      @vm.eval_code('console.log("log it")')
+      @vm.eval_code('console.info("info it")')
+      @vm.eval_code('console.debug("debug it")')
+      @vm.eval_code('console.warn("warn it")')
+      @vm.eval_code('console.error("error it")')
+
+      _(received.size).must_equal 5
+      _(received[0].severity).must_equal :info
+      _(received[0].to_s).must_equal 'log it'
+      _(received[1].severity).must_equal :info
+      _(received[2].severity).must_equal :verbose
+      _(received[3].severity).must_equal :warning
+      _(received[4].severity).must_equal :error
+    end
+
+    it "receives log with multiple arguments" do
+      received = []
+      @vm.on_log { |log| received << log }
+
+      @vm.eval_code('console.log("hello", 42, "world")')
+
+      _(received.size).must_equal 1
+      _(received.first.to_s).must_equal 'hello 42 world'
+      _(received.first.raw).must_equal ['hello', 42, 'world']
+    end
+
+    it "does not accumulate logs array when listener is set" do
+      @vm.on_log { |_log| }
+
+      @vm.eval_code('console.log("should not accumulate")')
+
+      _(@vm.logs.size).must_equal 0
+    end
+
+    it "receives error logs from unhandled exceptions" do
+      received = []
+      @vm.on_log { |log| received << log }
+
+      _ {
+        @vm.eval_code('a + b;')
+      }.must_raise Quickjs::ReferenceError
+
+      _(received.size).must_equal 1
+      _(received.first.severity).must_equal :error
+    end
+
+    it "receives error logs from non-Error exceptions" do
+      received = []
+      @vm.on_log { |log| received << log }
+
+      _ {
+        @vm.eval_code("throw 'plain string error';")
+      }.must_raise Quickjs::RuntimeError
+
+      _(received.size).must_equal 1
+      _(received.first.severity).must_equal :error
+    end
+  end
+
   describe "StackTraces" do
     before do
       @vm = Quickjs::VM.new
