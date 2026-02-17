@@ -1,5 +1,7 @@
 #include "quickjsrb.h"
 
+static int dispatch_log(VMData *data, const char *severity, VALUE r_row);
+
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
   JSValue j_error = JS_NewError(ctx); // may wanna have custom error class to determine in JS' end
@@ -227,7 +229,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
 
       VMData *data = JS_GetContextOpaque(ctx);
       VALUE r_headline = rb_str_new2(headline);
-      rb_ary_push(data->logs, r_log_new("error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline))));
+      dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
 
       JS_FreeValue(ctx, j_errorClassMessage);
       JS_FreeValue(ctx, j_errorClassName);
@@ -269,7 +271,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
 
       VMData *data = JS_GetContextOpaque(ctx);
       VALUE r_headline = rb_str_new2(headline);
-      rb_ary_push(data->logs, r_log_new("error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline))));
+      dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
 
       free(headline);
 
@@ -418,6 +420,43 @@ static JSValue js_quickjsrb_set_timeout(JSContext *ctx, JSValueConst _this, int 
   return JS_UNDEFINED;
 }
 
+static VALUE r_try_call_listener(VALUE r_args)
+{
+  VALUE r_listener = RARRAY_AREF(r_args, 0);
+  VALUE r_log = RARRAY_AREF(r_args, 1);
+  return rb_funcall(r_listener, rb_intern("call"), 1, r_log);
+}
+
+static int dispatch_log(VMData *data, const char *severity, VALUE r_row)
+{
+  VALUE r_log = r_log_new(severity, r_row);
+  if (!NIL_P(data->log_listener))
+  {
+    VALUE r_args = rb_ary_new3(2, data->log_listener, r_log);
+    int error;
+    rb_protect(r_try_call_listener, r_args, &error);
+    if (error)
+      return error;
+  }
+  else
+  {
+    rb_ary_push(data->logs, r_log);
+  }
+  return 0;
+}
+
+static VALUE vm_m_on_log(VALUE r_self)
+{
+  rb_need_block();
+
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  data->log_listener = rb_block_proc();
+
+  return Qnil;
+}
+
 static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, const char *severity)
 {
   VMData *data = JS_GetContextOpaque(ctx);
@@ -467,7 +506,14 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JS
     rb_ary_push(r_row, r_log_body_new(r_raw, r_c));
   }
 
-  rb_ary_push(data->logs, r_log_new(severity, r_row));
+  int error = dispatch_log(data, severity, r_row);
+  if (error)
+  {
+    VALUE r_error = rb_errinfo();
+    rb_set_errinfo(Qnil);
+    JSValue j_error = j_error_from_ruby_error(ctx, r_error);
+    return JS_Throw(ctx, j_error);
+  }
   return JS_UNDEFINED;
 }
 
@@ -740,6 +786,8 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
 
 static VALUE vm_m_logs(VALUE r_self)
 {
+  rb_category_warn(RB_WARN_CATEGORY_DEPRECATED, "Quickjs::VM#logs is deprecated; use Quickjs::VM#on_log instead");
+
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
@@ -762,5 +810,6 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
   rb_define_method(r_class_vm, "logs", vm_m_logs, 0);
+  rb_define_method(r_class_vm, "on_log", vm_m_on_log, 0);
   r_define_log_class(r_class_vm);
 }

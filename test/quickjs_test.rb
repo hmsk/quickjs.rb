@@ -439,6 +439,12 @@ describe Quickjs::VM do
   describe "ConsoleLoggers" do
     before do
       @vm = Quickjs::VM.new
+      @original_deprecated = Warning[:deprecated]
+      Warning[:deprecated] = false
+    end
+
+    after do
+      Warning[:deprecated] = @original_deprecated
     end
 
     it "there are functions for some severities" do
@@ -502,11 +508,123 @@ describe Quickjs::VM do
     it "implemented as native code" do
       _(@vm.eval_code('console.log.toString()')).must_match(/native code/)
     end
+
+    it "vm.logs emits a deprecation warning" do
+      @vm.eval_code('console.log("test")')
+      warning = nil
+      Warning[:deprecated] = true
+      old_warn = Warning.method(:warn)
+      Warning.define_method(:warn) { |msg, **kwargs| warning = msg }
+      begin
+        @vm.logs
+      ensure
+        Warning.define_singleton_method(:warn, old_warn)
+      end
+      _(warning).must_match(/Quickjs::VM#logs is deprecated/)
+    end
+  end
+
+  describe "OnLog" do
+    before do
+      @vm = Quickjs::VM.new
+    end
+
+    it "receives log entries via listener for each severity" do
+      received = []
+      @vm.on_log { |log| received << log }
+
+      @vm.eval_code('console.log("log it")')
+      @vm.eval_code('console.info("info it")')
+      @vm.eval_code('console.debug("debug it")')
+      @vm.eval_code('console.warn("warn it")')
+      @vm.eval_code('console.error("error it")')
+
+      _(received.size).must_equal 5
+      _(received[0].severity).must_equal :info
+      _(received[0].to_s).must_equal 'log it'
+      _(received[1].severity).must_equal :info
+      _(received[2].severity).must_equal :verbose
+      _(received[3].severity).must_equal :warning
+      _(received[4].severity).must_equal :error
+    end
+
+    it "receives log with multiple arguments" do
+      received = []
+      @vm.on_log { |log| received << log }
+
+      @vm.eval_code('console.log("hello", 42, "world")')
+
+      _(received.size).must_equal 1
+      _(received.first.to_s).must_equal 'hello 42 world'
+      _(received.first.raw).must_equal ['hello', 42, 'world']
+    end
+
+    it "does not accumulate logs array when listener is set" do
+      @vm.on_log { |_log| }
+
+      @vm.eval_code('console.log("should not accumulate")')
+
+      Warning[:deprecated] = false
+      _(@vm.logs.size).must_equal 0
+      Warning[:deprecated] = true
+    end
+
+    it "receives error logs from unhandled exceptions" do
+      received = []
+      @vm.on_log { |log| received << log }
+
+      _ {
+        @vm.eval_code('a + b;')
+      }.must_raise Quickjs::ReferenceError
+
+      _(received.size).must_equal 1
+      _(received.first.severity).must_equal :error
+    end
+
+    it "receives error logs from non-Error exceptions" do
+      received = []
+      @vm.on_log { |log| received << log }
+
+      _ {
+        @vm.eval_code("throw 'plain string error';")
+      }.must_raise Quickjs::RuntimeError
+
+      _(received.size).must_equal 1
+      _(received.first.severity).must_equal :error
+    end
+
+    it "listener exception is catchable in JS try/catch" do
+      @vm.on_log { |_log| raise IOError, "listener broke" }
+
+      result = @vm.eval_code('try { console.log("boom"); "no error"; } catch(e) { e.message; }')
+      _(result).must_equal "listener broke"
+    end
+
+    it "listener exception propagates as Ruby error when uncaught in JS" do
+      @vm.on_log { |_log| raise IOError, "listener broke" }
+
+      err = _ { @vm.eval_code('console.log("boom")') }.must_raise IOError
+      _(err.message).must_equal "listener broke"
+    end
+
+    it "listener exception in error path does not interfere with original exception" do
+      @vm.on_log { |_log| raise IOError, "listener broke" }
+
+      _ {
+        @vm.eval_code('a + b;')
+      }.must_raise Quickjs::ReferenceError
+    end
   end
 
   describe "StackTraces" do
     before do
       @vm = Quickjs::VM.new
+      @original_deprecated = Warning[:deprecated]
+      Warning[:deprecated] = false
+    end
+
+    after do
+      Warning[:deprecated] = @original_deprecated
     end
 
     it "unhandled exception with an Error class should be logged with stack trace" do
