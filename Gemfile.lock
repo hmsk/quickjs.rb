@@ -9,13 +9,18 @@ GEM
   remote: https://rubygems.org/
   specs:
     json (2.7.2)
+    logger (1.7.0)
     minitest (6.0.1)
       prism (~> 1.5)
     prism (1.9.0)
     rake (13.2.1)
     rake-compiler (1.2.7)
       rake
+    rbs (3.10.3)
+      logger
+      tsort
     securerandom (0.3.1)
+    tsort (0.2.0)
 
 PLATFORMS
   ruby
@@ -26,6 +31,7 @@ DEPENDENCIES
   quickjs!
   rake (~> 13.0)
   rake-compiler
+  rbs
 
 BUNDLED WITH
    2.5.9
