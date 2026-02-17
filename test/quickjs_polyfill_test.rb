@@ -421,6 +421,79 @@ describe "PolyfillFileReader" do
     end
   end
 
+  describe "readAsArrayBuffer" do
+    it "reads blob content as ArrayBuffer" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const arr = new Uint8Array(reader.result);
+            resolve([arr[0], arr[1]].join(','));
+          };
+          reader.readAsArrayBuffer(new Blob(['AB']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal '65,66'
+    end
+
+    it "returns ArrayBuffer with correct byteLength" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result.byteLength);
+          reader.readAsArrayBuffer(new Blob(['hello']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 5
+    end
+  end
+
+  describe "readAsDataURL" do
+    it "reads blob as data URL with type" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsDataURL(new Blob(['hello'], { type: 'text/plain' }));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'data:text/plain;base64,aGVsbG8='
+    end
+
+    it "uses application/octet-stream for blobs without type" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result.startsWith('data:application/octet-stream;base64,'));
+          reader.readAsDataURL(new Blob(['test']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal true
+    end
+
+    it "encodes binary data correctly" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsDataURL(new Blob([new Uint8Array([0, 1, 2, 255])], { type: 'application/octet-stream' }));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'data:application/octet-stream;base64,AAEC/w=='
+    end
+
+    it "encodes empty blob" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsDataURL(new Blob([], { type: 'text/plain' }));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'data:text/plain;base64,'
+    end
+  end
+
   describe "abort" do
     it "fires abort and loadend events" do
       code = <<~JS
