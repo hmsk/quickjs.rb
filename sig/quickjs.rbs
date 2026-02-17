@@ -1,4 +1,72 @@
 module Quickjs
   VERSION: String
-  # See the writing guide of rbs: https://github.com/ruby/rbs#guides
+
+  MODULE_STD: Symbol
+  MODULE_OS: Symbol
+  FEATURE_TIMEOUT: Symbol
+  POLYFILL_INTL: Symbol
+  POLYFILL_FILE: Symbol
+  POLYFILL_HTML_BASE64: Symbol
+
+  def self.eval_code: (String code, ?Hash[Symbol, untyped] overwrite_opts) -> untyped
+
+  class Value
+    UNDEFINED: Symbol
+    NAN: Symbol
+  end
+
+  class VM
+    def initialize: (?features: Array[Symbol], ?memory_limit: Integer, ?max_stack_size: Integer, ?timeout_msec: Integer) -> void
+
+    def eval_code: (String code) -> untyped
+
+    def define_function: (String | Symbol name, *Symbol flags) { (*untyped) -> untyped } -> Symbol
+
+    def import: (String | Array[String] | Hash[Symbol, String] imported, from: String, ?code_to_expose: String?) -> true
+
+    def logs: () -> Array[Log]
+
+    class Log
+      attr_reader severity: Symbol
+
+      def raw: () -> Array[untyped]
+
+      def to_s: () -> String
+
+      def inspect: () -> String
+    end
+  end
+
+  class RuntimeError < ::RuntimeError
+    def initialize: (String message, String? js_name) -> void
+
+    attr_reader js_name: String?
+  end
+
+  class SyntaxError < RuntimeError
+  end
+
+  class TypeError < RuntimeError
+  end
+
+  class ReferenceError < RuntimeError
+  end
+
+  class RangeError < RuntimeError
+  end
+
+  class EvalError < RuntimeError
+  end
+
+  class URIError < RuntimeError
+  end
+
+  class AggregateError < RuntimeError
+  end
+
+  class InterruptedError < RuntimeError
+  end
+
+  class NoAwaitError < RuntimeError
+  end
 end

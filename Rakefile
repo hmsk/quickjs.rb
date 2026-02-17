@@ -71,4 +71,11 @@ end
 
 task 'release:guard_clean' => 'polyfills:version:check'
 
-task default: %i[clobber compile test]
+namespace :rbs do
+  desc 'Validate RBS type definitions'
+  task :validate do
+    sh RbConfig.ruby, '-S', 'rbs', '-I', 'sig', 'validate'
+  end
+end
+
+task default: %i[clobber compile test rbs:validate]
