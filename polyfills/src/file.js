@@ -1,5 +1,7 @@
-// W3C Blob and File polyfill for QuickJS
+// W3C Blob, File, and FileReader polyfill for QuickJS
 // Spec: https://www.w3.org/TR/FileAPI/
+
+const _bytes = Symbol('bytes');
 
 class Blob {
   #bytes;
@@ -76,6 +78,10 @@ class Blob {
     return Promise.resolve(this.#bytes.buffer.slice(this.#bytes.byteOffset, this.#bytes.byteOffset + this.#bytes.byteLength));
   }
 
+  [_bytes]() {
+    return this.#bytes;
+  }
+
   toString() {
     return "[object Blob]";
   }
@@ -86,7 +92,6 @@ class Blob {
 }
 
 function normalizeType(type) {
-  // Spec: type must be lowercase ASCII without 0x20-7E exclusions
   if (/[^\x20-\x7E]/.test(type)) {
     return "";
   }
@@ -101,12 +106,10 @@ function clampIndex(index, size) {
 }
 
 function encodeUTF8(str) {
-  // Manual UTF-8 encoding for QuickJS (no TextEncoder)
   const utf8 = [];
   for (let i = 0; i < str.length; i++) {
     let code = str.charCodeAt(i);
 
-    // Handle surrogate pairs
     if (code >= 0xd800 && code <= 0xdbff && i + 1 < str.length) {
       const next = str.charCodeAt(i + 1);
       if (next >= 0xdc00 && next <= 0xdfff) {
@@ -138,7 +141,6 @@ function encodeUTF8(str) {
 }
 
 function decodeUTF8(bytes) {
-  // Manual UTF-8 decoding for QuickJS (no TextDecoder)
   let str = "";
   let i = 0;
   while (i < bytes.length) {
@@ -168,7 +170,6 @@ function decodeUTF8(bytes) {
     if (code <= 0xffff) {
       str += String.fromCharCode(code);
     } else {
-      // Encode as surrogate pair
       code -= 0x10000;
       str += String.fromCharCode(0xd800 + (code >> 10), 0xdc00 + (code & 0x3ff));
     }
@@ -214,5 +215,142 @@ class File extends Blob {
   }
 }
 
+class ProgressEvent {
+  constructor(type, init) {
+    this.type = type;
+    this.target = null;
+    this.lengthComputable = init?.lengthComputable ?? false;
+    this.loaded = init?.loaded ?? 0;
+    this.total = init?.total ?? 0;
+  }
+}
+
+const EVENT_TYPES = ['loadstart', 'progress', 'load', 'abort', 'error', 'loadend'];
+
+class FileReader {
+  static EMPTY = 0;
+  static LOADING = 1;
+  static DONE = 2;
+
+  #readyState = FileReader.EMPTY;
+  #result = null;
+  #error = null;
+  #listeners = {};
+  #aborted = false;
+
+  constructor() {
+    for (const type of EVENT_TYPES) {
+      this['on' + type] = null;
+    }
+  }
+
+  get readyState() { return this.#readyState; }
+  get result() { return this.#result; }
+  get error() { return this.#error; }
+
+  get EMPTY() { return FileReader.EMPTY; }
+  get LOADING() { return FileReader.LOADING; }
+  get DONE() { return FileReader.DONE; }
+
+  addEventListener(type, listener) {
+    if (!this.#listeners[type]) {
+      this.#listeners[type] = [];
+    }
+    this.#listeners[type].push(listener);
+  }
+
+  removeEventListener(type, listener) {
+    const list = this.#listeners[type];
+    if (!list) return;
+    const idx = list.indexOf(listener);
+    if (idx !== -1) list.splice(idx, 1);
+  }
+
+  #dispatch(type) {
+    const event = new ProgressEvent(type);
+    event.target = this;
+    const handler = this['on' + type];
+    if (typeof handler === 'function') {
+      handler.call(this, event);
+    }
+    const list = this.#listeners[type];
+    if (list) {
+      for (const fn of list) {
+        fn.call(this, event);
+      }
+    }
+  }
+
+  #read(blob, resultProducer) {
+    if (!(blob instanceof Blob)) {
+      throw new TypeError(
+        "Failed to execute on 'FileReader': parameter 1 is not of type 'Blob'."
+      );
+    }
+    if (this.#readyState === FileReader.LOADING) {
+      throw new DOMException(
+        "Failed to execute on 'FileReader': The object is already busy reading Blobs.",
+        "InvalidStateError"
+      );
+    }
+
+    this.#readyState = FileReader.LOADING;
+    this.#result = null;
+    this.#error = null;
+    this.#aborted = false;
+
+    Promise.resolve().then(() => {
+      if (this.#aborted) return;
+      this.#dispatch('loadstart');
+
+      try {
+        this.#result = resultProducer();
+        this.#readyState = FileReader.DONE;
+        if (!this.#aborted) {
+          this.#dispatch('progress');
+          this.#dispatch('load');
+        }
+      } catch (e) {
+        this.#readyState = FileReader.DONE;
+        this.#error = e;
+        if (!this.#aborted) {
+          this.#dispatch('error');
+        }
+      }
+
+      if (!this.#aborted) {
+        this.#dispatch('loadend');
+      }
+    });
+  }
+
+  readAsText(blob) {
+    this.#read(blob, () => decodeUTF8(blob[_bytes]()));
+  }
+
+  abort() {
+    if (this.#readyState === FileReader.EMPTY || this.#readyState === FileReader.DONE) {
+      this.#result = null;
+      return;
+    }
+    this.#aborted = true;
+    this.#readyState = FileReader.DONE;
+    this.#result = null;
+    Promise.resolve().then(() => {
+      this.#dispatch('abort');
+      this.#dispatch('loadend');
+    });
+  }
+
+  toString() {
+    return "[object FileReader]";
+  }
+
+  get [Symbol.toStringTag]() {
+    return "FileReader";
+  }
+}
+
 globalThis.Blob = Blob;
 globalThis.File = File;
+globalThis.FileReader = FileReader;

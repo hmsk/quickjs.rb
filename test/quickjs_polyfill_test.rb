@@ -281,3 +281,181 @@ describe "PolyfillFile" do
     end
   end
 end
+
+describe "PolyfillFileReader" do
+  before do
+    @options = { features: [::Quickjs::POLYFILL_FILE] }
+  end
+
+  it "is not available without the polyfill" do
+    _ { ::Quickjs.eval_code("new FileReader()") }.must_raise Quickjs::ReferenceError
+  end
+
+  describe "initial state" do
+    it "starts with EMPTY readyState" do
+      _(::Quickjs.eval_code("new FileReader().readyState", @options)).must_equal 0
+    end
+
+    it "starts with null result" do
+      assert_nil ::Quickjs.eval_code("new FileReader().result", @options)
+    end
+
+    it "starts with null error" do
+      assert_nil ::Quickjs.eval_code("new FileReader().error", @options)
+    end
+
+    it "exposes state constants" do
+      code = <<~JS
+        const r = new FileReader();
+        [FileReader.EMPTY, FileReader.LOADING, FileReader.DONE, r.EMPTY, r.LOADING, r.DONE].join(',')
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal '0,1,2,0,1,2'
+    end
+  end
+
+  describe "readAsText" do
+    it "reads blob content as text" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsText(new Blob(['hello world']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'hello world'
+    end
+
+    it "reads File content as text" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsText(new File(['file content'], 'test.txt'));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'file content'
+    end
+
+    it "handles multibyte UTF-8" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsText(new Blob(['日本語']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal '日本語'
+    end
+
+    it "sets readyState to DONE after reading" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.readyState);
+          reader.readAsText(new Blob(['test']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 2
+    end
+
+    it "sets readyState to LOADING synchronously" do
+      code = <<~JS
+        const reader = new FileReader();
+        reader.readAsText(new Blob(['test']));
+        reader.readyState
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 1
+    end
+  end
+
+  describe "events" do
+    it "fires loadstart, progress, load, loadend in order" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          const events = [];
+          reader.onloadstart = () => events.push('loadstart');
+          reader.onprogress = () => events.push('progress');
+          reader.onload = () => events.push('load');
+          reader.onloadend = () => { events.push('loadend'); resolve(events.join(',')); };
+          reader.readAsText(new Blob(['test']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'loadstart,progress,load,loadend'
+    end
+
+    it "supports addEventListener" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.addEventListener('load', () => resolve(reader.result));
+          reader.readAsText(new Blob(['via addEventListener']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'via addEventListener'
+    end
+
+    it "supports removeEventListener" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          const removed = () => resolve('should not fire');
+          reader.addEventListener('load', removed);
+          reader.removeEventListener('load', removed);
+          reader.onload = () => resolve('correct');
+          reader.readAsText(new Blob(['test']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'correct'
+    end
+
+    it "provides event.target pointing to the reader" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = (e) => resolve(e.target === reader);
+          reader.readAsText(new Blob(['test']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal true
+    end
+  end
+
+  describe "abort" do
+    it "fires abort and loadend events" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          const events = [];
+          reader.onabort = () => events.push('abort');
+          reader.onloadend = () => { events.push('loadend'); resolve(events.join(',')); };
+          reader.readAsText(new Blob(['test']));
+          reader.abort();
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'abort,loadend'
+    end
+
+    it "sets result to null after abort" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result);
+          reader.readAsText(new Blob(['test']));
+          reader.abort();
+        })
+      JS
+      assert_nil ::Quickjs.eval_code(code, @options)
+    end
+  end
+
+  describe "toString and toStringTag" do
+    it "has correct toString" do
+      _(::Quickjs.eval_code("new FileReader().toString()", @options)).must_equal '[object FileReader]'
+    end
+
+    it "has correct toStringTag" do
+      _(::Quickjs.eval_code("Object.prototype.toString.call(new FileReader())", @options)).must_equal '[object FileReader]'
+    end
+  end
+end
