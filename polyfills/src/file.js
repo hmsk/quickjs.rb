@@ -305,10 +305,9 @@ class FileReader {
       );
     }
     if (this.#readyState === FileReader.LOADING) {
-      throw new DOMException(
-        "Failed to execute on 'FileReader': The object is already busy reading Blobs.",
-        "InvalidStateError"
-      );
+      const err = new Error("Failed to execute on 'FileReader': The object is already busy reading Blobs.");
+      err.name = "InvalidStateError";
+      throw err;
     }
 
     this.#readyState = FileReader.LOADING;
@@ -349,6 +348,17 @@ class FileReader {
     this.#read(blob, () => {
       const bytes = blob[_bytes]();
       return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    });
+  }
+
+  readAsBinaryString(blob) {
+    this.#read(blob, () => {
+      const bytes = blob[_bytes]();
+      let result = '';
+      for (let i = 0; i < bytes.length; i++) {
+        result += String.fromCharCode(bytes[i]);
+      }
+      return result;
     });
   }
 

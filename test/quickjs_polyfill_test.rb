@@ -494,6 +494,55 @@ describe "PolyfillFileReader" do
     end
   end
 
+  describe "readAsBinaryString" do
+    it "reads blob as binary string" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsBinaryString(new Blob(['AB']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'AB'
+    end
+
+    it "returns raw bytes for binary data" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const codes = [];
+            for (let i = 0; i < reader.result.length; i++) {
+              codes.push(reader.result.charCodeAt(i));
+            }
+            resolve(codes.join(','));
+          };
+          reader.readAsBinaryString(new Blob([new Uint8Array([0, 127, 128, 255])]));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal '0,127,128,255'
+    end
+  end
+
+  describe "error handling" do
+    it "throws TypeError for non-Blob argument" do
+      code = <<~JS
+        const reader = new FileReader();
+        reader.readAsText('not a blob');
+      JS
+      _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::TypeError
+    end
+
+    it "throws InvalidStateError when already loading" do
+      code = <<~JS
+        const reader = new FileReader();
+        reader.readAsText(new Blob(['test']));
+        reader.readAsText(new Blob(['test2']));
+      JS
+      _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::RuntimeError
+    end
+  end
+
   describe "abort" do
     it "fires abort and loadend events" do
       code = <<~JS
