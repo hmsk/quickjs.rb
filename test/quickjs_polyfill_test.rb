@@ -281,3 +281,141 @@ describe "PolyfillFile" do
     end
   end
 end
+
+describe "PolyfillEncoding" do
+  before do
+    @options = { features: [::Quickjs::POLYFILL_ENCODING] }
+  end
+
+  describe "TextEncoder" do
+    it "is not available without the polyfill" do
+      _ { ::Quickjs.eval_code("new TextEncoder()") }.must_raise Quickjs::ReferenceError
+    end
+
+    it "has encoding property returning utf-8" do
+      _(::Quickjs.eval_code("new TextEncoder().encoding", @options)).must_equal "utf-8"
+    end
+
+    it "encodes ASCII string to Uint8Array" do
+      code = "Array.from(new TextEncoder().encode('hello'))"
+      _(::Quickjs.eval_code(code, @options)).must_equal [104, 101, 108, 108, 111]
+    end
+
+    it "encodes empty string to empty Uint8Array" do
+      code = "new TextEncoder().encode('').length"
+      _(::Quickjs.eval_code(code, @options)).must_equal 0
+    end
+
+    it "encodes multibyte characters" do
+      code = "Array.from(new TextEncoder().encode('\u20ac'))"
+      _(::Quickjs.eval_code(code, @options)).must_equal [0xe2, 0x82, 0xac]
+    end
+
+    it "encodes emoji (surrogate pair) to 4 bytes" do
+      code = "new TextEncoder().encode('\u{1f600}').length"
+      _(::Quickjs.eval_code(code, @options)).must_equal 4
+    end
+
+    describe "encodeInto" do
+      it "fills destination and returns read/written counts" do
+        code = <<~JS
+          const buf = new Uint8Array(5);
+          const result = new TextEncoder().encodeInto('hello', buf);
+          JSON.stringify({ read: result.read, written: result.written, bytes: Array.from(buf) })
+        JS
+        result = JSON.parse(::Quickjs.eval_code(code, @options))
+        _(result["read"]).must_equal 5
+        _(result["written"]).must_equal 5
+        _(result["bytes"]).must_equal [104, 101, 108, 108, 111]
+      end
+
+      it "stops when destination is full" do
+        code = <<~JS
+          const buf = new Uint8Array(3);
+          const result = new TextEncoder().encodeInto('hello', buf);
+          JSON.stringify({ read: result.read, written: result.written })
+        JS
+        result = JSON.parse(::Quickjs.eval_code(code, @options))
+        _(result["read"]).must_equal 3
+        _(result["written"]).must_equal 3
+      end
+    end
+  end
+
+  describe "TextDecoder" do
+    it "is not available without the polyfill" do
+      _ { ::Quickjs.eval_code("new TextDecoder()") }.must_raise Quickjs::ReferenceError
+    end
+
+    it "has encoding property returning utf-8" do
+      _(::Quickjs.eval_code("new TextDecoder().encoding", @options)).must_equal "utf-8"
+    end
+
+    it "has fatal property defaulting to false" do
+      _(::Quickjs.eval_code("new TextDecoder().fatal", @options)).must_equal false
+    end
+
+    it "has ignoreBOM property defaulting to false" do
+      _(::Quickjs.eval_code("new TextDecoder().ignoreBOM", @options)).must_equal false
+    end
+
+    it "decodes UTF-8 bytes to string" do
+      code = "new TextDecoder().decode(new Uint8Array([104, 101, 108, 108, 111]))"
+      _(::Quickjs.eval_code(code, @options)).must_equal "hello"
+    end
+
+    it "decodes multibyte characters" do
+      code = "new TextDecoder().decode(new Uint8Array([0xe2, 0x82, 0xac]))"
+      _(::Quickjs.eval_code(code, @options)).must_equal "\u20ac"
+    end
+
+    it "roundtrips with TextEncoder" do
+      code = <<~JS
+        const original = 'Hello, \u4e16\u754c! \u{1f600}';
+        const encoded = new TextEncoder().encode(original);
+        new TextDecoder().decode(encoded)
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal "Hello, \u4e16\u754c! \u{1f600}"
+    end
+
+    it "strips UTF-8 BOM by default" do
+      code = "new TextDecoder().decode(new Uint8Array([0xef, 0xbb, 0xbf, 0x68, 0x69]))"
+      _(::Quickjs.eval_code(code, @options)).must_equal "hi"
+    end
+
+    it "preserves BOM when ignoreBOM is true" do
+      code = "new TextDecoder('utf-8', { ignoreBOM: true }).decode(new Uint8Array([0xef, 0xbb, 0xbf, 0x68, 0x69]))"
+      _(::Quickjs.eval_code(code, @options)).must_equal "\ufeffhi"
+    end
+
+    it "replaces invalid bytes with replacement character when not fatal" do
+      code = "new TextDecoder().decode(new Uint8Array([0xff]))"
+      _(::Quickjs.eval_code(code, @options)).must_equal "\ufffd"
+    end
+
+    it "raises TypeError on invalid bytes when fatal is true" do
+      code = "new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array([0xff]))"
+      _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::TypeError
+    end
+
+    it "raises RangeError for unsupported encoding label" do
+      code = "new TextDecoder('shift_jis')"
+      _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::RangeError
+    end
+
+    it "accepts common UTF-8 label aliases" do
+      code = "new TextDecoder('utf8').encoding"
+      _(::Quickjs.eval_code(code, @options)).must_equal "utf-8"
+    end
+
+    it "returns empty string for undefined input" do
+      code = "new TextDecoder().decode()"
+      _(::Quickjs.eval_code(code, @options)).must_equal ""
+    end
+
+    it "accepts ArrayBuffer input" do
+      code = "new TextDecoder().decode(new Uint8Array([104, 105]).buffer)"
+      _(::Quickjs.eval_code(code, @options)).must_equal "hi"
+    end
+  end
+end
