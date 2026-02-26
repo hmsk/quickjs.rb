@@ -17,4 +17,12 @@ export default [
       minify: true,
     },
   }),
+  defineConfig({
+    input: "src/encoding.js",
+    output: {
+      file: "../ext/quickjsrb/vendor/polyfill-encoding.min.js",
+      format: "iife",
+      minify: true,
+    },
+  }),
 ];
