@@ -1,4 +1,25 @@
 #include "quickjsrb.h"
+#include "quickjsrb_file.h"
+
+const char *featureStdId = "feature_std";
+const char *featureOsId = "feature_os";
+const char *featureTimeoutId = "feature_timeout";
+const char *featurePolyfillIntlId = "feature_polyfill_intl";
+const char *featurePolyfillFileId = "feature_polyfill_file";
+const char *featurePolyfillEncodingId = "feature_polyfill_encoding";
+
+const char *undefinedId = "undefined";
+const char *nanId = "NaN";
+
+const char *native_errors[] = {
+    "SyntaxError",
+    "TypeError",
+    "ReferenceError",
+    "RangeError",
+    "EvalError",
+    "URIError",
+    "AggregateError"};
+const int num_native_errors = sizeof(native_errors) / sizeof(native_errors[0]);
 
 static int dispatch_log(VMData *data, const char *severity, VALUE r_row);
 
@@ -12,7 +33,7 @@ JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 
   // Keep the error alive in VMData to prevent GC before find_ruby_error retrieves it
   VMData *data = JS_GetContextOpaque(ctx);
-  rb_hash_aset(data->alive_errors, r_object_id, r_error);
+  rb_hash_aset(data->alive_objects, r_object_id, r_error);
 
   VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0);
   const char *errorMessage = StringValueCStr(r_exception_message);
@@ -70,6 +91,12 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   }
   default:
   {
+    if (rb_obj_is_kind_of(r_value, rb_cFile))
+    {
+      VMData *data = JS_GetContextOpaque(ctx);
+      if (!JS_IsUndefined(data->j_file_proxy_creator))
+        return quickjsrb_file_to_js(ctx, r_value);
+    }
     if (TYPE(r_value) == T_OBJECT && RTEST(rb_funcall(
                                          r_value,
                                          rb_intern("is_a?"),
@@ -97,8 +124,8 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
     {
       VMData *data = JS_GetContextOpaque(ctx);
       VALUE r_key = INT2NUM(errorOriginalRubyObjectId);
-      VALUE r_error = rb_hash_aref(data->alive_errors, r_key);
-      rb_hash_delete(data->alive_errors, r_key);
+      VALUE r_error = rb_hash_aref(data->alive_objects, r_key);
+      rb_hash_delete(data->alive_objects, r_key);
       return r_error;
     }
   }
@@ -179,6 +206,36 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       }
       // will support other errors like just returning an instance of Error
     }
+
+    // Check for Ruby object proxy (e.g., File proxy with rb_object_id on target)
+    {
+      JSValue j_rb_id = JS_GetPropertyStr(ctx, j_val, "rb_object_id");
+      if (JS_VALUE_GET_NORM_TAG(j_rb_id) == JS_TAG_INT || JS_VALUE_GET_NORM_TAG(j_rb_id) == JS_TAG_FLOAT64)
+      {
+        int64_t object_id;
+        JS_ToInt64(ctx, &object_id, j_rb_id);
+        JS_FreeValue(ctx, j_rb_id);
+        if (object_id > 0)
+        {
+          VMData *data = JS_GetContextOpaque(ctx);
+          VALUE r_obj = rb_hash_aref(data->alive_objects, LONG2NUM(object_id));
+          if (!NIL_P(r_obj) && !rb_obj_is_kind_of(r_obj, rb_eException))
+            return r_obj;
+        }
+      }
+      else
+      {
+        JS_FreeValue(ctx, j_rb_id);
+      }
+    }
+
+    // JS File → Quickjs::File
+    {
+      VALUE r_maybe_file = quickjsrb_try_convert_js_file(ctx, j_val);
+      if (!NIL_P(r_maybe_file))
+        return r_maybe_file;
+    }
+
     VALUE r_str = to_r_json(ctx, j_val);
 
     if (rb_funcall(r_str, rb_intern("=="), 1, rb_str_new2("undefined")))
@@ -612,6 +669,8 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JSValue j_polyfillFileObject = JS_ReadObject(data->context, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, JS_READ_OBJ_BYTECODE);
     JSValue j_polyfillFileResult = JS_EvalFunction(data->context, j_polyfillFileObject);
     JS_FreeValue(data->context, j_polyfillFileResult);
+
+    quickjsrb_init_file_proxy(data);
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillEncodingId))))

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
+require "tempfile"
 
 describe "PolyfillIntl" do
   before do
@@ -417,5 +418,253 @@ describe "PolyfillEncoding" do
       code = "new TextDecoder().decode(new Uint8Array([104, 105]).buffer)"
       _(::Quickjs.eval_code(code, @options)).must_equal "hi"
     end
+  end
+end
+
+describe "RubyFileProxy" do
+  before do
+    @tempfile = Tempfile.new(['test', '.txt'])
+    @tempfile.write('hello world')
+    @tempfile.flush
+    @file = File.open(@tempfile.path, 'r')
+  end
+
+  after do
+    @file.close
+    @tempfile.close
+    @tempfile.unlink
+  end
+
+  describe "with POLYFILL_FILE feature" do
+    it "is an instance of File" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file() instanceof File")).must_equal true
+    end
+
+    it "is an instance of Blob" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file() instanceof Blob")).must_equal true
+    end
+
+    it "returns correct name (basename)" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      result = vm.eval_code("get_file().name")
+      _(result).must_equal File.basename(@file.path)
+    end
+
+    it "returns correct size" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file().size")).must_equal 11
+    end
+
+    it "returns empty string for type" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file().type")).must_equal ''
+    end
+
+    it "returns lastModified as a number" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      result = vm.eval_code("typeof get_file().lastModified")
+      _(result).must_equal 'number'
+    end
+
+    it "has correct toStringTag" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("Object.prototype.toString.call(get_file())")).must_equal '[object File]'
+    end
+  end
+
+  describe "text()" do
+    it "returns file content as string" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("await get_file().text()")).must_equal 'hello world'
+    end
+
+    it "can be called multiple times" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("await get_file().text()")).must_equal 'hello world'
+      _(vm.eval_code("await get_file().text()")).must_equal 'hello world'
+    end
+  end
+
+  describe "arrayBuffer()" do
+    it "returns ArrayBuffer with correct byteLength" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("(await get_file().arrayBuffer()).byteLength")).must_equal 11
+    end
+
+    it "returns correct bytes" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      code = <<~JS
+        const buf = await get_file().arrayBuffer();
+        const arr = new Uint8Array(buf);
+        [arr[0], arr[1], arr[2], arr[3], arr[4]].join(',')
+      JS
+      _(vm.eval_code(code)).must_equal '104,101,108,108,111' # "hello"
+    end
+  end
+
+  describe "slice()" do
+    it "returns Blob with correct size" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file().slice(0, 5).size")).must_equal 5
+    end
+
+    it "returns correct substring via text()" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("await get_file().slice(0, 5).text()")).must_equal 'hello'
+    end
+
+    it "supports negative start" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("await get_file().slice(-5).text()")).must_equal 'world'
+    end
+
+    it "supports content type" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file().slice(0, 5, 'text/plain').type")).must_equal 'text/plain'
+    end
+
+    it "returns instanceof Blob" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      _(vm.eval_code("get_file().slice(0, 5) instanceof Blob")).must_equal true
+    end
+  end
+
+  describe "round-trip" do
+    it "returns the original Ruby File object" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.define_function(:receive_file) { |f| f }
+      result = vm.eval_code("receive_file(get_file())")
+      _(result).must_be_kind_of File
+      _(result.object_id).must_equal @file.object_id
+    end
+  end
+
+  describe "without POLYFILL_FILE feature" do
+    it "falls through to inspect string" do
+      vm = Quickjs::VM.new
+      vm.define_function(:get_file) { @file }
+      result = vm.eval_code("get_file()")
+      _(result).must_include '#<File:'
+    end
+  end
+end
+
+describe "JS File to Ruby" do
+  before do
+    @options = { features: [Quickjs::POLYFILL_FILE] }
+  end
+
+  it "converts a JS-native File to Quickjs::File" do
+    result = Quickjs.eval_code("new File(['hello'], 'test.txt')", @options)
+    _(result).must_be_kind_of Quickjs::File
+  end
+
+  it "extracts name" do
+    result = Quickjs.eval_code("new File(['hello'], 'test.txt')", @options)
+    _(result.name).must_equal 'test.txt'
+  end
+
+  it "extracts size" do
+    result = Quickjs.eval_code("new File(['hello'], 'test.txt')", @options)
+    _(result.size).must_equal 5
+  end
+
+  it "extracts type" do
+    result = Quickjs.eval_code("new File(['data'], 'f', { type: 'text/plain' })", @options)
+    _(result.type).must_equal 'text/plain'
+  end
+
+  it "extracts lastModified" do
+    result = Quickjs.eval_code("new File([], 'f', { lastModified: 1234567890 })", @options)
+    _(result.last_modified).must_equal 1234567890
+  end
+
+  it "extracts content as binary string" do
+    result = Quickjs.eval_code("new File(['hello world'], 'test.txt')", @options)
+    _(result.content).must_equal 'hello world'
+    _(result.content.encoding).must_equal Encoding::BINARY
+  end
+
+  it "extracts content from binary data" do
+    code = "new File([new Uint8Array([72, 101, 108, 108, 111])], 'test.bin')"
+    result = Quickjs.eval_code(code, @options)
+    _(result.content).must_equal 'Hello'
+    _(result.size).must_equal 5
+  end
+
+  it "returns empty content for empty File" do
+    result = Quickjs.eval_code("new File([], 'empty.txt')", @options)
+    _(result.content).must_equal ''
+    _(result.size).must_equal 0
+  end
+
+  it "converts Blob to Quickjs::Blob (not Quickjs::File)" do
+    result = Quickjs.eval_code("new Blob(['hello'])", @options)
+    _(result).must_be_kind_of Quickjs::Blob
+    _(result).wont_be_kind_of Quickjs::File
+  end
+
+  it "Quickjs::File is a subclass of Quickjs::Blob" do
+    result = Quickjs.eval_code("new File(['hello'], 'test.txt')", @options)
+    _(result).must_be_kind_of Quickjs::Blob
+    _(result).must_be_kind_of Quickjs::File
+  end
+end
+
+describe "JS Blob to Ruby" do
+  before do
+    @options = { features: [Quickjs::POLYFILL_FILE] }
+  end
+
+  it "converts a JS Blob to Quickjs::Blob" do
+    result = Quickjs.eval_code("new Blob(['hello world'])", @options)
+    _(result).must_be_kind_of Quickjs::Blob
+  end
+
+  it "extracts size" do
+    result = Quickjs.eval_code("new Blob(['hello'])", @options)
+    _(result.size).must_equal 5
+  end
+
+  it "extracts type" do
+    result = Quickjs.eval_code("new Blob(['x'], { type: 'image/png' })", @options)
+    _(result.type).must_equal 'image/png'
+  end
+
+  it "extracts content" do
+    result = Quickjs.eval_code("new Blob(['hello world'])", @options)
+    _(result.content).must_equal 'hello world'
+    _(result.content.encoding).must_equal Encoding::BINARY
+  end
+
+  it "extracts binary content" do
+    result = Quickjs.eval_code("new Blob([new Uint8Array([0, 1, 2, 255])])", @options)
+    _(result.content.bytes).must_equal [0, 1, 2, 255]
+    _(result.size).must_equal 4
+  end
+
+  it "handles empty Blob" do
+    result = Quickjs.eval_code("new Blob()", @options)
+    _(result.content).must_equal ''
+    _(result.size).must_equal 0
   end
 end
