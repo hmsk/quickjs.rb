@@ -3,6 +3,7 @@
 require "securerandom"
 require "timeout"
 require_relative "quickjs/version"
+require_relative "quickjs/subtle_crypto"
 require_relative "quickjs/quickjsrb"
 
 module Quickjs

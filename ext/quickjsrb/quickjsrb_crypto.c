@@ -1,5 +1,6 @@
 #include "quickjsrb.h"
 #include "quickjsrb_crypto.h"
+#include "quickjsrb_crypto_subtle.h"
 
 static VALUE r_secure_random()
 {
@@ -65,5 +66,6 @@ void quickjsrb_init_crypto(JSContext *ctx, JSValue j_global)
                     JS_NewCFunction(ctx, js_crypto_get_random_values, "getRandomValues", 1));
   JS_SetPropertyStr(ctx, j_crypto, "randomUUID",
                     JS_NewCFunction(ctx, js_crypto_random_uuid, "randomUUID", 0));
+  quickjsrb_init_crypto_subtle(ctx, j_crypto);
   JS_SetPropertyStr(ctx, j_global, "crypto", j_crypto);
 }

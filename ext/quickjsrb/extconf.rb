@@ -18,6 +18,7 @@ $srcs = [
   'quickjsrb.c',
   'quickjsrb_file.c',
   'quickjsrb_crypto.c',
+  'quickjsrb_crypto_subtle.c',
 ]
 
 append_cflags('-I$(srcdir)/quickjs')
