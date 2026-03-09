@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "securerandom"
 require "timeout"
 require_relative "quickjs/version"
 require_relative "quickjs/quickjsrb"

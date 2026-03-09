@@ -668,3 +668,80 @@ describe "JS Blob to Ruby" do
     _(result.size).must_equal 0
   end
 end
+
+describe "PolyfillCrypto" do
+  before do
+    @options = { features: [::Quickjs::POLYFILL_CRYPTO] }
+  end
+
+  it "is not available without the polyfill" do
+    _ { ::Quickjs.eval_code("crypto.getRandomValues(new Uint8Array(8))") }.must_raise Quickjs::ReferenceError
+  end
+
+  describe "getRandomValues" do
+    it "fills a Uint8Array with random bytes" do
+      code = "const a = new Uint8Array(16); crypto.getRandomValues(a); a.length"
+      _(::Quickjs.eval_code(code, @options)).must_equal 16
+    end
+
+    it "returns the same typed array" do
+      code = <<~JS
+        const a = new Uint8Array(8);
+        const b = crypto.getRandomValues(a);
+        a === b
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal true
+    end
+
+    it "actually fills bytes (not all zero)" do
+      code = "Array.from(crypto.getRandomValues(new Uint8Array(32))).some(b => b !== 0)"
+      _(::Quickjs.eval_code(code, @options)).must_equal true
+    end
+
+    it "works with Uint32Array" do
+      code = "crypto.getRandomValues(new Uint32Array(4)).length"
+      _(::Quickjs.eval_code(code, @options)).must_equal 4
+    end
+
+    it "works with Int8Array" do
+      code = "crypto.getRandomValues(new Int8Array(8)).length"
+      _(::Quickjs.eval_code(code, @options)).must_equal 8
+    end
+
+    it "throws TypeError for Float32Array" do
+      code = "crypto.getRandomValues(new Float32Array(4))"
+      _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::TypeError
+    end
+
+    it "throws TypeError for Float64Array" do
+      code = "crypto.getRandomValues(new Float64Array(4))"
+      _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::TypeError
+    end
+
+    it "throws RangeError when byte length exceeds 65536" do
+      code = "crypto.getRandomValues(new Uint8Array(65537))"
+      _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::RangeError
+    end
+
+    it "throws TypeError for non-TypedArray argument" do
+      code = "crypto.getRandomValues({})"
+      _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::TypeError
+    end
+  end
+
+  describe "randomUUID" do
+    it "returns a string" do
+      _(::Quickjs.eval_code("typeof crypto.randomUUID()", @options)).must_equal "string"
+    end
+
+    it "matches UUID v4 format" do
+      uuid = ::Quickjs.eval_code("crypto.randomUUID()", @options)
+      _(uuid).must_match(/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/)
+    end
+
+    it "returns different values on each call" do
+      code = "crypto.randomUUID() === crypto.randomUUID()"
+      _(::Quickjs.eval_code(code, @options)).must_equal false
+    end
+  end
+end

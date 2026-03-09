@@ -1,5 +1,6 @@
 #include "quickjsrb.h"
 #include "quickjsrb_file.h"
+#include "quickjsrb_crypto.h"
 
 const char *featureStdId = "feature_std";
 const char *featureOsId = "feature_os";
@@ -8,6 +9,7 @@ const char *featurePolyfillIntlId = "feature_polyfill_intl";
 const char *featurePolyfillFileId = "feature_polyfill_file";
 const char *featurePolyfillEncodingId = "feature_polyfill_encoding";
 const char *featurePolyfillUrlId = "feature_polyfill_url";
+const char *featurePolyfillCryptoId = "feature_polyfill_crypto";
 
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
@@ -686,6 +688,11 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JSValue j_polyfillUrlObject = JS_ReadObject(data->context, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size, JS_READ_OBJ_BYTECODE);
     JSValue j_polyfillUrlResult = JS_EvalFunction(data->context, j_polyfillUrlObject);
     JS_FreeValue(data->context, j_polyfillUrlResult);
+  }
+
+  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillCryptoId))))
+  {
+    quickjsrb_init_crypto(data->context, j_global);
   }
 
   JSValue j_console = JS_NewObject(data->context);
