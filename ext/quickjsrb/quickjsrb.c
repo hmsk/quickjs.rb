@@ -7,6 +7,7 @@ const char *featureTimeoutId = "feature_timeout";
 const char *featurePolyfillIntlId = "feature_polyfill_intl";
 const char *featurePolyfillFileId = "feature_polyfill_file";
 const char *featurePolyfillEncodingId = "feature_polyfill_encoding";
+const char *featurePolyfillUrlId = "feature_polyfill_url";
 
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
@@ -678,6 +679,13 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JSValue j_polyfillEncodingObject = JS_ReadObject(data->context, &qjsc_polyfill_encoding_min, qjsc_polyfill_encoding_min_size, JS_READ_OBJ_BYTECODE);
     JSValue j_polyfillEncodingResult = JS_EvalFunction(data->context, j_polyfillEncodingObject);
     JS_FreeValue(data->context, j_polyfillEncodingResult);
+  }
+
+  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillUrlId))))
+  {
+    JSValue j_polyfillUrlObject = JS_ReadObject(data->context, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size, JS_READ_OBJ_BYTECODE);
+    JSValue j_polyfillUrlResult = JS_EvalFunction(data->context, j_polyfillUrlObject);
+    JS_FreeValue(data->context, j_polyfillUrlResult);
   }
 
   JSValue j_console = JS_NewObject(data->context);

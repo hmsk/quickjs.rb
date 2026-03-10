@@ -18,6 +18,8 @@ extern const uint32_t qjsc_polyfill_file_min_size;
 extern const uint8_t qjsc_polyfill_file_min;
 extern const uint32_t qjsc_polyfill_encoding_min_size;
 extern const uint8_t qjsc_polyfill_encoding_min;
+extern const uint32_t qjsc_polyfill_url_min_size;
+extern const uint8_t qjsc_polyfill_url_min;
 
 extern const char *featureStdId;
 extern const char *featureOsId;
@@ -25,6 +27,7 @@ extern const char *featureTimeoutId;
 extern const char *featurePolyfillIntlId;
 extern const char *featurePolyfillFileId;
 extern const char *featurePolyfillEncodingId;
+extern const char *featurePolyfillUrlId;
 
 extern const char *undefinedId;
 extern const char *nanId;
@@ -156,6 +159,7 @@ static void r_define_constants(VALUE r_parent_class)
   rb_define_const(r_parent_class, "POLYFILL_INTL", QUICKJSRB_SYM(featurePolyfillIntlId));
   rb_define_const(r_parent_class, "POLYFILL_FILE", QUICKJSRB_SYM(featurePolyfillFileId));
   rb_define_const(r_parent_class, "POLYFILL_ENCODING", QUICKJSRB_SYM(featurePolyfillEncodingId));
+  rb_define_const(r_parent_class, "POLYFILL_URL", QUICKJSRB_SYM(featurePolyfillUrlId));
 
   VALUE rb_cQuickjsValue = rb_define_class_under(r_parent_class, "Value", rb_cObject);
   rb_define_const(rb_cQuickjsValue, "UNDEFINED", QUICKJSRB_SYM(undefinedId));
