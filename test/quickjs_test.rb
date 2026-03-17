@@ -373,7 +373,7 @@ describe Quickjs::VM do
         raise 'asynchronous sadness'
       end
 
-      _(@vm.eval_code("const awaited = await unblocked().catch((result) => result + '!'); awaited;")).must_equal 'Error: asynchronous sadness!'
+      _(@vm.eval_code("const awaited = await unblocked().catch((result) => result + '!'); awaited;")).must_equal 'RuntimeError: asynchronous sadness!'
     end
 
     it "throws an internal error which will be converted to Quickjs::RubyFunctionError in JS world when Ruby function raises" do
@@ -381,6 +381,12 @@ describe Quickjs::VM do
 
       err = _ { @vm.eval_code("errorable();") }.must_raise IOError
       _(err.message).must_equal 'sad error happened within Ruby'
+    end
+
+    it "exposes Ruby exception class name as .name in JS" do
+      @vm.define_function("fail") { raise IOError, "something went wrong" }
+
+      _(@vm.eval_code('try { fail() } catch (e) { e.name }')).must_equal 'IOError'
     end
 
     it "implemented as native code" do
@@ -501,8 +507,8 @@ describe Quickjs::VM do
       @vm.define_function("get_exception") { raise IOError.new("io") }
       @vm.eval_code('try { get_exception() } catch (e) { console.log(e) }')
 
-      _(@vm.logs.last.to_s).must_equal 'Error: io'
-      _(@vm.logs.last.raw).must_equal ["Error: io\n    at <eval> (<code>:1:20)\n"]
+      _(@vm.logs.last.to_s).must_equal 'IOError: io'
+      _(@vm.logs.last.raw).must_equal ["IOError: io\n    at <eval> (<code>:1:20)\n"]
     end
 
     it "implemented as native code" do

@@ -25,7 +25,7 @@ static int dispatch_log(VMData *data, const char *severity, VALUE r_row);
 
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
-  JSValue j_error = JS_NewError(ctx); // may wanna have custom error class to determine in JS' end
+  JSValue j_error = JS_NewError(ctx);
 
   VALUE r_object_id = rb_funcall(r_error, rb_intern("object_id"), 0);
   int objectId = NUM2INT(r_object_id);
@@ -34,6 +34,10 @@ JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
   // Keep the error alive in VMData to prevent GC before find_ruby_error retrieves it
   VMData *data = JS_GetContextOpaque(ctx);
   rb_hash_aset(data->alive_objects, r_object_id, r_error);
+
+  VALUE r_class_name = rb_class_name(CLASS_OF(r_error));
+  const char *className = StringValueCStr(r_class_name);
+  JS_SetPropertyStr(ctx, j_error, "name", JS_NewString(ctx, className));
 
   VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0);
   const char *errorMessage = StringValueCStr(r_exception_message);
