@@ -23,17 +23,9 @@ gem 'quickjs'
 require 'quickjs'
 
 Quickjs.eval_code('const fn = (n, pow) => n ** pow; fn(2,8);') # => 256
-Quickjs.eval_code('const fn = (name) => `Hi, ${name}!`; fn("Itadori");') # => "Hi, Itadori!
-Quickjs.eval_code("const isOne = (n) => 1 === n; func(1);") #=> true (TrueClass)
-Quickjs.eval_code("const isOne = (n) => 1 === n; func(3);") #=> false (FalseClass)
-
-# When code returns 'object' for `typeof`, the result is converted via JSON.stringify (JS) -> JSON.parse (Ruby)
-Quickjs.eval_code("[1,2,3]") #=> [1, 2, 3] (Array)
-Quickjs.eval_code("({ a: '1', b: 1 })") #=> { 'a' => '1', 'b' => 1 } (Hash)
-
-Quickjs.eval_code("null") #=> nil
-Quickjs.eval_code('const obj = {}; obj.missingKey;') # => :undefined (Quickjs::Value::Undefined)
-Quickjs.eval_code("Number('whatever')") #=> :NaN (Quickjs::Value::NAN)
+Quickjs.eval_code('const fn = (name) => `Hi, ${name}!`; fn("Itadori");') # => "Hi, Itadori!"
+Quickjs.eval_code("[1,2,3]") #=> [1, 2, 3]
+Quickjs.eval_code("({ a: '1', b: 1 })") #=> { 'a' => '1', 'b' => 1 }
 ```
 
 <details>
@@ -42,35 +34,39 @@ Quickjs.eval_code("Number('whatever')") #=> :NaN (Quickjs::Value::NAN)
 #### Resources
 
 ```rb
-# 1GB memory limit
-Quickjs.eval_code(code, { memory_limit: 1024 ** 3 })
-
-# 1MB max stack size
-Quickjs.eval_code(code, { max_stack_size: 1024 ** 2 })
+Quickjs.eval_code(code,
+  memory_limit: 1024 ** 3,   # 1GB memory limit
+  max_stack_size: 1024 ** 2, # 1MB max stack size
+)
 ```
 
-#### Toggle features
+#### Timeout
 
 ```rb
-# Enable `std` module by quickjs: https://bellard.org/quickjs/quickjs.html#std-module
-vm = Quickjs.eval_code(features: [::Quickjs::MODULE_STD])
-
-# Enable `os` module by quickjs: https://bellard.org/quickjs/quickjs.html#os-module
-vm = Quickjs.eval_code(features: [::Quickjs::MODULE_OS])
-
-# Provide `setTimeout` managed by CRuby
-vm = Quickjs.eval_code(features: [::Quickjs::FEATURE_TIMEOUT])
-
-# Inject the polyfill of Intl
-vm = Quickjs.eval_code(features: [::Quickjs::POLYFILL_INTL])
-
-# Inject the polyfill of Blob and File (W3C File API)
-vm = Quickjs.eval_code(features: [::Quickjs::POLYFILL_FILE])
+# eval_code will be interrupted after 1 sec (default: 100 msec)
+Quickjs.eval_code(code, timeout_msec: 1_000)
 ```
+
+#### Features
+
+```rb
+Quickjs.eval_code(code, features: [::Quickjs::MODULE_STD, ::Quickjs::POLYFILL_FILE])
+```
+
+| Constant | Description |
+|---|---|
+| `MODULE_STD` | QuickJS [`std` module](https://bellard.org/quickjs/quickjs.html#std-module) |
+| `MODULE_OS` | QuickJS [`os` module](https://bellard.org/quickjs/quickjs.html#os-module) |
+| `FEATURE_TIMEOUT` | `setTimeout` / `setInterval` managed by CRuby |
+| `POLYFILL_INTL` | Intl API (DateTimeFormat, NumberFormat, PluralRules, Locale) |
+| `POLYFILL_FILE` | W3C File API (Blob and File) |
+| `POLYFILL_ENCODING` | Encoding API (TextEncoder and TextDecoder) |
 
 </details>
 
 ### `Quickjs::VM`: Maintain a consistent VM/runtime
+
+Accepts the same [options](#quickjseval_code-evaluate-javascript-code-instantly) as `Quickjs.eval_code`.
 
 ```rb
 vm = Quickjs::VM.new
@@ -79,45 +75,6 @@ vm.eval_code('a.b;') #=> "c"
 vm.eval_code('a.b = "d";')
 vm.eval_code('a.b;') #=> "d"
 ```
-
-<details>
-<summary>Config VM/runtime</summary>
-
-#### Resources
-
-```rb
-vm = Quickjs::VM.new(
-  memory_limit: 1024 ** 3,
-  max_stack_size: 1024 ** 2,
-)
-```
-
-#### Toggle features
-
-```rb
-# Enable `std` module by quickjs: https://bellard.org/quickjs/quickjs.html#std-module
-vm = Quickjs::VM.new(features: [::Quickjs::MODULE_STD])
-
-# Enable `os` module by quickjs: https://bellard.org/quickjs/quickjs.html#os-module
-vm = Quickjs::VM.new(features: [::Quickjs::MODULE_OS])
-
-# Provide `setTimeout` managed by CRuby
-vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
-
-# Inject the polyfill of Intl
-vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_INTL])
-
-# Inject the polyfill of Blob and File (W3C File API)
-vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_FILE])
-```
-
-#### VM timeout
-
-```rb
-# `eval_code` will be interrupted after 1 sec (default: 100 msec)
-vm = Quickjs::VM.new(timeout_msec: 1_000)
-```
-</details>
 
 #### `Quickjs::VM#import`: 🔌 Import ESM from a source code
 
@@ -151,19 +108,57 @@ end
 vm.eval_code("greetingTo('Rick')") #=> 'Hello! Rick'
 ```
 
-#### `Quickjs::VM#logs`: 💾 Capture console logs
+A Ruby exception raised inside the block is catchable in JS as an `Error`, and propagates back to Ruby as the original exception type if uncaught in JS.
 
-All logs by `console.(log|info|debug|warn|error)` on VM are recorded and inspectable.
+```rb
+vm.define_function("fail") { raise IOError, "something went wrong" }
+
+vm.eval_code('try { fail() } catch (e) { e.message }') #=> "something went wrong"
+vm.eval_code("fail()") #=> raise IOError transparently
+```
+
+With `POLYFILL_FILE` enabled, a Ruby `::File` returned from the block becomes a JS `File`-compatible proxy. Passing it back to Ruby from JS returns the original `::File` object.
+
+```rb
+vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_FILE])
+vm.define_function(:get_file) { File.open('report.pdf') }
+
+vm.eval_code("get_file().name")          #=> "report.pdf"
+vm.eval_code("get_file().size")          #=> Integer (byte size)
+vm.eval_code("await get_file().text()") #=> file content as String
+```
+
+#### `Quickjs::VM#on_log`: 📡 Handle console logs in real time
+
+Register a block to be called for each `console.(log|info|debug|warn|error)` call.
 
 ```rb
 vm = Quickjs::VM.new
-vm.eval_code('console.log("log me", null)')
+vm.on_log { |log| puts "#{log.severity}: #{log.to_s}" }
 
-vm.logs #=> Array of Quickjs::VM::Log
-vm.logs.last.severity #=> :info
-vm.logs.last.to_s #=> 'log me null'
-vm.logs.last.raw #=> ['log me', nil]
+vm.eval_code('console.log("hello", 42)')
+# => prints: info: hello 42
+
+# log.severity #=> :info / :verbose / :warning / :error
+# log.to_s     #=> space-joined string of all arguments
+# log.raw      #=> Array of raw Ruby values
 ```
+
+### Value Conversion
+
+| JavaScript | | Ruby | Note |
+|---|:---:|---|---|
+| `number` (integer / float) | ↔ | `Integer` / `Float` | |
+| `string` | ↔ | `String` | |
+| `true` / `false` | ↔ | `true` / `false` | |
+| `null` | ↔ | `nil` | |
+| `Array` | ↔ | `Array` | via JSON |
+| `Object` | ↔ | `Hash` | via JSON |
+| `undefined` | → | `Quickjs::Value::UNDEFINED` | |
+| `NaN` | → | `Quickjs::Value::NAN` | |
+| `Blob` | → | `Quickjs::Blob` — `.size`, `.type`, `.content` | requires `POLYFILL_FILE` |
+| `File` | → | `Quickjs::File` — `.name`, `.last_modified` + Blob attrs | requires `POLYFILL_FILE` |
+| `File` proxy | ← | `::File` | requires `POLYFILL_FILE`; applies to `define_function` return values |
 
 ## License
 
