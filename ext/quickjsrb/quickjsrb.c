@@ -753,26 +753,11 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
   char *code = StringValueCStr(r_code);
   JSValue j_codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
   JSValue j_awaitedResult = js_std_await(data->context, j_codeResult); // This frees j_codeResult
+  // JS_EVAL_FLAG_ASYNC wraps the result in {value, done} — extract the actual value
+  // Free j_awaitedResult before to_rb_return_value because it may raise (longjmp), which would skip cleanup
   JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
-  // Do this by rescuing to_rb_value
-  if (JS_VALUE_GET_NORM_TAG(j_returnedValue) == JS_TAG_OBJECT && JS_PromiseState(data->context, j_returnedValue) != -1)
-  {
-    JS_FreeValue(data->context, j_returnedValue);
-    JS_FreeValue(data->context, j_awaitedResult);
-    VALUE r_error_message = rb_str_new2("An unawaited Promise was returned to the top-level");
-    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_NO_AWAIT_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
-    return Qnil;
-  }
-  else
-  {
-    // Free j_awaitedResult before to_rb_value because to_rb_value may
-    // raise (longjmp) for JS exceptions, which would skip any cleanup
-    // after it and leak JS GC objects.
-    JS_FreeValue(data->context, j_awaitedResult);
-    VALUE result = to_rb_value(data->context, j_returnedValue);
-    JS_FreeValue(data->context, j_returnedValue);
-    return result;
-  }
+  JS_FreeValue(data->context, j_awaitedResult);
+  return to_rb_return_value(data->context, j_returnedValue);
 }
 
 static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
