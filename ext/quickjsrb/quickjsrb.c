@@ -722,6 +722,20 @@ static int interrupt_handler(JSRuntime *runtime, void *opaque)
   return elapsed_ms >= eval_time->limit_ms ? 1 : 0;
 }
 
+static VALUE to_rb_return_value(JSContext *ctx, JSValue j_val)
+{
+  if (JS_VALUE_GET_NORM_TAG(j_val) == JS_TAG_OBJECT && JS_PromiseState(ctx, j_val) != -1)
+  {
+    JS_FreeValue(ctx, j_val);
+    VALUE r_error_message = rb_str_new2("An unawaited Promise was returned to the top-level");
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_NO_AWAIT_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
+    return Qnil;
+  }
+  VALUE result = to_rb_value(ctx, j_val);
+  JS_FreeValue(ctx, j_val);
+  return result;
+}
+
 static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
 {
   VMData *data;
@@ -799,6 +813,148 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   return r_name_sym;
 }
 
+static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
+{
+  if (argc < 1)
+    rb_raise(rb_eArgError, "wrong number of arguments (given 0, expected 1+)");
+
+  VALUE r_name = argv[0];
+
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  JSValue j_this = JS_UNDEFINED;
+  JSValue j_func;
+
+  VALUE r_path;
+  if (rb_obj_is_kind_of(r_name, rb_cArray))
+  {
+    if (RARRAY_LEN(r_name) == 0)
+      rb_raise(rb_eArgError, "function path must not be empty");
+    r_path = r_name;
+  }
+  else if (SYMBOL_P(r_name) || RB_TYPE_P(r_name, T_STRING))
+  {
+    VALUE r_name_str = rb_funcall(r_name, rb_intern("to_s"), 0);
+    const char *name_str = StringValueCStr(r_name_str);
+    size_t name_len = strlen(name_str);
+    const char *last_bracket = strrchr(name_str, '[');
+    const char *last_dot = strrchr(name_str, '.');
+
+    if (last_bracket != NULL && last_bracket != name_str && name_str[name_len - 1] == ']')
+    {
+      // Bracket notation: 'a["key"]' or 'a.b["key"]' or 'a[0]'
+      // Split into parent expression and the bracketed key
+      VALUE r_parent = rb_str_new(name_str, last_bracket - name_str);
+      const char *key_start = last_bracket + 1;
+      size_t key_len = name_len - (key_start - name_str) - 1; // exclude ']'
+      // Strip surrounding quotes for string keys: 'a["b"]' → key = b
+      if (key_len >= 2 &&
+          ((key_start[0] == '\'' && key_start[key_len - 1] == '\'') ||
+           (key_start[0] == '"' && key_start[key_len - 1] == '"')))
+      {
+        key_start++;
+        key_len -= 2;
+      }
+      VALUE r_key = rb_str_new(key_start, key_len);
+      r_path = rb_ary_new3(2, r_parent, r_key);
+    }
+    else if (last_dot != NULL && last_dot != name_str)
+    {
+      // Dot notation: 'a.b.c' → ['a.b', 'c'] so the parent becomes `this`
+      VALUE r_parent = rb_str_new(name_str, last_dot - name_str);
+      VALUE r_key = rb_str_new2(last_dot + 1);
+      r_path = rb_ary_new3(2, r_parent, r_key);
+    }
+    else
+    {
+      r_path = rb_ary_new3(1, r_name_str);
+    }
+  }
+  else
+  {
+    rb_raise(rb_eTypeError, "function's name should be a Symbol, a String, or an Array of them");
+  }
+
+  {
+    long path_len = RARRAY_LEN(r_path);
+
+    VALUE r_first = RARRAY_AREF(r_path, 0);
+    if (!(SYMBOL_P(r_first) || RB_TYPE_P(r_first, T_STRING)))
+      rb_raise(rb_eTypeError, "function path elements should be Symbols or Strings");
+
+    VALUE r_first_str = rb_funcall(r_first, rb_intern("to_s"), 0);
+    const char *first_seg = StringValueCStr(r_first_str);
+
+    // JS_Eval accesses both global object properties and lexical (const/let) bindings
+    JSValue j_cur = JS_Eval(data->context, first_seg, strlen(first_seg), "<vm>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(j_cur))
+      return to_rb_value(data->context, j_cur); // raises
+
+    for (long i = 1; i < path_len; i++)
+    {
+      VALUE r_seg = RARRAY_AREF(r_path, i);
+      if (!(SYMBOL_P(r_seg) || RB_TYPE_P(r_seg, T_STRING)))
+      {
+        JS_FreeValue(data->context, j_cur);
+        JS_FreeValue(data->context, j_this);
+        rb_raise(rb_eTypeError, "function path elements should be Symbols or Strings");
+      }
+      VALUE r_seg_str = rb_funcall(r_seg, rb_intern("to_s"), 0);
+      const char *seg = StringValueCStr(r_seg_str);
+
+      JSValue j_next = JS_GetPropertyStr(data->context, j_cur, seg);
+      if (JS_IsException(j_next))
+      {
+        JS_FreeValue(data->context, j_cur);
+        JS_FreeValue(data->context, j_this);
+        return to_rb_value(data->context, j_next); // raises
+      }
+
+      JS_FreeValue(data->context, j_this);
+      j_this = j_cur;
+      j_cur = j_next;
+    }
+
+    j_func = j_cur;
+  }
+
+  if (!JS_IsFunction(data->context, j_func))
+  {
+    JS_FreeValue(data->context, j_func);
+    JS_FreeValue(data->context, j_this);
+    VALUE r_error_message = rb_str_new2("given path is not a function");
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
+    return Qnil;
+  }
+
+  int nargs = argc - 1;
+  JSValue *j_args = NULL;
+  if (nargs > 0)
+  {
+    j_args = (JSValue *)malloc(sizeof(JSValue) * nargs);
+    for (int i = 0; i < nargs; i++)
+      j_args[i] = to_js_value(data->context, argv[i + 1]);
+  }
+
+  clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
+  JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
+
+  JSValue j_result = JS_Call(data->context, j_func, j_this, nargs, (JSValueConst *)j_args);
+
+  JS_FreeValue(data->context, j_func);
+  JS_FreeValue(data->context, j_this);
+  if (j_args)
+  {
+    for (int i = 0; i < nargs; i++)
+      JS_FreeValue(data->context, j_args[i]);
+    free(j_args);
+  }
+
+  // js_std_await handles both async (promise) and sync results; frees j_result
+  return to_rb_return_value(data->context, js_std_await(data->context, j_result));
+}
+
 static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
 {
   VALUE r_import_string, r_opts;
@@ -872,6 +1028,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_alloc_func(r_class_vm, vm_alloc);
   rb_define_method(r_class_vm, "initialize", vm_m_initialize, -1);
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, 1);
+  rb_define_method(r_class_vm, "call", vm_m_callGlobalFunction, -1);
   rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
   rb_define_method(r_class_vm, "on_log", vm_m_on_log, 0);
