@@ -25,4 +25,12 @@ export default [
       minify: true,
     },
   }),
+  defineConfig({
+    input: "src/url.js",
+    output: {
+      file: "../ext/quickjsrb/vendor/polyfill-url.min.js",
+      format: "iife",
+      minify: true,
+    },
+  }),
 ];
