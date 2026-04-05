@@ -446,11 +446,23 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   }
 }
 
+static void *wait_with_nanosleep(void *arg)
+{
+  struct timespec *ts = arg;
+  nanosleep(ts, NULL);
+  return NULL;
+}
+
 static JSValue js_delay_and_eval_job(JSContext *ctx, int argc, JSValueConst *argv)
 {
-  VALUE rb_delay_msec = to_rb_value(ctx, argv[1]);
-  VALUE rb_delay_sec = rb_funcall(rb_delay_msec, rb_intern("/"), 1, rb_float_new(1000));
-  rb_thread_wait_for(rb_time_interval(rb_delay_sec));
+  double msec;
+  JS_ToFloat64(ctx, &msec, argv[1]);
+
+  struct timespec ts;
+  ts.tv_sec = (time_t)(msec / 1000.0);
+  ts.tv_nsec = (long)((msec - ts.tv_sec * 1000.0) * 1e6);
+
+  rb_thread_call_without_gvl(wait_with_nanosleep, &ts, RUBY_UBF_IO, NULL);
   JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
 
   return JS_UNDEFINED;
@@ -513,6 +525,7 @@ static VALUE vm_m_on_log(VALUE r_self)
 
   return Qnil;
 }
+
 
 static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, const char *severity)
 {
@@ -606,7 +619,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     r_memory_limit = UINT2NUM(1024 * 1024 * 128);
   VALUE r_max_stack_size = rb_hash_aref(r_opts, ID2SYM(rb_intern("max_stack_size")));
   if (NIL_P(r_max_stack_size))
-    r_max_stack_size = UINT2NUM(1024 * 1024 * 4);
+    r_max_stack_size = UINT2NUM(1024 * 1024 * 64);
   VALUE r_features = rb_hash_aref(r_opts, ID2SYM(rb_intern("features")));
   if (NIL_P(r_features))
     r_features = rb_ary_new();
@@ -626,6 +639,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   JS_SetModuleLoaderFunc2(runtime, NULL, js_module_loader, js_module_check_attributes, NULL);
   js_std_init_handlers(runtime);
+  JSValue j_global = JS_GetGlobalObject(data->context);
 
   JSValue j_global = JS_GetGlobalObject(data->context);
 
@@ -729,6 +743,11 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
 
   char *code = StringValueCStr(r_code);
   JSValue j_codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
+  while (JS_IsJobPending(JS_GetRuntime(data->context)))
+  {
+    JSContext *ctx1;
+    JS_ExecutePendingJob(JS_GetRuntime(data->context), &ctx1);
+  }
   JSValue j_awaitedResult = js_std_await(data->context, j_codeResult); // This frees j_codeResult
   JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
   // Do this by rescuing to_rb_value
@@ -750,6 +769,46 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
     JS_FreeValue(data->context, j_returnedValue);
     return result;
   }
+}
+
+static VALUE vm_m_evalCodeWrap(VALUE r_self, VALUE r_code)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  data->eval_time->started_at = clock();
+  JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
+
+  char *code = StringValueCStr(r_code);
+  const char *prefix = "globalThis.__runner__ = async function() {\n";
+  const char *suffix = "};";
+  size_t wrapped_len = strlen(prefix) + strlen(code) + strlen(suffix) + 1;
+  char *wrapped_code = (char *)malloc(wrapped_len);
+  snprintf(wrapped_code, wrapped_len, "%s%s%s", prefix, code, suffix);
+
+  JSValue j_codeResult = JS_Eval(data->context, wrapped_code, strlen(wrapped_code), "<code>", JS_EVAL_TYPE_GLOBAL);
+  JSValue j_global = JS_GetGlobalObject(data->context);
+  JSValue j_func = JS_GetPropertyStr(data->context, j_global, "__runner__");
+  JS_FreeValue(data->context, j_global);
+  JSValue j_promise = JS_Call(data->context, j_func, JS_UNDEFINED, 0, NULL);
+  free(wrapped_code);
+  JS_FreeValue(data->context, j_codeResult);
+  JS_FreeValue(data->context, j_func);
+  while (JS_IsJobPending(JS_GetRuntime(data->context)))
+  {
+    JSContext *ctx1;
+    JS_ExecutePendingJob(JS_GetRuntime(data->context), &ctx1);
+  }
+  JSValue j_result = JS_PromiseResult(data->context, j_promise);
+  JS_FreeValue(data->context, j_promise);
+
+  const char *deletion = "delete globalThis.__runner__;";
+  JSValue j_e = JS_Eval(data->context, deletion, strlen(deletion), "<eval>", JS_EVAL_TYPE_GLOBAL);
+  JS_FreeValue(data->context, j_e);
+
+  VALUE result = to_rb_value(data->context, j_result);
+  JS_FreeValue(data->context, j_result);
+  return result;
 }
 
 static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
@@ -873,6 +932,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_alloc_func(r_class_vm, vm_alloc);
   rb_define_method(r_class_vm, "initialize", vm_m_initialize, -1);
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, 1);
+  rb_define_method(r_class_vm, "eval_code_wrap", vm_m_evalCodeWrap, 1);
   rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
   rb_define_method(r_class_vm, "logs", vm_m_logs, 0);

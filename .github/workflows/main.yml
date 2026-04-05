@@ -31,5 +31,10 @@ jobs:
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
+      - name: Check ulimit
+        run: ulimit -s
+      - name: Try to increase stack size
+        run: |
+          ulimit -s unlimited || echo "Could not increase stack size"
       - name: Run the default task
         run: bundle exec rake

@@ -2,6 +2,7 @@
 #define QUICKJSRB_H 1
 
 #include "ruby.h"
+#include <ruby/thread.h>
 
 #include "quickjs.h"
 #include "quickjs-libc.h"
