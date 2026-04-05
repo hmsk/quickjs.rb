@@ -180,7 +180,13 @@ module Quickjs
           key.key_data.public_to_der.then { |spki_der| ec_spki_to_raw(spki_der) }
         when "Ed25519", "X25519"
           raise ArgumentError, "SubtleCrypto: raw export only for public OKP keys" unless key.type == "public"
-          key.key_data.raw_public_key
+          if key.key_data.respond_to?(:raw_public_key)
+            key.key_data.raw_public_key
+          else
+            # raw_public_key added in openssl gem 3.2.0 (Ruby 3.3): https://github.com/ruby/openssl/blob/master/History.md
+            # Ed25519/X25519 SPKI DER is 44 bytes with the 32-byte key at the end
+            key.key_data.public_to_der[-32..]
+          end
         else
           raise ArgumentError, "SubtleCrypto: raw export not supported for '#{name}'"
         end
