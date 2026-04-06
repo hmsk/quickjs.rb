@@ -28,6 +28,7 @@ extern const char *featurePolyfillIntlId;
 extern const char *featurePolyfillFileId;
 extern const char *featurePolyfillEncodingId;
 extern const char *featurePolyfillUrlId;
+extern const char *featurePolyfillCryptoId;
 
 extern const char *undefinedId;
 extern const char *nanId;
@@ -160,6 +161,7 @@ static void r_define_constants(VALUE r_parent_class)
   rb_define_const(r_parent_class, "POLYFILL_FILE", QUICKJSRB_SYM(featurePolyfillFileId));
   rb_define_const(r_parent_class, "POLYFILL_ENCODING", QUICKJSRB_SYM(featurePolyfillEncodingId));
   rb_define_const(r_parent_class, "POLYFILL_URL", QUICKJSRB_SYM(featurePolyfillUrlId));
+  rb_define_const(r_parent_class, "POLYFILL_CRYPTO", QUICKJSRB_SYM(featurePolyfillCryptoId));
 
   VALUE rb_cQuickjsValue = rb_define_class_under(r_parent_class, "Value", rb_cObject);
   rb_define_const(rb_cQuickjsValue, "UNDEFINED", QUICKJSRB_SYM(undefinedId));
