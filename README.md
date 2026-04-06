@@ -62,6 +62,7 @@ Quickjs.eval_code(code, features: [::Quickjs::MODULE_STD, ::Quickjs::POLYFILL_FI
 | `POLYFILL_FILE` | W3C File API (Blob and File) |
 | `POLYFILL_ENCODING` | Encoding API (TextEncoder and TextDecoder) |
 | `POLYFILL_URL` | URL API (URL and URLSearchParams) |
+| `POLYFILL_CRYPTO` | Web Crypto API (`crypto.getRandomValues`, `crypto.randomUUID`, `crypto.subtle`) |
 
 </details>
 
