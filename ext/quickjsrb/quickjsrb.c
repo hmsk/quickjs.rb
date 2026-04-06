@@ -489,20 +489,14 @@ static VALUE r_try_call_listener(VALUE r_args)
 
 static int dispatch_log(VMData *data, const char *severity, VALUE r_row)
 {
+  if (NIL_P(data->log_listener))
+    return 0;
+
   VALUE r_log = r_log_new(severity, r_row);
-  if (!NIL_P(data->log_listener))
-  {
-    VALUE r_args = rb_ary_new3(2, data->log_listener, r_log);
-    int error;
-    rb_protect(r_try_call_listener, r_args, &error);
-    if (error)
-      return error;
-  }
-  else
-  {
-    rb_ary_push(data->logs, r_log);
-  }
-  return 0;
+  VALUE r_args = rb_ary_new3(2, data->log_listener, r_log);
+  int error;
+  rb_protect(r_try_call_listener, r_args, &error);
+  return error;
 }
 
 static VALUE vm_m_on_log(VALUE r_self)
@@ -865,16 +859,6 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   return Qtrue;
 }
 
-static VALUE vm_m_logs(VALUE r_self)
-{
-  rb_category_warn(RB_WARN_CATEGORY_DEPRECATED, "Quickjs::VM#logs is deprecated; use Quickjs::VM#on_log instead");
-
-  VMData *data;
-  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
-
-  return data->logs;
-}
-
 RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
 {
   rb_require("json");
@@ -890,7 +874,6 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, 1);
   rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
-  rb_define_method(r_class_vm, "logs", vm_m_logs, 0);
   rb_define_method(r_class_vm, "on_log", vm_m_on_log, 0);
   r_define_log_class(r_class_vm);
 }

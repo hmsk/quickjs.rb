@@ -439,43 +439,39 @@ describe Quickjs::VM do
   describe "ConsoleLoggers" do
     before do
       @vm = Quickjs::VM.new
-      @original_deprecated = Warning[:deprecated]
-      Warning[:deprecated] = false
-    end
-
-    after do
-      Warning[:deprecated] = @original_deprecated
+      @received = []
+      @vm.on_log { |log| @received << log }
     end
 
     it "there are functions for some severities" do
       @vm.eval_code('console.log("log it")')
-      _(@vm.logs.last.severity).must_equal :info
-      _(@vm.logs.last.to_s).must_equal 'log it'
+      _(@received.last.severity).must_equal :info
+      _(@received.last.to_s).must_equal 'log it'
 
       @vm.eval_code('console.info("info it")')
-      _(@vm.logs.last.severity).must_equal :info
-      _(@vm.logs.last.to_s).must_equal 'info it'
+      _(@received.last.severity).must_equal :info
+      _(@received.last.to_s).must_equal 'info it'
 
       @vm.eval_code('console.debug("debug it")')
-      _(@vm.logs.last.severity).must_equal :verbose
-      _(@vm.logs.last.to_s).must_equal 'debug it'
+      _(@received.last.severity).must_equal :verbose
+      _(@received.last.to_s).must_equal 'debug it'
 
       @vm.eval_code('console.warn("warn it")')
-      _(@vm.logs.last.severity).must_equal :warning
-      _(@vm.logs.last.to_s).must_equal 'warn it'
+      _(@received.last.severity).must_equal :warning
+      _(@received.last.to_s).must_equal 'warn it'
 
       @vm.eval_code('console.error("error it")')
-      _(@vm.logs.last.severity).must_equal :error
-      _(@vm.logs.last.to_s).must_equal 'error it'
+      _(@received.last.severity).must_equal :error
+      _(@received.last.to_s).must_equal 'error it'
 
-      _(@vm.logs.size).must_equal 5
+      _(@received.size).must_equal 5
     end
 
     it "can give multiple arguments" do
       @vm.eval_code('const variable = "var!";')
       @vm.eval_code('console.log(128, "str", variable, undefined, null, { key: "value" }, [1, 2, 3], new Error("hey"))')
 
-      _(@vm.logs.last.to_s).must_equal [
+      _(@received.last.to_s).must_equal [
         "128", "str", "var!", "undefined", "null", "[object Object]", "1,2,3", "Error: hey"
       ].join(' ')
     end
@@ -484,7 +480,7 @@ describe Quickjs::VM do
       @vm.eval_code('const variable = "var!";')
       @vm.eval_code('console.log(128, "str", variable, undefined, null, { key: "value" }, [1, 2, 3], new Error("hey"))')
 
-      _(@vm.logs.last.raw).must_equal [
+      _(@received.last.raw).must_equal [
         128, "str", "var!", Quickjs::Value::UNDEFINED, nil, { "key" => "value" }, [1,2,3], "Error: hey\n    at <eval> (<code>:1:90)\n"
       ]
     end
@@ -493,34 +489,20 @@ describe Quickjs::VM do
       @vm.eval_code('async function hi() {}')
       @vm.eval_code('console.log("log promise", hi())')
 
-      _(@vm.logs.last.to_s).must_equal ['log promise', '[object Promise]'].join(' ')
-      _(@vm.logs.last.raw).must_equal ['log promise', 'Promise']
+      _(@received.last.to_s).must_equal ['log promise', '[object Promise]'].join(' ')
+      _(@received.last.raw).must_equal ['log promise', 'Promise']
     end
 
     it "can log exception instance from Ruby like JS Error" do
       @vm.define_function("get_exception") { raise IOError.new("io") }
       @vm.eval_code('try { get_exception() } catch (e) { console.log(e) }')
 
-      _(@vm.logs.last.to_s).must_equal 'Error: io'
-      _(@vm.logs.last.raw).must_equal ["Error: io\n    at <eval> (<code>:1:20)\n"]
+      _(@received.last.to_s).must_equal 'Error: io'
+      _(@received.last.raw).must_equal ["Error: io\n    at <eval> (<code>:1:20)\n"]
     end
 
     it "implemented as native code" do
       _(@vm.eval_code('console.log.toString()')).must_match(/native code/)
-    end
-
-    it "vm.logs emits a deprecation warning" do
-      @vm.eval_code('console.log("test")')
-      warning = nil
-      Warning[:deprecated] = true
-      old_warn = Warning.method(:warn)
-      Warning.define_method(:warn) { |msg, **kwargs| warning = msg }
-      begin
-        @vm.logs
-      ensure
-        Warning.define_singleton_method(:warn, old_warn)
-      end
-      _(warning).must_match(/Quickjs::VM#logs is deprecated/)
     end
   end
 
@@ -557,16 +539,6 @@ describe Quickjs::VM do
       _(received.size).must_equal 1
       _(received.first.to_s).must_equal 'hello 42 world'
       _(received.first.raw).must_equal ['hello', 42, 'world']
-    end
-
-    it "does not accumulate logs array when listener is set" do
-      @vm.on_log { |_log| }
-
-      @vm.eval_code('console.log("should not accumulate")')
-
-      Warning[:deprecated] = false
-      _(@vm.logs.size).must_equal 0
-      Warning[:deprecated] = true
     end
 
     it "receives error logs from unhandled exceptions" do
@@ -619,12 +591,8 @@ describe Quickjs::VM do
   describe "StackTraces" do
     before do
       @vm = Quickjs::VM.new
-      @original_deprecated = Warning[:deprecated]
-      Warning[:deprecated] = false
-    end
-
-    after do
-      Warning[:deprecated] = @original_deprecated
+      @received = []
+      @vm.on_log { |log| @received << log }
     end
 
     it "unhandled exception with an Error class should be logged with stack trace" do
@@ -635,9 +603,9 @@ describe Quickjs::VM do
           a + b;
         JS
       }.must_raise Quickjs::ReferenceError
-      _(@vm.logs.size).must_equal 1
-      _(@vm.logs.last.severity).must_equal :error
-      _(@vm.logs.last.raw.first.split("\n")).must_equal [
+      _(@received.size).must_equal 1
+      _(@received.last.severity).must_equal :error
+      _(@received.last.raw.first.split("\n")).must_equal [
         "Uncaught ReferenceError: 'b' is not defined",
         '    at <eval> (<code>:3:5)'
       ]
@@ -650,9 +618,9 @@ describe Quickjs::VM do
           throw 'Don\\'t wanna compute at all';
         JS
       }.must_raise Quickjs::RuntimeError
-      _(@vm.logs.size).must_equal 1
-      _(@vm.logs.last.severity).must_equal :error
-      _(@vm.logs.last.raw.first.split("\n")).must_equal [
+      _(@received.size).must_equal 1
+      _(@received.last.severity).must_equal :error
+      _(@received.last.raw.first.split("\n")).must_equal [
         "Uncaught 'Don't wanna compute at all'"
       ]
     end
@@ -662,9 +630,9 @@ describe Quickjs::VM do
       _ {
         @vm.eval_code('wrapError();')
       }.must_raise Quickjs::RuntimeError
-      _(@vm.logs.size).must_equal 1
-      _(@vm.logs.last.severity).must_equal :error
-      trace = @vm.logs.last.raw.first.split("\n")
+      _(@received.size).must_equal 1
+      _(@received.last.severity).must_equal :error
+      trace = @received.last.raw.first.split("\n")
       _(trace.size).must_equal 4
       _(trace[0]).must_equal 'Uncaught Error: unpleasant wrapped error'
       _(trace[1]).must_match(/at thrower \(\w{12}:6:18\)/)
