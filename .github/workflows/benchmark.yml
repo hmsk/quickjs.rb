@@ -1,0 +1,25 @@
+name: Benchmark
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    name: Polyfill overhead benchmark
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Compile
+        run: bundle exec rake compile
+      - name: Run benchmark
+        run: bundle exec ruby benchmark/polyfills.rb
