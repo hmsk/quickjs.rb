@@ -78,6 +78,29 @@ vm.eval_code('a.b = "d";')
 vm.eval_code('a.b;') #=> "d"
 ```
 
+#### `Quickjs::VM#call`: ⚡ Call a JS function directly with Ruby arguments
+
+```rb
+vm = Quickjs::VM.new
+vm.eval_code('function add(a, b) { return a + b; }')
+
+vm.call('add', 1, 2)           #=> 3
+vm.call(:add, 1, 2)            #=> 3  (Symbol also works)
+
+# Nested functions — preserves `this` binding
+vm.eval_code('const counter = { n: 0, inc() { return ++this.n; } }')
+vm.call('counter.inc')         #=> 1
+vm.call('counter.inc')         #=> 2
+
+# Keys with special characters via bracket notation
+vm.eval_code("const obj = {}; obj['my-fn'] = x => x * 2;")
+vm.call('obj["my-fn"]', 21)    #=> 42
+
+# Async functions are automatically awaited
+vm.eval_code('async function fetchVal() { return 42; }')
+vm.call('fetchVal')            #=> 42
+```
+
 #### `Quickjs::VM#import`: 🔌 Import ESM from a source code
 
 ```rb

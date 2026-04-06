@@ -812,13 +812,7 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   JSValue j_func;
 
   VALUE r_path;
-  if (rb_obj_is_kind_of(r_name, rb_cArray))
-  {
-    if (RARRAY_LEN(r_name) == 0)
-      rb_raise(rb_eArgError, "function path must not be empty");
-    r_path = r_name;
-  }
-  else if (SYMBOL_P(r_name) || RB_TYPE_P(r_name, T_STRING))
+  if (SYMBOL_P(r_name) || RB_TYPE_P(r_name, T_STRING))
   {
     VALUE r_name_str = rb_funcall(r_name, rb_intern("to_s"), 0);
     const char *name_str = StringValueCStr(r_name_str);
@@ -858,7 +852,7 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   }
   else
   {
-    rb_raise(rb_eTypeError, "function's name should be a Symbol, a String, or an Array of them");
+    rb_raise(rb_eTypeError, "function's name should be a Symbol or a String");
   }
 
   {

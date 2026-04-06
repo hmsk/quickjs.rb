@@ -484,50 +484,11 @@ describe Quickjs::VM do
       _(@vm.call('obj["🎉"]', 'party')).must_equal 'party!'
     end
 
-    it "supports Array path with emoji key" do
-      @vm.eval_code("const obj = {}; obj['🎉'] = function() { return 'tada'; };")
-      _(@vm.call(['obj', '🎉'])).must_equal 'tada'
-    end
-
     it "supports mixed dot and bracket notation" do
       @vm.eval_code("const a = { b: {} }; a.b['c-d'] = function() { return 'mixed'; };")
       _(@vm.call('a.b["c-d"]')).must_equal 'mixed'
     end
 
-    it "calls a nested function via Array path" do
-      @vm.eval_code("const obj = { greet: function(name) { return 'hello ' + name; } };")
-      _(@vm.call(['obj', 'greet'], 'Alice')).must_equal 'hello Alice'
-    end
-
-    it "preserves this binding for nested method calls" do
-      @vm.eval_code("const counter = { count: 0, increment: function() { this.count++; return this.count; } };")
-      _(@vm.call(['counter', 'increment'])).must_equal 1
-      _(@vm.call(['counter', 'increment'])).must_equal 2
-    end
-
-    it "supports deeply nested paths" do
-      @vm.eval_code("const a = { b: { c: function() { return 42; } } };")
-      _(@vm.call(['a', 'b', 'c'])).must_equal 42
-    end
-
-    it "raises TypeError when path contains a non-String/Symbol" do
-      _ { @vm.call([42]) }.must_raise TypeError
-    end
-
-    it "raises ArgumentError for empty path array" do
-      _ { @vm.call([]) }.must_raise ArgumentError
-    end
-
-    it "raises RuntimeError when path does not lead to a function" do
-      @vm.eval_code("const obj = { x: 1 };")
-      err = _ { @vm.call(['obj', 'x']) }.must_raise Quickjs::RuntimeError
-      _(err.message).must_equal 'given path is not a function'
-    end
-
-    it "raises a JS TypeError when traversing through a non-object" do
-      @vm.eval_code("const obj = { x: null };")
-      _ { @vm.call(['obj', 'x', 'method']) }.must_raise Quickjs::TypeError
-    end
   end
 
   describe "Import" do
