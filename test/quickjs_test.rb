@@ -389,6 +389,108 @@ describe Quickjs::VM do
     end
   end
 
+  describe "Call" do
+    before do
+      @vm = Quickjs::VM.new
+    end
+
+    it "calls a global function with no args" do
+      @vm.eval_code("function greet() { return 'hello'; }")
+      _(@vm.call('greet')).must_equal 'hello'
+    end
+
+    it "accepts a Symbol as function name" do
+      @vm.eval_code("function greet() { return 'hello'; }")
+      _(@vm.call(:greet)).must_equal 'hello'
+    end
+
+    it "passes primitive args" do
+      @vm.eval_code("function add(a, b) { return a + b; }")
+      _(@vm.call('add', 1, 2)).must_equal 3
+    end
+
+    it "passes hash as object" do
+      @vm.eval_code("function getName(obj) { return obj.name; }")
+      _(@vm.call('getName', { name: 'Alice' })).must_equal 'Alice'
+    end
+
+    it "passes array arg" do
+      @vm.eval_code("function sum(arr) { return arr.reduce((a, b) => a + b, 0); }")
+      _(@vm.call('sum', [1, 2, 3])).must_equal 6
+    end
+
+    it "passes mixed args" do
+      @vm.eval_code("function format(tmpl, data) { return tmpl.replace('{name}', data.name); }")
+      _(@vm.call('format', 'Hello, {name}!', { name: 'Bob' })).must_equal 'Hello, Bob!'
+    end
+
+    it "passes nil as null" do
+      @vm.eval_code("function isNull(v) { return v === null; }")
+      _(@vm.call('isNull', nil)).must_equal true
+    end
+
+    it "automatically awaits async functions" do
+      @vm.eval_code("async function asyncGreet() { return 'async hello'; }")
+      _(@vm.call('asyncGreet')).must_equal 'async hello'
+    end
+
+    it "raises ReferenceError when the name is not defined" do
+      _ { @vm.call('nonExistent') }.must_raise Quickjs::ReferenceError
+    end
+
+    it "raises RuntimeError when the path resolves to a non-function" do
+      err = _ { @vm.call('console') }.must_raise Quickjs::RuntimeError
+      _(err.message).must_equal 'given path is not a function'
+    end
+
+    it "raises TypeError when function name is not a String or Symbol" do
+      _ { @vm.call(42) }.must_raise TypeError
+    end
+
+    it "raises an error raised within the function" do
+      @vm.eval_code("function boom() { throw new TypeError('bang'); }")
+      err = _ { @vm.call('boom') }.must_raise Quickjs::TypeError
+      _(err.message).must_equal 'bang'
+    end
+
+    it "calls a nested function via dot-notation string" do
+      @vm.eval_code("const obj = { greet: function(name) { return 'hello ' + name; } };")
+      _(@vm.call('obj.greet', 'Alice')).must_equal 'hello Alice'
+    end
+
+    it "preserves this binding with dot-notation string" do
+      @vm.eval_code("const counter = { count: 0, increment: function() { this.count++; return this.count; } };")
+      _(@vm.call('counter.increment')).must_equal 1
+      _(@vm.call('counter.increment')).must_equal 2
+    end
+
+    it "supports deeply nested dot-notation string" do
+      @vm.eval_code("const a = { b: { c: function() { return 42; } } };")
+      _(@vm.call('a.b.c')).must_equal 42
+    end
+
+    it "calls a nested function via bracket-notation string" do
+      @vm.eval_code("const obj = { greet: function(name) { return 'hello ' + name; } };")
+      _(@vm.call('obj["greet"]', 'Alice')).must_equal 'hello Alice'
+    end
+
+    it "supports bracket notation for keys with special characters" do
+      @vm.eval_code("const obj = {}; obj['my-func'] = function(x) { return x * 2; };")
+      _(@vm.call('obj["my-func"]', 21)).must_equal 42
+    end
+
+    it "supports bracket notation for emoji keys" do
+      @vm.eval_code("const obj = {}; obj['🎉'] = function(x) { return x + '!'; };")
+      _(@vm.call('obj["🎉"]', 'party')).must_equal 'party!'
+    end
+
+    it "supports mixed dot and bracket notation" do
+      @vm.eval_code("const a = { b: {} }; a.b['c-d'] = function() { return 'mixed'; };")
+      _(@vm.call('a.b["c-d"]')).must_equal 'mixed'
+    end
+
+  end
+
   describe "Import" do
     before do
       @vm = Quickjs::VM.new

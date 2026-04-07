@@ -7,6 +7,9 @@ module Quickjs
   POLYFILL_INTL: Symbol
   POLYFILL_FILE: Symbol
   POLYFILL_HTML_BASE64: Symbol
+  POLYFILL_ENCODING: Symbol
+  POLYFILL_URL: Symbol
+  POLYFILL_CRYPTO: Symbol
 
   def self.eval_code: (String code, ?Hash[Symbol, untyped] overwrite_opts) -> untyped
 
@@ -20,11 +23,13 @@ module Quickjs
 
     def eval_code: (String code) -> untyped
 
+    def call: (String | Symbol name, *untyped args) -> untyped
+
     def define_function: (String | Symbol name, *Symbol flags) { (*untyped) -> untyped } -> Symbol
 
     def import: (String | Array[String] | Hash[Symbol, String] imported, from: String, ?code_to_expose: String?) -> true
 
-    def logs: () -> Array[Log]
+    def on_log: () { (Log) -> void } -> nil
 
     class Log
       attr_reader severity: Symbol
