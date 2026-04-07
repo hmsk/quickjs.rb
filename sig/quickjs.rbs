@@ -7,6 +7,9 @@ module Quickjs
   POLYFILL_INTL: Symbol
   POLYFILL_FILE: Symbol
   POLYFILL_HTML_BASE64: Symbol
+  POLYFILL_ENCODING: Symbol
+  POLYFILL_URL: Symbol
+  POLYFILL_CRYPTO: Symbol
 
   def self.eval_code: (String code, ?Hash[Symbol, untyped] overwrite_opts) -> untyped
 
@@ -19,6 +22,8 @@ module Quickjs
     def initialize: (?features: Array[Symbol], ?memory_limit: Integer, ?max_stack_size: Integer, ?timeout_msec: Integer) -> void
 
     def eval_code: (String code) -> untyped
+
+    def call: (String | Symbol name, *untyped args) -> untyped
 
     def define_function: (String | Symbol name, *Symbol flags) { (*untyped) -> untyped } -> Symbol
 
