@@ -29,7 +29,7 @@ module Quickjs
 
     def import: (String | Array[String] | Hash[Symbol, String] imported, from: String, ?code_to_expose: String?) -> true
 
-    def logs: () -> Array[Log]
+    def on_log: () { (Log) -> void } -> nil
 
     class Log
       attr_reader severity: Symbol
