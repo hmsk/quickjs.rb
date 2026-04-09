@@ -54,6 +54,13 @@ namespace :polyfills do
     Rake::Task[:compile].invoke
   end
 
+  desc 'Check licenses of bundled polyfill dependencies'
+  task :check_licenses do
+    Dir.chdir(File.expand_path('polyfills', __dir__)) do
+      sh 'npm run check-licenses'
+    end
+  end
+
   namespace :version do
     task :check do
       check_polyfill_version! do |pkg_v, gem_v|

@@ -3,16 +3,17 @@
   "version": "0.13.0",
   "private": true,
   "scripts": {
-    "build": "rolldown -c rolldown.config.mjs"
+    "build": "rolldown -c rolldown.config.mjs",
+    "check-licenses": "node check-licenses.mjs"
   },
   "devDependencies": {
-    "rolldown": "^1.0.0-rc.3"
+    "rolldown": "^1.0.0-rc.14"
   },
   "dependencies": {
-    "@formatjs/intl-getcanonicallocales": "^3.2.1",
-    "@formatjs/intl-locale": "^5.2.1",
-    "@formatjs/intl-pluralrules": "^6.2.2",
-    "@formatjs/intl-numberformat": "^9.2.2",
-    "@formatjs/intl-datetimeformat": "^7.2.1"
+    "@formatjs/intl-getcanonicallocales": "^3.2.2",
+    "@formatjs/intl-locale": "^5.3.1",
+    "@formatjs/intl-pluralrules": "^6.3.1",
+    "@formatjs/intl-numberformat": "^9.3.1",
+    "@formatjs/intl-datetimeformat": "^7.3.1"
   }
 }
