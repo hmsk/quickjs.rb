@@ -769,33 +769,117 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   VALUE r_block;
   rb_scan_args(argc, argv, "10*&", &r_name, &r_flags, &r_block);
 
-  if (!(SYMBOL_P(r_name) || RB_TYPE_P(r_name, T_STRING)))
-  {
-    rb_raise(rb_eTypeError, "function's name should be a Symbol or a String");
-  }
-
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
-  VALUE r_name_sym = rb_funcall(r_name, rb_intern("to_sym"), 0);
+  if (RB_TYPE_P(r_name, T_ARRAY))
+  {
+    long path_len = RARRAY_LEN(r_name);
+    if (path_len < 1)
+      rb_raise(rb_eArgError, "function's path array must not be empty");
 
-  rb_hash_aset(data->defined_functions, r_name_sym, r_block);
-  VALUE r_name_str = rb_funcall(r_name, rb_intern("to_s"), 0);
-  char *funcName = StringValueCStr(r_name_str);
+    for (long i = 0; i < path_len; i++)
+    {
+      VALUE r_seg = RARRAY_AREF(r_name, i);
+      if (!(SYMBOL_P(r_seg) || RB_TYPE_P(r_seg, T_STRING)))
+        rb_raise(rb_eTypeError, "function's name should be a Symbol or a String");
+    }
 
-  JSValueConst ruby_data[2];
-  ruby_data[0] = JS_NewString(data->context, funcName);
-  ruby_data[1] = JS_NewBool(data->context, RTEST(rb_funcall(r_flags, rb_intern("include?"), 1, ID2SYM(rb_intern("async")))));
+    // Build internal lookup key by joining path segments with "."
+    // e.g. ["myLib", "hello"] -> :"myLib.hello"
+    VALUE r_segs = rb_ary_new();
+    for (long i = 0; i < path_len; i++)
+      rb_ary_push(r_segs, rb_funcall(RARRAY_AREF(r_name, i), rb_intern("to_s"), 0));
+    VALUE r_key_str = rb_funcall(r_segs, rb_intern("join"), 1, rb_str_new2("."));
+    VALUE r_key_sym = rb_funcall(r_key_str, rb_intern("to_sym"), 0);
+    rb_hash_aset(data->defined_functions, r_key_sym, r_block);
 
-  JSValue j_global = JS_GetGlobalObject(data->context);
-  JS_SetPropertyStr(
-      data->context, j_global, funcName,
-      JS_NewCFunctionData(data->context, js_quickjsrb_call_global, 1, 0, 2, ruby_data));
-  JS_FreeValue(data->context, j_global);
-  JS_FreeValue(data->context, ruby_data[0]);
-  JS_FreeValue(data->context, ruby_data[1]);
+    VALUE r_func_seg_str = rb_funcall(RARRAY_AREF(r_name, path_len - 1), rb_intern("to_s"), 0);
+    char *funcName = StringValueCStr(r_func_seg_str);
 
-  return r_name_sym;
+    JSValueConst ruby_data[2];
+    ruby_data[0] = JS_NewString(data->context, StringValueCStr(r_key_str));
+    ruby_data[1] = JS_NewBool(data->context, RTEST(rb_funcall(r_flags, rb_intern("include?"), 1, ID2SYM(rb_intern("async")))));
+
+    // Resolve the parent object to attach the function to.
+    // For a single-element array, parent is the global object.
+    // For multi-element arrays, traverse path[0..n-2] using JS_Eval for the first
+    // segment (so lexical const/let bindings are resolved, not just global properties)
+    // and JS_GetPropertyStr for subsequent segments.
+    JSValue j_parent;
+    if (path_len == 1)
+    {
+      j_parent = JS_GetGlobalObject(data->context);
+    }
+    else
+    {
+      VALUE r_first_str = rb_funcall(RARRAY_AREF(r_name, 0), rb_intern("to_s"), 0);
+      const char *first_seg = StringValueCStr(r_first_str);
+      j_parent = JS_Eval(data->context, first_seg, strlen(first_seg), "<vm>", JS_EVAL_TYPE_GLOBAL);
+
+      if (JS_IsException(j_parent) || !JS_IsObject(j_parent))
+      {
+        JS_FreeValue(data->context, j_parent);
+        JS_FreeValue(data->context, ruby_data[0]);
+        JS_FreeValue(data->context, ruby_data[1]);
+        rb_raise(rb_eArgError, "cannot define function: '%s' is not an object", first_seg);
+      }
+
+      for (long i = 1; i < path_len - 1; i++)
+      {
+        VALUE r_seg_str = rb_funcall(RARRAY_AREF(r_name, i), rb_intern("to_s"), 0);
+        JSValue j_next = JS_GetPropertyStr(data->context, j_parent, StringValueCStr(r_seg_str));
+        JS_FreeValue(data->context, j_parent);
+
+        if (JS_IsException(j_next) || !JS_IsObject(j_next))
+        {
+          JS_FreeValue(data->context, j_next);
+          JS_FreeValue(data->context, ruby_data[0]);
+          JS_FreeValue(data->context, ruby_data[1]);
+          rb_raise(rb_eArgError, "cannot define function: '%s' is not an object", StringValueCStr(r_seg_str));
+        }
+        j_parent = j_next;
+      }
+    }
+
+    JS_SetPropertyStr(
+        data->context, j_parent, funcName,
+        JS_NewCFunctionData(data->context, js_quickjsrb_call_global, 1, 0, 2, ruby_data));
+    JS_FreeValue(data->context, j_parent);
+    JS_FreeValue(data->context, ruby_data[0]);
+    JS_FreeValue(data->context, ruby_data[1]);
+
+    VALUE r_result = rb_ary_new();
+    for (long i = 0; i < path_len; i++)
+      rb_ary_push(r_result, rb_funcall(RARRAY_AREF(r_name, i), rb_intern("to_sym"), 0));
+    return r_result;
+  }
+  else if (SYMBOL_P(r_name) || RB_TYPE_P(r_name, T_STRING))
+  {
+    VALUE r_name_sym = rb_funcall(r_name, rb_intern("to_sym"), 0);
+
+    rb_hash_aset(data->defined_functions, r_name_sym, r_block);
+    VALUE r_name_str = rb_funcall(r_name, rb_intern("to_s"), 0);
+    char *funcName = StringValueCStr(r_name_str);
+
+    JSValueConst ruby_data[2];
+    ruby_data[0] = JS_NewString(data->context, funcName);
+    ruby_data[1] = JS_NewBool(data->context, RTEST(rb_funcall(r_flags, rb_intern("include?"), 1, ID2SYM(rb_intern("async")))));
+
+    JSValue j_global = JS_GetGlobalObject(data->context);
+    JS_SetPropertyStr(
+        data->context, j_global, funcName,
+        JS_NewCFunctionData(data->context, js_quickjsrb_call_global, 1, 0, 2, ruby_data));
+    JS_FreeValue(data->context, j_global);
+    JS_FreeValue(data->context, ruby_data[0]);
+    JS_FreeValue(data->context, ruby_data[1]);
+
+    return r_name_sym;
+  }
+  else
+  {
+    rb_raise(rb_eTypeError, "function's name should be a Symbol or a String");
+  }
 }
 
 static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
