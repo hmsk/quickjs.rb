@@ -26,6 +26,9 @@ const int num_native_errors = sizeof(native_errors) / sizeof(native_errors[0]);
 
 static int dispatch_log(VMData *data, const char *severity, VALUE r_row);
 
+JSValue to_js_value(JSContext *ctx, VALUE r_value);
+VALUE to_rb_value(JSContext *ctx, JSValue j_val);
+
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
   JSValue j_error = JS_NewError(ctx); // may wanna have custom error class to determine in JS' end
@@ -43,6 +46,20 @@ JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
   JS_SetPropertyStr(ctx, j_error, "message", JS_NewString(ctx, errorMessage));
 
   return j_error;
+}
+
+typedef struct
+{
+  JSContext *ctx;
+  JSValue j_obj;
+} RbHashToJsArg;
+
+static int rb_hash_entry_to_js(VALUE r_key, VALUE r_val, VALUE extra)
+{
+  RbHashToJsArg *arg = (RbHashToJsArg *)extra;
+  VALUE r_key_str = rb_funcall(r_key, rb_intern("to_s"), 0);
+  JS_SetPropertyStr(arg->ctx, arg->j_obj, StringValueCStr(r_key_str), to_js_value(arg->ctx, r_val));
+  return ST_CONTINUE;
 }
 
 JSValue to_js_value(JSContext *ctx, VALUE r_value)
@@ -74,6 +91,15 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   }
   case T_SYMBOL:
   {
+    if (r_value == QUICKJSRB_SYM(undefinedId))
+      return JS_UNDEFINED;
+    if (r_value == QUICKJSRB_SYM(nanId))
+    {
+      JSValue j_global = JS_GetGlobalObject(ctx);
+      JSValue j_nan = JS_GetPropertyStr(ctx, j_global, "NaN");
+      JS_FreeValue(ctx, j_global);
+      return j_nan;
+    }
     VALUE r_str = rb_funcall(r_value, rb_intern("to_s"), 0);
     char *str = StringValueCStr(r_str);
 
@@ -83,14 +109,22 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
     return JS_TRUE;
   case T_FALSE:
     return JS_FALSE;
-  case T_HASH:
   case T_ARRAY:
   {
-    VALUE r_json_str = rb_funcall(r_value, rb_intern("to_json"), 0);
-    char *str = StringValueCStr(r_json_str);
-    JSValue j_parsed = JS_ParseJSON(ctx, str, strlen(str), "<quickjsrb.c>");
-
-    return j_parsed;
+    int len = RARRAY_LEN(r_value);
+    JSValue j_arr = JS_NewArray(ctx);
+    for (int i = 0; i < len; i++)
+    {
+      JS_SetPropertyUint32(ctx, j_arr, (uint32_t)i, to_js_value(ctx, RARRAY_AREF(r_value, i)));
+    }
+    return j_arr;
+  }
+  case T_HASH:
+  {
+    JSValue j_obj = JS_NewObject(ctx);
+    RbHashToJsArg arg = {ctx, j_obj};
+    rb_hash_foreach(r_value, rb_hash_entry_to_js, (VALUE)&arg);
+    return j_obj;
   }
   default:
   {
@@ -155,6 +189,59 @@ VALUE to_r_json(JSContext *ctx, JSValue j_val)
   JS_FreeValue(ctx, j_stringified);
 
   return r_str;
+}
+
+static int js_is_plain_object(JSContext *ctx, JSValue j_val)
+{
+  JSValue j_proto = JS_GetPrototype(ctx, j_val);
+  if (JS_IsNull(j_proto))
+    return 1; // Object.create(null)
+  JSValue j_global = JS_GetGlobalObject(ctx);
+  JSValue j_Object = JS_GetPropertyStr(ctx, j_global, "Object");
+  JSValue j_Object_proto = JS_GetPropertyStr(ctx, j_Object, "prototype");
+  int result = JS_StrictEq(ctx, j_proto, j_Object_proto);
+  JS_FreeValue(ctx, j_proto);
+  JS_FreeValue(ctx, j_global);
+  JS_FreeValue(ctx, j_Object);
+  JS_FreeValue(ctx, j_Object_proto);
+  return result;
+}
+
+static VALUE js_array_to_rb(JSContext *ctx, JSValue j_val)
+{
+  JSValue j_length = JS_GetPropertyStr(ctx, j_val, "length");
+  uint32_t length = 0;
+  JS_ToUint32(ctx, &length, j_length);
+  JS_FreeValue(ctx, j_length);
+
+  VALUE r_array = rb_ary_new_capa(length);
+  for (uint32_t i = 0; i < length; i++)
+  {
+    JSValue j_elem = JS_GetPropertyUint32(ctx, j_val, i);
+    rb_ary_push(r_array, to_rb_value(ctx, j_elem));
+    JS_FreeValue(ctx, j_elem);
+  }
+  return r_array;
+}
+
+static VALUE js_plain_object_to_rb(JSContext *ctx, JSValue j_val)
+{
+  JSPropertyEnum *ptab;
+  uint32_t plen;
+  if (JS_GetOwnPropertyNames(ctx, &ptab, &plen, j_val, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0)
+    return rb_hash_new();
+
+  VALUE r_hash = rb_hash_new();
+  for (uint32_t i = 0; i < plen; i++)
+  {
+    const char *key = JS_AtomToCString(ctx, ptab[i].atom);
+    JSValue j_prop = JS_GetProperty(ctx, j_val, ptab[i].atom);
+    rb_hash_aset(r_hash, rb_str_new2(key), to_rb_value(ctx, j_prop));
+    JS_FreeCString(ctx, key);
+    JS_FreeValue(ctx, j_prop);
+  }
+  JS_FreePropertyEnum(ctx, ptab, plen);
+  return r_hash;
 }
 
 VALUE to_rb_value(JSContext *ctx, JSValue j_val)
@@ -239,6 +326,13 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
         return r_maybe_file;
     }
 
+    if (JS_IsArray(ctx, j_val))
+      return js_array_to_rb(ctx, j_val);
+
+    if (js_is_plain_object(ctx, j_val))
+      return js_plain_object_to_rb(ctx, j_val);
+
+    // Fallback: non-plain objects (Date, RegExp, Map, class instances, functions, etc.)
     VALUE r_str = to_r_json(ctx, j_val);
 
     if (rb_funcall(r_str, rb_intern("=="), 1, rb_str_new2("undefined")))

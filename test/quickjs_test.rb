@@ -68,6 +68,22 @@ describe Quickjs do
       assert_code("[1, 2, { 'third': 'sad' }]", [1, 2, { 'third' => 'sad' }])
     end
 
+    it "undefined nested in plain object or array is preserved" do
+      assert_code("({ a: undefined, b: 1 })", { 'a' => Quickjs::Value::UNDEFINED, 'b' => 1 })
+      assert_code("({ a: { b: undefined } })", { 'a' => { 'b' => Quickjs::Value::UNDEFINED } })
+      assert_code("[1, undefined, 3]", [1, Quickjs::Value::UNDEFINED, 3])
+    end
+
+    it "NaN nested in plain object or array is preserved" do
+      assert_code("({ a: NaN })", { 'a' => Quickjs::Value::NAN })
+      assert_code("[NaN, 1]", [Quickjs::Value::NAN, 1])
+    end
+
+    it "non-plain objects fall back to JSON conversion" do
+      assert_code("new Date('2024-01-01T00:00:00.000Z').toISOString()", "2024-01-01T00:00:00.000Z")
+      assert_code("() => 'hi'", Quickjs::Value::UNDEFINED)
+    end
+
     it "void (undefined per JSON.stringify) becomes a specific constant" do
       assert_code("() => 'hi'", Quickjs::Value::UNDEFINED)
     end
@@ -323,9 +339,20 @@ describe Quickjs::VM do
       _(@vm.eval_code("get_array()")).must_equal [1, '2']
     end
 
+    it "returns array with undefined preserved" do
+      @vm.define_function("get_array") { [1, Quickjs::Value::UNDEFINED, '2'] }
+      _(@vm.eval_code("get_array()[1] === undefined")).must_equal true
+    end
+
     it "returns hash as is (ish) if serializable" do
       @vm.define_function("get_obj") { { a: 1 } }
       _(@vm.eval_code("get_obj()")).must_equal({ 'a' => 1 })
+    end
+
+    it "returns hash with undefined value preserved" do
+      @vm.define_function("get_obj") { { a: Quickjs::Value::UNDEFINED, b: 1 } }
+      _(@vm.eval_code("get_obj().a === undefined")).must_equal true
+      _(@vm.eval_code("get_obj().b")).must_equal 1
     end
 
     it "returns original exception" do
