@@ -43,6 +43,14 @@ module Quickjs
     end
   end
 
+  class Function
+    def initialize: (String source) -> void
+
+    def source: () -> String
+
+    def call: (*untyped args, ?on: VM | Hash[Symbol, untyped] | nil) -> untyped
+  end
+
   class RuntimeError < ::RuntimeError
     def initialize: (String message, String? js_name) -> void
 

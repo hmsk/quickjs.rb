@@ -81,11 +81,11 @@ describe Quickjs do
 
     it "non-plain objects fall back to JSON conversion" do
       assert_code("new Date('2024-01-01T00:00:00.000Z').toISOString()", "2024-01-01T00:00:00.000Z")
-      assert_code("() => 'hi'", Quickjs::Value::UNDEFINED)
     end
 
-    it "void (undefined per JSON.stringify) becomes a specific constant" do
-      assert_code("() => 'hi'", Quickjs::Value::UNDEFINED)
+    it "function becomes Quickjs::Function" do
+      result = ::Quickjs.eval_code("() => 'hi'")
+      _(result).must_be_instance_of Quickjs::Function
     end
   end
 
@@ -579,6 +579,84 @@ describe Quickjs::VM do
       _(@vm.call('a.b["c-d"]')).must_equal 'mixed'
     end
 
+  end
+
+  describe "Function" do
+    before do
+      @vm = Quickjs::VM.new
+    end
+
+    it "JS function passed to Ruby becomes a Quickjs::Function" do
+      received = nil
+      @vm.define_function("capture") { |fn| received = fn }
+      @vm.eval_code("capture((a, b) => a + b)")
+      _(received).must_be_instance_of Quickjs::Function
+    end
+
+    it "exposes the JS source via source" do
+      received = nil
+      @vm.define_function("capture") { |fn| received = fn }
+      @vm.eval_code("capture((a, b) => a + b)")
+      _(received.source).must_equal "(a, b) => a + b"
+    end
+
+    it "call with no args runs on a fresh VM" do
+      received = nil
+      @vm.define_function("capture") { |fn| received = fn }
+      @vm.eval_code("capture(() => 42)")
+      _(received.call).must_equal 42
+    end
+
+    it "call passes args to the function" do
+      received = nil
+      @vm.define_function("capture") { |fn| received = fn }
+      @vm.eval_code("capture((a, b) => a + b)")
+      _(received.call(3, 4)).must_equal 7
+    end
+
+    it "call with on: vm runs on the given VM" do
+      received = nil
+      @vm.define_function("capture") { |fn| received = fn }
+      @vm.eval_code("capture((x) => x * 2)")
+      other_vm = Quickjs::VM.new
+      _(received.call(5, on: other_vm)).must_equal 10
+    end
+
+    it "call with on: Hash passes VM options" do
+      received = nil
+      @vm.define_function("capture") { |fn| received = fn }
+      @vm.eval_code("capture(() => !!std)")
+      _(received.call(on: { features: [Quickjs::MODULE_STD] })).must_equal true
+    end
+
+    it "is independent of the original VM" do
+      received = nil
+      @vm.define_function("capture") { |fn| received = fn }
+      @vm.eval_code("capture((x) => x + 1)")
+      @vm = nil
+      _(received.call(10)).must_equal 11
+    end
+
+    it "named function is callable" do
+      received = nil
+      @vm.define_function("capture") { |fn| received = fn }
+      @vm.eval_code("capture(function add(a, b) { return a + b; })")
+      _(received.call(2, 3)).must_equal 5
+    end
+
+    it "passes complex args" do
+      received = nil
+      @vm.define_function("capture") { |fn| received = fn }
+      @vm.eval_code("capture((obj) => obj.x + obj.y)")
+      _(received.call({ x: 1, y: 2 })).must_equal 3
+    end
+
+    it "raises ArgumentError for invalid on: argument" do
+      received = nil
+      @vm.define_function("capture") { |fn| received = fn }
+      @vm.eval_code("capture(() => 1)")
+      _ { received.call(on: "bad") }.must_raise ArgumentError
+    end
   end
 
   describe "Import" do
