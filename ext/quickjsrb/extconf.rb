@@ -3,6 +3,7 @@
 require 'mkmf'
 
 $VPATH << "$(srcdir)/quickjs"
+$INCFLAGS << " -I$(srcdir)/quickjs"
 
 $srcs = [
   'dtoa.c',
@@ -20,8 +21,6 @@ $srcs = [
   'quickjsrb_crypto.c',
   'quickjsrb_crypto_subtle.c',
 ]
-
-append_cflags('-I$(srcdir)/quickjs')
 
 append_cflags('-g')
 append_cflags('-O2')
