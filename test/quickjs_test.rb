@@ -309,9 +309,9 @@ describe Quickjs::VM do
       assert @vm.eval_code('sym()')
     end
 
-    it "function's name can't be others than a symbol nor a string" do
+    it "function's name can't be others than a symbol, string, or array" do
       err = _ {
-        @vm.define_function([:sym_in_ary]) { 'never reach' }
+        @vm.define_function(123) { 'never reach' }
       }.must_raise TypeError
       _(err.message).must_equal "function's name should be a Symbol or a String"
     end
@@ -413,6 +413,69 @@ describe Quickjs::VM do
     it "implemented as native code" do
       @vm.define_function("a_ruby") { "hi" }
       _(@vm.eval_code('a_ruby.toString()')).must_match(/native code/)
+    end
+
+    describe "nested via array path" do
+      it "defines a function on an existing object" do
+        @vm.eval_code("const myLib = {}")
+        @vm.define_function(["myLib", "hello"]) { |name| "Hello, #{name}!" }
+        _(@vm.eval_code("myLib.hello('world')")).must_equal "Hello, world!"
+      end
+
+      it "defines a function on a deeply nested object" do
+        @vm.eval_code("const a = { b: { c: {} } }")
+        @vm.define_function(["a", "b", "c", "fn"]) { |x| x * 2 }
+        _(@vm.eval_code("a.b.c.fn(21)")).must_equal 42
+      end
+
+      it "returns an array of symbols" do
+        @vm.eval_code("const ns = {}")
+        result = @vm.define_function(["ns", "fn"]) { true }
+        _(result).must_equal [:ns, :fn]
+      end
+
+      it "accepts symbols as path elements" do
+        @vm.eval_code("const obj = {}")
+        @vm.define_function([:obj, :greet]) { "hi" }
+        _(@vm.eval_code("obj.greet()")).must_equal "hi"
+      end
+
+      it "works with :async flag" do
+        @vm.eval_code("const lib = {}")
+        @vm.define_function(["lib", "fetch"], :async) { "data" }
+        _(@vm.eval_code("await lib.fetch().then(r => r + '!')")).must_equal "data!"
+      end
+
+      it "raises ArgumentError when parent does not exist" do
+        err = _ { @vm.define_function(["nonexistent", "fn"]) { } }.must_raise ArgumentError
+        _(err.message).must_include "nonexistent"
+      end
+
+      it "raises ArgumentError when intermediate segment is not an object" do
+        @vm.eval_code("const x = { y: 42 }")
+        err = _ { @vm.define_function(["x", "y", "fn"]) { } }.must_raise ArgumentError
+        _(err.message).must_include "y"
+      end
+
+      it "single-element array registers on the global object" do
+        @vm.define_function(["lone"]) { 42 }
+        _(@vm.eval_code("lone()")).must_equal 42
+      end
+
+      it "single-element array returns a one-element array of symbols" do
+        result = @vm.define_function(["lone"]) { }
+        _(result).must_equal [:lone]
+      end
+
+      it "raises ArgumentError for an empty array" do
+        err = _ { @vm.define_function([]) { } }.must_raise ArgumentError
+        _(err.message).must_include "empty"
+      end
+
+      it "raises TypeError when an array element is not a String or Symbol" do
+        err = _ { @vm.define_function(["obj", 123]) { } }.must_raise TypeError
+        _(err.message).must_include "Symbol or a String"
+      end
     end
   end
 
