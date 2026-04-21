@@ -287,6 +287,18 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
       return Qnil;
     }
 
+    if (JS_IsFunction(ctx, j_val))
+    {
+      JSValue j_toStringFunc = JS_GetPropertyStr(ctx, j_val, "toString");
+      JSValue j_source = JS_Call(ctx, j_toStringFunc, j_val, 0, NULL);
+      JS_FreeValue(ctx, j_toStringFunc);
+      const char *source = JS_ToCString(ctx, j_source);
+      JS_FreeValue(ctx, j_source);
+      VALUE r_source = rb_str_new2(source);
+      JS_FreeCString(ctx, source);
+      return rb_funcall(rb_path2class("Quickjs::Function"), rb_intern("new"), 1, r_source);
+    }
+
     if (JS_IsError(ctx, j_val))
     {
       VALUE r_maybe_ruby_error = find_ruby_error(ctx, j_val);
