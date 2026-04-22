@@ -133,6 +133,23 @@ end
 vm.eval_code("greetingTo('Rick')") #=> 'Hello! Rick'
 ```
 
+Pass an `Array` as the name to register the function on an existing JS object (the last element is the method name; preceding elements are the object path):
+
+```rb
+vm = Quickjs::VM.new
+vm.eval_code("const myLib = {}")
+vm.define_function(["myLib", "greetingTo"]) { |name| "Hello, #{name}!" }
+
+vm.eval_code("myLib.greetingTo('Rick')") #=> 'Hello! Rick'
+
+# Deeply nested
+vm.eval_code("const a = { b: { c: {} } }")
+vm.define_function(["a", "b", "c", "double"]) { |x| x * 2 }
+vm.eval_code("a.b.c.double(21)") #=> 42
+```
+
+`define_function` returns the registered name as a `Symbol` (or an `Array` of `Symbol`s for array paths).
+
 A Ruby exception raised inside the block is catchable in JS as an `Error`, and propagates back to Ruby as the original exception type if uncaught in JS.
 
 ```rb
@@ -177,8 +194,9 @@ vm.eval_code('console.log("hello", 42)')
 | `string` | ↔ | `String` | |
 | `true` / `false` | ↔ | `true` / `false` | |
 | `null` | ↔ | `nil` | |
-| `Array` | ↔ | `Array` | via JSON |
-| `Object` | ↔ | `Hash` | via JSON |
+| `Array` | ↔ | `Array` | recursively converted |
+| `Object` | ↔ | `Hash` | recursively converted; keys are always `String` |
+| `function` | → | `Quickjs::Function` — `.source`, `.call(*args, on:)` | |
 | `undefined` | → | `Quickjs::Value::UNDEFINED` | |
 | `NaN` | → | `Quickjs::Value::NAN` | |
 | `Blob` | → | `Quickjs::Blob` — `.size`, `.type`, `.content` | requires `POLYFILL_FILE` |
