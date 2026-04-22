@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    quickjs (0.14.0)
+    quickjs (0.15.0)
       json
       securerandom
 
