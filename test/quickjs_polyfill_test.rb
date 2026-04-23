@@ -93,6 +93,11 @@ describe "PolyfillBlob" do
     _ { ::Quickjs.eval_code("new Blob()") }.must_raise Quickjs::ReferenceError
   end
 
+  it "implicitly enables btoa and atob" do
+    _(::Quickjs.eval_code("btoa('hello')", @options)).must_equal 'aGVsbG8='
+    _(::Quickjs.eval_code("atob('aGVsbG8=')", @options)).must_equal 'hello'
+  end
+
   describe "constructor" do
     it "creates an empty blob with no arguments" do
       _(::Quickjs.eval_code("new Blob().size", @options)).must_equal 0
@@ -742,6 +747,382 @@ describe "PolyfillCrypto" do
     it "returns different values on each call" do
       code = "crypto.randomUUID() === crypto.randomUUID()"
       _(::Quickjs.eval_code(code, @options)).must_equal false
+    end
+  end
+end
+
+describe "PolyfillFileReader" do
+  before do
+    @options = { features: [::Quickjs::POLYFILL_FILE] }
+  end
+
+  it "is not available without the polyfill" do
+    _ { ::Quickjs.eval_code("new FileReader()") }.must_raise Quickjs::ReferenceError
+  end
+
+  describe "initial state" do
+    it "starts with EMPTY readyState" do
+      _(::Quickjs.eval_code("new FileReader().readyState", @options)).must_equal 0
+    end
+
+    it "starts with null result" do
+      assert_nil ::Quickjs.eval_code("new FileReader().result", @options)
+    end
+
+    it "starts with null error" do
+      assert_nil ::Quickjs.eval_code("new FileReader().error", @options)
+    end
+
+    it "exposes state constants" do
+      code = <<~JS
+        const r = new FileReader();
+        [FileReader.EMPTY, FileReader.LOADING, FileReader.DONE, r.EMPTY, r.LOADING, r.DONE].join(',')
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal '0,1,2,0,1,2'
+    end
+  end
+
+  describe "readAsText" do
+    it "reads blob content as text" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsText(new Blob(['hello world']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'hello world'
+    end
+
+    it "reads File content as text" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsText(new File(['file content'], 'test.txt'));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'file content'
+    end
+
+    it "handles multibyte UTF-8" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsText(new Blob(['日本語']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal '日本語'
+    end
+
+    it "sets readyState to DONE after reading" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.readyState);
+          reader.readAsText(new Blob(['test']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 2
+    end
+
+    it "sets readyState to LOADING synchronously" do
+      code = <<~JS
+        const reader = new FileReader();
+        reader.readAsText(new Blob(['test']));
+        reader.readyState
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 1
+    end
+  end
+
+  describe "events" do
+    it "fires loadstart, progress, load, loadend in order" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          const events = [];
+          reader.onloadstart = () => events.push('loadstart');
+          reader.onprogress = () => events.push('progress');
+          reader.onload = () => events.push('load');
+          reader.onloadend = () => { events.push('loadend'); resolve(events.join(',')); };
+          reader.readAsText(new Blob(['test']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'loadstart,progress,load,loadend'
+    end
+
+    it "supports addEventListener" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.addEventListener('load', () => resolve(reader.result));
+          reader.readAsText(new Blob(['via addEventListener']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'via addEventListener'
+    end
+
+    it "supports removeEventListener" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          const removed = () => resolve('should not fire');
+          reader.addEventListener('load', removed);
+          reader.removeEventListener('load', removed);
+          reader.onload = () => resolve('correct');
+          reader.readAsText(new Blob(['test']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'correct'
+    end
+
+    it "provides event.target pointing to the reader" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = (e) => resolve(e.target === reader);
+          reader.readAsText(new Blob(['test']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal true
+    end
+  end
+
+  describe "readAsArrayBuffer" do
+    it "reads blob content as ArrayBuffer" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const arr = new Uint8Array(reader.result);
+            resolve([arr[0], arr[1]].join(','));
+          };
+          reader.readAsArrayBuffer(new Blob(['AB']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal '65,66'
+    end
+
+    it "returns ArrayBuffer with correct byteLength" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result.byteLength);
+          reader.readAsArrayBuffer(new Blob(['hello']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 5
+    end
+  end
+
+  describe "readAsDataURL" do
+    it "reads blob as data URL with type" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsDataURL(new Blob(['hello'], { type: 'text/plain' }));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'data:text/plain;base64,aGVsbG8='
+    end
+
+    it "uses application/octet-stream for blobs without type" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result.startsWith('data:application/octet-stream;base64,'));
+          reader.readAsDataURL(new Blob(['test']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal true
+    end
+
+    it "encodes binary data correctly" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsDataURL(new Blob([new Uint8Array([0, 1, 2, 255])], { type: 'application/octet-stream' }));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'data:application/octet-stream;base64,AAEC/w=='
+    end
+
+    it "encodes empty blob" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsDataURL(new Blob([], { type: 'text/plain' }));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'data:text/plain;base64,'
+    end
+  end
+
+  describe "readAsBinaryString" do
+    it "reads blob as binary string" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.readAsBinaryString(new Blob(['AB']));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'AB'
+    end
+
+    it "returns raw bytes for binary data" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const codes = [];
+            for (let i = 0; i < reader.result.length; i++) {
+              codes.push(reader.result.charCodeAt(i));
+            }
+            resolve(codes.join(','));
+          };
+          reader.readAsBinaryString(new Blob([new Uint8Array([0, 127, 128, 255])]));
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal '0,127,128,255'
+    end
+  end
+
+  describe "error handling" do
+    it "throws TypeError for non-Blob argument" do
+      code = <<~JS
+        const reader = new FileReader();
+        reader.readAsText('not a blob');
+      JS
+      _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::TypeError
+    end
+
+    it "throws InvalidStateError when already loading" do
+      code = <<~JS
+        const reader = new FileReader();
+        reader.readAsText(new Blob(['test']));
+        reader.readAsText(new Blob(['test2']));
+      JS
+      _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::RuntimeError
+    end
+  end
+
+  describe "abort" do
+    it "fires abort and loadend events" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          const events = [];
+          reader.onabort = () => events.push('abort');
+          reader.onloadend = () => { events.push('loadend'); resolve(events.join(',')); };
+          reader.readAsText(new Blob(['test']));
+          reader.abort();
+        })
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'abort,loadend'
+    end
+
+    it "sets result to null after abort" do
+      code = <<~JS
+        await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result);
+          reader.readAsText(new Blob(['test']));
+          reader.abort();
+        })
+      JS
+      assert_nil ::Quickjs.eval_code(code, @options)
+    end
+  end
+
+  describe "toString and toStringTag" do
+    it "has correct toString" do
+      _(::Quickjs.eval_code("new FileReader().toString()", @options)).must_equal '[object FileReader]'
+    end
+
+    it "has correct toStringTag" do
+      _(::Quickjs.eval_code("Object.prototype.toString.call(new FileReader())", @options)).must_equal '[object FileReader]'
+    end
+  end
+end
+
+describe "PolyfillHtmlBase64" do
+  before do
+    @options = { features: [::Quickjs::POLYFILL_HTML_BASE64] }
+  end
+
+  it "is not available without the polyfill" do
+    _ { ::Quickjs.eval_code("btoa('hello')") }.must_raise Quickjs::ReferenceError
+    _ { ::Quickjs.eval_code("atob('aGVsbG8=')") }.must_raise Quickjs::ReferenceError
+  end
+
+  describe "btoa" do
+    it "encodes ASCII string" do
+      _(::Quickjs.eval_code("btoa('hello')", @options)).must_equal 'aGVsbG8='
+    end
+
+    it "encodes empty string" do
+      _(::Quickjs.eval_code("btoa('')", @options)).must_equal ''
+    end
+
+    it "encodes string with padding" do
+      _(::Quickjs.eval_code("btoa('a')", @options)).must_equal 'YQ=='
+      _(::Quickjs.eval_code("btoa('ab')", @options)).must_equal 'YWI='
+      _(::Quickjs.eval_code("btoa('abc')", @options)).must_equal 'YWJj'
+    end
+
+    it "encodes Latin1 characters" do
+      _(::Quickjs.eval_code("btoa('\\xFF\\xFE')", @options)).must_equal '//4='
+    end
+
+    it "throws on multi-byte characters" do
+      error = _ { ::Quickjs.eval_code("btoa('こんにちは')", @options) }.must_raise Quickjs::RuntimeError
+      _(error.message).must_include 'Latin1'
+    end
+
+    it "throws with no arguments" do
+      _ { ::Quickjs.eval_code("btoa()", @options) }.must_raise Quickjs::TypeError
+    end
+  end
+
+  describe "atob" do
+    it "decodes base64 string" do
+      _(::Quickjs.eval_code("atob('aGVsbG8=')", @options)).must_equal 'hello'
+    end
+
+    it "decodes empty string" do
+      _(::Quickjs.eval_code("atob('')", @options)).must_equal ''
+    end
+
+    it "decodes base64 without padding" do
+      _(::Quickjs.eval_code("atob('YWJj')", @options)).must_equal 'abc'
+    end
+
+    it "throws on invalid base64" do
+      _ { ::Quickjs.eval_code("atob('!')", @options) }.must_raise Quickjs::RuntimeError
+    end
+
+    it "throws with no arguments" do
+      _ { ::Quickjs.eval_code("atob()", @options) }.must_raise Quickjs::TypeError
+    end
+  end
+
+  describe "round-trip" do
+    it "round-trips ASCII strings" do
+      _(::Quickjs.eval_code("atob(btoa('Hello, World!'))", @options)).must_equal 'Hello, World!'
+    end
+
+    it "round-trips binary data" do
+      code = <<~JS
+        const binary = String.fromCharCode(0, 1, 2, 128, 255);
+        atob(btoa(binary)) === binary ? 'ok' : 'fail';
+      JS
+      _(::Quickjs.eval_code(code, @options)).must_equal 'ok'
     end
   end
 end
