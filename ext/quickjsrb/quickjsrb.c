@@ -57,8 +57,21 @@ typedef struct
 static int rb_hash_entry_to_js(VALUE r_key, VALUE r_val, VALUE extra)
 {
   RbHashToJsArg *arg = (RbHashToJsArg *)extra;
-  VALUE r_key_str = rb_funcall(r_key, rb_intern("to_s"), 0);
-  JS_SetPropertyStr(arg->ctx, arg->j_obj, StringValueCStr(r_key_str), to_js_value(arg->ctx, r_val));
+  const char *key_cstr;
+  if (SYMBOL_P(r_key))
+  {
+    key_cstr = rb_id2name(SYM2ID(r_key));
+  }
+  else if (RB_TYPE_P(r_key, T_STRING))
+  {
+    key_cstr = StringValueCStr(r_key);
+  }
+  else
+  {
+    VALUE r_key_str = rb_funcall(r_key, rb_intern("to_s"), 0);
+    key_cstr = StringValueCStr(r_key_str);
+  }
+  JS_SetPropertyStr(arg->ctx, arg->j_obj, key_cstr, to_js_value(arg->ctx, r_val));
   return ST_CONTINUE;
 }
 
@@ -69,26 +82,23 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   case T_NIL:
     return JS_NULL;
   case T_FIXNUM:
+    return JS_NewInt64(ctx, NUM2LL(r_value));
   case T_FLOAT:
+    return JS_NewFloat64(ctx, NUM2DBL(r_value));
+  case T_BIGNUM:
   {
     VALUE r_str = rb_funcall(r_value, rb_intern("to_s"), 0);
-    char *str = StringValueCStr(r_str);
+    JSValue j_str = JS_NewStringLen(ctx, RSTRING_PTR(r_str), RSTRING_LEN(r_str));
     JSValue j_global = JS_GetGlobalObject(ctx);
     JSValue j_numberClass = JS_GetPropertyStr(ctx, j_global, "Number");
-    JSValue j_str = JS_NewString(ctx, str);
-    JSValue j_stringified = JS_Call(ctx, j_numberClass, JS_UNDEFINED, 1, (JSValueConst *)&j_str);
-    JS_FreeValue(ctx, j_global);
-    JS_FreeValue(ctx, j_numberClass);
+    JSValue j_num = JS_Call(ctx, j_numberClass, JS_UNDEFINED, 1, (JSValueConst *)&j_str);
     JS_FreeValue(ctx, j_str);
-
-    return j_stringified;
+    JS_FreeValue(ctx, j_numberClass);
+    JS_FreeValue(ctx, j_global);
+    return j_num;
   }
   case T_STRING:
-  {
-    char *str = StringValueCStr(r_value);
-
-    return JS_NewString(ctx, str);
-  }
+    return JS_NewStringLen(ctx, RSTRING_PTR(r_value), RSTRING_LEN(r_value));
   case T_SYMBOL:
   {
     if (r_value == QUICKJSRB_SYM(undefinedId))
@@ -100,10 +110,8 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
       JS_FreeValue(ctx, j_global);
       return j_nan;
     }
-    VALUE r_str = rb_funcall(r_value, rb_intern("to_s"), 0);
-    char *str = StringValueCStr(r_str);
-
-    return JS_NewString(ctx, str);
+    const char *name = rb_id2name(SYM2ID(r_value));
+    return JS_NewString(ctx, name);
   }
   case T_TRUE:
     return JS_TRUE;
@@ -266,16 +274,13 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
   }
   case JS_TAG_STRING:
   {
-    int couldntParse;
-    VALUE r_result = rb_protect(r_try_json_parse, to_r_json(ctx, j_val), &couldntParse);
-    if (couldntParse)
-    {
+    size_t len;
+    const char *str = JS_ToCStringLen(ctx, &len, j_val);
+    if (str == NULL)
       return Qnil;
-    }
-    else
-    {
-      return r_result;
-    }
+    VALUE r_str = rb_utf8_str_new(str, (long)len);
+    JS_FreeCString(ctx, str);
+    return r_str;
   }
   case JS_TAG_OBJECT:
   {

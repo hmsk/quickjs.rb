@@ -19,7 +19,7 @@ GEM
     rbs (3.10.3)
       logger
       tsort
-    securerandom (0.3.1)
+    securerandom (0.4.1)
     tsort (0.2.0)
 
 PLATFORMS
