@@ -83,6 +83,34 @@ describe Quickjs do
       assert_code("new Date('2024-01-01T00:00:00.000Z').toISOString()", "2024-01-01T00:00:00.000Z")
     end
 
+    it "Date object becomes its ISO string via toJSON" do
+      assert_code("new Date('2024-01-01T00:00:00.000Z')", "2024-01-01T00:00:00.000Z")
+    end
+
+    it "object with toJSON honours its custom representation" do
+      assert_code(<<~JS, 1.5)
+        class Money {
+          constructor(cents) { this._cents = cents }
+          toJSON() { return this._cents / 100 }
+        }
+        new Money(150);
+      JS
+    end
+
+    it "class instance without toJSON preserves undefined own properties" do
+      assert_code(<<~JS, {'a' => 1, 'b' => Quickjs::Value::UNDEFINED})
+        class X {
+          constructor() { this.a = 1; this.b = undefined }
+        }
+        new X();
+      JS
+    end
+
+    it "Map and RegExp without enumerable own properties become {}" do
+      assert_code("new Map([['a', 1]])", {})
+      assert_code("/abc/g", {})
+    end
+
     it "function becomes Quickjs::Function" do
       result = ::Quickjs.eval_code("() => 'hi'")
       _(result).must_be_instance_of Quickjs::Function
