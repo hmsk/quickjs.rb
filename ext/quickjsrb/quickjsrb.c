@@ -29,6 +29,9 @@ static int dispatch_log(VMData *data, const char *severity, VALUE r_row);
 JSValue to_js_value(JSContext *ctx, VALUE r_value);
 VALUE to_rb_value(JSContext *ctx, JSValue j_val);
 static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, VALUE r_visited);
+static VALUE vm_m_memoryUsage(VALUE r_self);
+static VALUE vm_m_runGC(VALUE r_self);
+static VALUE vm_m_oomPoisoned(VALUE r_self);
 
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
@@ -448,6 +451,14 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, VALUE r_visited)
       else if (strcmp(errorClassName, "Quickjs::InterruptedError") == 0)
       {
         r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR);
+      }
+      else if (strcmp(errorClassName, "InternalError") == 0 && strstr(errorClassMessage, "out of memory") != NULL)
+      {
+        // Once OOM has fired, the QuickJS heap is in a state where another
+        // throw inside the parser-error path can corrupt the shape table and
+        // segfault. Mark the VM so further eval/call calls refuse cleanly.
+        data->oom_poisoned = true;
+        r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR);
       }
       else
       {
@@ -930,6 +941,15 @@ static VALUE to_rb_return_value(JSContext *ctx, JSValue j_val)
   return result;
 }
 
+static void check_oom_poisoned(VMData *data)
+{
+  if (data->oom_poisoned)
+  {
+    VALUE r_msg = rb_str_new2("VM is poisoned: a previous evaluation hit out-of-memory; further evaluation may segfault. Recreate the Quickjs::VM.");
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
+  }
+}
+
 // Validate that r_code is a String and resolve the :filename option (default "<code>")
 // from the keyword-args hash that rb_scan_args(... "1:") collects. Both eval_code and
 // compile share this argument shape.
@@ -959,6 +979,8 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
 {
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_oom_poisoned(data);
 
   VALUE r_code, r_opts;
   rb_scan_args(argc, argv, "1:", &r_code, &r_opts);
@@ -1187,6 +1209,8 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
 
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_oom_poisoned(data);
 
   JSValue j_this = JS_UNDEFINED;
   JSValue j_func;
@@ -1423,5 +1447,45 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "module_loader", vm_m_get_module_loader, 0);
   rb_define_method(r_class_vm, "module_loader=", vm_m_set_module_loader, 1);
   rb_define_method(r_class_vm, "on_log", vm_m_on_log, 0);
+  rb_define_method(r_class_vm, "memory_usage", vm_m_memoryUsage, 0);
+  rb_define_method(r_class_vm, "gc!", vm_m_runGC, 0);
+  rb_define_method(r_class_vm, "oom_poisoned?", vm_m_oomPoisoned, 0);
   r_define_log_class(r_class_vm);
+}
+
+static VALUE vm_m_memoryUsage(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+  JSMemoryUsage s;
+  JS_ComputeMemoryUsage(JS_GetRuntime(data->context), &s);
+  VALUE h = rb_hash_new();
+  rb_hash_aset(h, ID2SYM(rb_intern("malloc_size")), LL2NUM(s.malloc_size));
+  rb_hash_aset(h, ID2SYM(rb_intern("malloc_limit")), LL2NUM(s.malloc_limit));
+  rb_hash_aset(h, ID2SYM(rb_intern("memory_used_size")), LL2NUM(s.memory_used_size));
+  rb_hash_aset(h, ID2SYM(rb_intern("atom_count")), LL2NUM(s.atom_count));
+  rb_hash_aset(h, ID2SYM(rb_intern("str_count")), LL2NUM(s.str_count));
+  rb_hash_aset(h, ID2SYM(rb_intern("obj_count")), LL2NUM(s.obj_count));
+  rb_hash_aset(h, ID2SYM(rb_intern("prop_count")), LL2NUM(s.prop_count));
+  rb_hash_aset(h, ID2SYM(rb_intern("shape_count")), LL2NUM(s.shape_count));
+  rb_hash_aset(h, ID2SYM(rb_intern("js_func_count")), LL2NUM(s.js_func_count));
+  rb_hash_aset(h, ID2SYM(rb_intern("js_func_code_size")), LL2NUM(s.js_func_code_size));
+  rb_hash_aset(h, ID2SYM(rb_intern("c_func_count")), LL2NUM(s.c_func_count));
+  rb_hash_aset(h, ID2SYM(rb_intern("array_count")), LL2NUM(s.array_count));
+  return h;
+}
+
+static VALUE vm_m_runGC(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+  JS_RunGC(JS_GetRuntime(data->context));
+  return Qnil;
+}
+
+static VALUE vm_m_oomPoisoned(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+  return data->oom_poisoned ? Qtrue : Qfalse;
 }
