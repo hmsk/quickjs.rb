@@ -39,6 +39,12 @@ module Quickjs
 
     def on_log: () { (Log) -> void } -> nil
 
+    def memory_usage: () -> Hash[Symbol, Integer]
+
+    def gc!: () -> nil
+
+    def oom_poisoned?: () -> bool
+
     class Log
       attr_reader severity: Symbol
 
