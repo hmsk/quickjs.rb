@@ -187,12 +187,24 @@ VALUE to_r_json(JSContext *ctx, JSValue j_val)
 {
   JSValue j_stringified = JS_JSONStringify(ctx, j_val, JS_UNDEFINED, JS_UNDEFINED);
 
+  // JSON.stringify throws on circular structures (e.g. jQuery objects'
+  // prevObject chain). Clear the pending exception so it doesn't poison
+  // subsequent eval, and return nil so callers fall through to "couldn't
+  // parse" handling rather than crashing on rb_str_new2(NULL) below.
+  if (JS_IsException(j_stringified))
+  {
+    JS_FreeValue(ctx, j_stringified);
+    JSValue j_pending = JS_GetException(ctx);
+    JS_FreeValue(ctx, j_pending);
+    return Qnil;
+  }
+
   const char *msg = JS_ToCString(ctx, j_stringified);
+  JS_FreeValue(ctx, j_stringified);
+  if (msg == NULL)
+    return Qnil;
   VALUE r_str = rb_str_new2(msg);
   JS_FreeCString(ctx, msg);
-
-  JS_FreeValue(ctx, j_stringified);
-
   return r_str;
 }
 

@@ -115,6 +115,15 @@ describe Quickjs do
       assert_code("/abc/g", {})
     end
 
+    it "circular non-plain object doesn't blow up" do
+      # JSON.stringify throws on cycles; this used to surface as
+      # `ArgumentError: NULL pointer given` from rb_str_new2.
+      assert_code(<<~JS, nil)
+        const o = {}; o.self = o; o.__proto__ = Object.create({ tag: 1 }); o;
+      JS
+    end
+
+
     it "function becomes Quickjs::Function" do
       result = ::Quickjs.eval_code("() => 'hi'")
       _(result).must_be_instance_of Quickjs::Function
