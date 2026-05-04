@@ -482,16 +482,19 @@ static VALUE r_try_call_proc(VALUE r_try_args)
 
 static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, int _magic, JSValue *func_data)
 {
-  const char *funcName = JS_ToCString(ctx, func_data[0]);
+  // func_data[0] holds the Ruby Symbol ID for the defined function (stored by
+  // vm_m_defineGlobalFunction). Looking up by ID avoids a JS_ToCString +
+  // rb_intern round-trip on every call.
+  int64_t key_id;
+  JS_ToInt64(ctx, &key_id, func_data[0]);
 
   VMData *data = JS_GetContextOpaque(ctx);
-  VALUE r_proc = rb_hash_aref(data->defined_functions, ID2SYM(rb_intern(funcName)));
+  VALUE r_proc = rb_hash_aref(data->defined_functions, ID2SYM((ID)key_id));
   // Shouldn't happen
   if (r_proc == Qnil)
   {
-    return JS_ThrowReferenceError(ctx, "Proc `%s` is not defined", funcName); // TODO: Free funcnName
+    return JS_ThrowReferenceError(ctx, "Proc is not defined");
   }
-  JS_FreeCString(ctx, funcName);
 
   VALUE r_call_args = rb_ary_new();
   rb_ary_push(r_call_args, r_proc);
@@ -904,7 +907,7 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
     char *funcName = StringValueCStr(r_func_seg_str);
 
     JSValueConst ruby_data[2];
-    ruby_data[0] = JS_NewString(data->context, StringValueCStr(r_key_str));
+    ruby_data[0] = JS_NewInt64(data->context, (int64_t)SYM2ID(r_key_sym));
     ruby_data[1] = JS_NewBool(data->context, RTEST(rb_funcall(r_flags, rb_intern("include?"), 1, ID2SYM(rb_intern("async")))));
 
     // Resolve the parent object to attach the function to.
@@ -969,7 +972,7 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
     char *funcName = StringValueCStr(r_name_str);
 
     JSValueConst ruby_data[2];
-    ruby_data[0] = JS_NewString(data->context, funcName);
+    ruby_data[0] = JS_NewInt64(data->context, (int64_t)SYM2ID(r_name_sym));
     ruby_data[1] = JS_NewBool(data->context, RTEST(rb_funcall(r_flags, rb_intern("include?"), 1, ID2SYM(rb_intern("async")))));
 
     JSValue j_global = JS_GetGlobalObject(data->context);
