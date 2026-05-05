@@ -844,10 +844,13 @@ static VALUE to_rb_return_value(JSContext *ctx, JSValue j_val)
   return result;
 }
 
-static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
+static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
 {
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  VALUE r_code, r_opts;
+  rb_scan_args(argc, argv, "1:", &r_code, &r_opts);
 
   if (!RB_TYPE_P(r_code, T_STRING))
   {
@@ -855,11 +858,22 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
     rb_raise(rb_eTypeError, "JavaScript code must be a String, got %s", StringValueCStr(r_code_class));
   }
 
+  const char *filename = "<code>";
+  if (!NIL_P(r_opts))
+  {
+    VALUE r_filename = rb_hash_aref(r_opts, ID2SYM(rb_intern("filename")));
+    if (!NIL_P(r_filename))
+    {
+      Check_Type(r_filename, T_STRING);
+      filename = StringValueCStr(r_filename);
+    }
+  }
+
   clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
   JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
 
   StringValue(r_code);
-  JSValue j_codeResult = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), "<code>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
+  JSValue j_codeResult = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), filename, JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
   JSValue j_awaitedResult = js_std_await(data->context, j_codeResult); // This frees j_codeResult
   // JS_EVAL_FLAG_ASYNC wraps the result in {value, done} — extract the actual value
   // Free j_awaitedResult before to_rb_return_value because it may raise (longjmp), which would skip cleanup
@@ -1198,7 +1212,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   VALUE r_class_vm = rb_define_class_under(r_module_quickjs, "VM", rb_cObject);
   rb_define_alloc_func(r_class_vm, vm_alloc);
   rb_define_method(r_class_vm, "initialize", vm_m_initialize, -1);
-  rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, 1);
+  rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, -1);
   rb_define_method(r_class_vm, "call", vm_m_callGlobalFunction, -1);
   rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);

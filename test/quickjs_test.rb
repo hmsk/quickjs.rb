@@ -169,6 +169,30 @@ describe Quickjs do
     end
   end
 
+  describe "EvalFilename" do
+    it "uses '<code>' as the source name by default" do
+      stack = ::Quickjs.eval_code(<<~JS)
+        try { throw new Error('boom') } catch (e) { e.stack }
+      JS
+      _(stack).must_match(/<code>/)
+    end
+
+    it "carries filename: through to JS stack traces" do
+      stack = ::Quickjs.eval_code(<<~JS, filename: '/path/to/jquery.js')
+        try { throw new Error('boom') } catch (e) { e.stack }
+      JS
+      _(stack).must_match(%r{/path/to/jquery\.js})
+    end
+
+    it "Quickjs::VM#eval_code accepts filename: too" do
+      vm = Quickjs::VM.new
+      stack = vm.eval_code(<<~JS, filename: 'foo.js')
+        try { throw new Error('x') } catch (e) { e.stack }
+      JS
+      _(stack).must_match(/foo\.js/)
+    end
+  end
+
   it "std module can be enabled" do
     assert_code("typeof std === 'undefined'", true)
     _(::Quickjs.eval_code("!!std.urlGet", { features: [::Quickjs::MODULE_STD] })).must_equal true
