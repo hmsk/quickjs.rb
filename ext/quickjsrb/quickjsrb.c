@@ -468,6 +468,59 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
   }
 }
 
+struct module_loader_call_args
+{
+  VALUE proc;
+  VALUE r_module_name;
+};
+
+static VALUE r_module_loader_call(VALUE r_args_val)
+{
+  struct module_loader_call_args *args = (struct module_loader_call_args *)r_args_val;
+  return rb_funcall(args->proc, rb_intern("call"), 1, args->r_module_name);
+}
+
+static JSModuleDef *quickjsrb_module_loader(JSContext *ctx, const char *module_name, void *opaque, JSValueConst attributes)
+{
+  VMData *data = JS_GetContextOpaque(ctx);
+  if (NIL_P(data->module_loader))
+    return js_module_loader(ctx, module_name, opaque, attributes);
+
+  struct module_loader_call_args args = {data->module_loader, rb_str_new_cstr(module_name)};
+  int state;
+  VALUE r_source = rb_protect(r_module_loader_call, (VALUE)&args, &state);
+  if (state)
+  {
+    VALUE r_error = rb_errinfo();
+    rb_set_errinfo(Qnil);
+    JSValue j_error = j_error_from_ruby_error(ctx, r_error);
+    JS_Throw(ctx, j_error);
+    return NULL;
+  }
+
+  if (NIL_P(r_source) || r_source == Qfalse)
+  {
+    JS_ThrowReferenceError(ctx, "module loader returned no source for '%s'", module_name);
+    return NULL;
+  }
+
+  if (!RB_TYPE_P(r_source, T_STRING))
+  {
+    JS_ThrowTypeError(ctx, "module loader must return a String or nil, got %s", rb_obj_classname(r_source));
+    return NULL;
+  }
+
+  JSValue j_func = JS_Eval(ctx, RSTRING_PTR(r_source), RSTRING_LEN(r_source), module_name,
+                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  if (JS_IsException(j_func))
+    return NULL;
+
+  js_module_set_import_meta(ctx, j_func, FALSE, FALSE);
+  JSModuleDef *m = JS_VALUE_GET_PTR(j_func);
+  JS_FreeValue(ctx, j_func);
+  return m;
+}
+
 static VALUE r_try_call_proc(VALUE r_try_args)
 {
   return rb_funcall(
@@ -727,7 +780,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   JS_SetMemoryLimit(runtime, NUM2UINT(r_memory_limit));
   JS_SetMaxStackSize(runtime, NUM2UINT(r_max_stack_size));
 
-  JS_SetModuleLoaderFunc2(runtime, NULL, js_module_loader, js_module_check_attributes, NULL);
+  JS_SetModuleLoaderFunc2(runtime, NULL, quickjsrb_module_loader, js_module_check_attributes, NULL);
   js_std_init_handlers(runtime);
 
   JSValue j_global = JS_GetGlobalObject(data->context);
@@ -1124,6 +1177,25 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   return to_rb_return_value(data->context, js_std_await(data->context, j_result));
 }
 
+static VALUE vm_m_set_module_loader(VALUE r_self, VALUE r_loader)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  if (!NIL_P(r_loader) && !rb_obj_is_kind_of(r_loader, rb_cProc))
+    rb_raise(rb_eTypeError, "module_loader must be a Proc or nil");
+
+  data->module_loader = r_loader;
+  return r_loader;
+}
+
+static VALUE vm_m_get_module_loader(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+  return data->module_loader;
+}
+
 static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
 {
   VALUE r_import_string, r_opts;
@@ -1200,6 +1272,8 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "call", vm_m_callGlobalFunction, -1);
   rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
+  rb_define_method(r_class_vm, "module_loader", vm_m_get_module_loader, 0);
+  rb_define_method(r_class_vm, "module_loader=", vm_m_set_module_loader, 1);
   rb_define_method(r_class_vm, "on_log", vm_m_on_log, 0);
   r_define_log_class(r_class_vm);
 }

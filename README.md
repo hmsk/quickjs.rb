@@ -122,6 +122,24 @@ vm.import('DefaultExport', from: File.read('exports.esm.js'))
 vm.import('* as all', from: File.read('exports.esm.js'))
 ```
 
+#### `Quickjs::VM#module_loader=`: 🧩 Resolve `import` specifiers from Ruby
+
+By default, `import` specifiers that aren't already loaded fall through to QuickJS's filesystem loader. Set a `module_loader` Proc to resolve specifiers in-memory instead — useful when the source code lives in a database, an importmap, or a virtual filesystem.
+
+```rb
+vm = Quickjs::VM.new
+modules = {
+  'a' => "import { b } from 'b'; export const a = () => `a-${b()}`;",
+  'b' => "export const b = () => 'b-result';"
+}
+vm.module_loader = ->(name) { modules[name] }
+
+vm.import(['a'], from: "import { a } from 'a'; export { a };")
+vm.eval_code('a()') #=> 'a-b-result'
+```
+
+The Proc receives the (already normalized) module specifier and returns the module source as a `String`, or `nil` to signal "not found" (which raises `Quickjs::ReferenceError` on the JS side). Pass `nil` to clear a previously set loader.
+
 #### `Quickjs::VM#define_function`: 💎 Define a global function for JS by Ruby
 
 ```rb
