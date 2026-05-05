@@ -20,6 +20,7 @@ module Quickjs
   def eval_code(code, overwrite_opts = {})
     eval_opts = {}
     eval_opts[:filename] = overwrite_opts.delete(:filename) if overwrite_opts.key?(:filename)
+    eval_opts[:async] = overwrite_opts.delete(:async) if overwrite_opts.key?(:async)
     vm = Quickjs::VM.new(**overwrite_opts)
     res = vm.eval_code(code, **eval_opts)
     vm = nil
