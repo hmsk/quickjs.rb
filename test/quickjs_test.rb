@@ -123,6 +123,18 @@ describe Quickjs do
       JS
     end
 
+    it "circular non-plain object via vm.call returns nil cleanly" do
+      vm = Quickjs::VM.new
+      vm.eval_code(<<~JS)
+        globalThis.makeCircular = () => {
+          const o = {};
+          o.self = o;
+          Object.setPrototypeOf(o, Object.create({ tag: 1 }));
+          return o;
+        };
+      JS
+      _(vm.call('makeCircular')).must_be_nil
+    end
 
     it "function becomes Quickjs::Function" do
       result = ::Quickjs.eval_code("() => 'hi'")
