@@ -784,6 +784,13 @@ describe Quickjs::VM do
         @vm.import('Helper', from: "import x from 'missing'; export default x;")
       }.must_raise Quickjs::ReferenceError
     end
+
+    it "imports from a specifier via filename: without inline source" do
+      @vm.on_load_module { |name| "export const greet = (who) => `Hello, ${who}!`;" if name == 'greet' }
+      @vm.import(['greet'], filename: 'greet')
+
+      _(@vm.eval_code("greet('world')")).must_equal 'Hello, world!'
+    end
   end
 
   describe "ConsoleLoggers" do
