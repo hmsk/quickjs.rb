@@ -28,6 +28,8 @@ module Quickjs
     def define_function: (String | Symbol name, *Symbol flags) { (*untyped) -> untyped } -> Symbol
                        | (Array[String | Symbol] path, *Symbol flags) { (*untyped) -> untyped } -> Array[Symbol]
 
+    def preload_module: (String source, filename: String) -> true
+
     def import: (String | Array[String] | Hash[Symbol, String] imported, from: String, ?code_to_expose: String?) -> true
 
     def on_log: () { (Log) -> void } -> nil

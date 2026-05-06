@@ -734,6 +734,46 @@ describe Quickjs::VM do
     end
   end
 
+  describe "PreloadModule" do
+    before do
+      @vm = Quickjs::VM.new
+    end
+
+    it "makes a module importable by filename" do
+      @vm.preload_module("export const greet = (who) => `Hello, ${who}!`;", filename: 'greet')
+      @vm.import(['greet'], from: "import { greet } from 'greet'; export { greet };")
+
+      _(@vm.eval_code("greet('world')")).must_equal 'Hello, world!'
+    end
+
+    it "supports transitive imports across multiple preloaded modules" do
+      @vm.preload_module("export const b = () => 'b-result';", filename: 'b')
+      @vm.preload_module("import { b } from 'b'; export const a = () => `a-${b()}`;", filename: 'a')
+      @vm.import(['a'], from: "import { a } from 'a'; export { a };")
+
+      _(@vm.eval_code('a()')).must_equal 'a-b-result'
+    end
+
+    it "raises SyntaxError for invalid source" do
+      _ {
+        @vm.preload_module('should be syntax error', filename: 'bad')
+      }.must_raise Quickjs::SyntaxError
+    end
+
+    it "raises RuntimeError when filename is missing" do
+      _ {
+        @vm.preload_module("export const x = 1;")
+      }.must_raise Quickjs::RuntimeError
+    end
+
+    it "raises ArgumentError when the same filename is preloaded twice" do
+      @vm.preload_module("export const x = 1;", filename: 'mod')
+      _ {
+        @vm.preload_module("export const x = 2;", filename: 'mod')
+      }.must_raise ArgumentError
+    end
+  end
+
   describe "ConsoleLoggers" do
     before do
       @vm = Quickjs::VM.new

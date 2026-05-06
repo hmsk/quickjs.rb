@@ -1143,6 +1143,41 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   return to_rb_return_value(data->context, js_std_await(data->context, j_result));
 }
 
+static VALUE vm_m_preload_module(int argc, VALUE *argv, VALUE r_self)
+{
+  VALUE r_source, r_opts;
+  rb_scan_args(argc, argv, "1:", &r_source, &r_opts);
+  if (NIL_P(r_opts))
+    r_opts = rb_hash_new();
+  VALUE r_filename = rb_hash_aref(r_opts, ID2SYM(rb_intern("filename")));
+  if (NIL_P(r_filename))
+  {
+    VALUE r_error_message = rb_str_new2("missing filename");
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
+    return Qnil;
+  }
+
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  if (RTEST(rb_hash_aref(data->preloaded_modules, r_filename)))
+    rb_raise(rb_eArgError, "module '%s' is already preloaded", StringValueCStr(r_filename));
+
+  char *filename = StringValueCStr(r_filename);
+  char *source = StringValueCStr(r_source);
+  JSValue module = JS_Eval(data->context, source, strlen(source), filename, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  if (JS_IsException(module))
+  {
+    JS_FreeValue(data->context, module);
+    return to_rb_value(data->context, module);
+  }
+  js_module_set_import_meta(data->context, module, TRUE, FALSE);
+  JS_FreeValue(data->context, module);
+
+  rb_hash_aset(data->preloaded_modules, r_filename, Qtrue);
+  return Qtrue;
+}
+
 static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
 {
   VALUE r_import_string, r_opts;
@@ -1218,6 +1253,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, -1);
   rb_define_method(r_class_vm, "call", vm_m_callGlobalFunction, -1);
   rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
+  rb_define_method(r_class_vm, "preload_module", vm_m_preload_module, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
   rb_define_method(r_class_vm, "on_log", vm_m_on_log, 0);
   r_define_log_class(r_class_vm);
