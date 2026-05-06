@@ -734,6 +734,58 @@ describe Quickjs::VM do
     end
   end
 
+  describe "OnLoadModule" do
+    before do
+      @vm = Quickjs::VM.new
+    end
+
+    it "resolves bare specifiers via a block" do
+      @vm.on_load_module { |name| "export const greet = (who) => `Hello, ${who}!`;" if name == 'greet' }
+      @vm.import(['greet'], from: "import { greet } from 'greet'; export { greet };")
+
+      _(@vm.eval_code("greet('world')")).must_equal 'Hello, world!'
+    end
+
+    it "resolves transitive imports across multiple in-memory modules" do
+      modules = {
+        'a' => "import { b } from 'b'; export const a = () => `a-${b()}`;",
+        'b' => "export const b = () => 'b-result';"
+      }
+      @vm.on_load_module { |name| modules[name] }
+      @vm.import(['a'], from: "import { a } from 'a'; export { a };")
+
+      _(@vm.eval_code('a()')).must_equal 'a-b-result'
+    end
+
+    it "raises ReferenceError when the block returns nil" do
+      @vm.on_load_module { |_| nil }
+      _ {
+        @vm.import('Helper', from: "import x from 'missing'; export default x;")
+      }.must_raise Quickjs::ReferenceError
+    end
+
+    it "raises TypeError when the block returns a non-string" do
+      @vm.on_load_module { |_| 42 }
+      _ {
+        @vm.import('Helper', from: "import x from 'mod'; export default x;")
+      }.must_raise Quickjs::TypeError
+    end
+
+    it "propagates Ruby exceptions raised inside the block" do
+      @vm.on_load_module { |_| raise 'boom from loader' }
+      err = _ {
+        @vm.import('Helper', from: "import x from 'mod'; export default x;")
+      }.must_raise RuntimeError
+      _(err.message).must_match(/boom from loader/)
+    end
+
+    it "falls back to the filesystem loader when no block is set" do
+      _ {
+        @vm.import('Helper', from: "import x from 'missing'; export default x;")
+      }.must_raise Quickjs::ReferenceError
+    end
+  end
+
   describe "ConsoleLoggers" do
     before do
       @vm = Quickjs::VM.new

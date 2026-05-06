@@ -51,6 +51,7 @@ typedef struct VMData
 {
   struct JSContext *context;
   VALUE defined_functions;
+  VALUE module_loader;
   struct EvalTime *eval_time;
   VALUE log_listener;
   VALUE alive_objects;
@@ -83,6 +84,7 @@ static void vm_mark(void *ptr)
 {
   VMData *data = (VMData *)ptr;
   rb_gc_mark_movable(data->defined_functions);
+  rb_gc_mark_movable(data->module_loader);
   rb_gc_mark_movable(data->log_listener);
   rb_gc_mark_movable(data->alive_objects);
 }
@@ -91,6 +93,7 @@ static void vm_compact(void *ptr)
 {
   VMData *data = (VMData *)ptr;
   data->defined_functions = rb_gc_location(data->defined_functions);
+  data->module_loader = rb_gc_location(data->module_loader);
   data->log_listener = rb_gc_location(data->log_listener);
   data->alive_objects = rb_gc_location(data->alive_objects);
 }
@@ -111,6 +114,7 @@ static VALUE vm_alloc(VALUE r_self)
   VMData *data;
   VALUE obj = TypedData_Make_Struct(r_self, VMData, &vm_type, data);
   data->defined_functions = rb_hash_new();
+  data->module_loader = Qnil;
   data->log_listener = Qnil;
   data->alive_objects = rb_hash_new();
   data->j_file_proxy_creator = JS_UNDEFINED;

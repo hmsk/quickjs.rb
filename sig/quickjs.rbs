@@ -30,6 +30,8 @@ module Quickjs
 
     def import: (String | Array[String] | Hash[Symbol, String] imported, from: String, ?code_to_expose: String?) -> true
 
+    def on_load_module: () { (String) -> String? } -> nil
+
     def on_log: () { (Log) -> void } -> nil
 
     class Log
