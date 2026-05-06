@@ -40,6 +40,10 @@ describe Quickjs do
       assert_code("'🆔'", "🆔")
     end
 
+    it "source code containing an embedded NUL byte is not truncated" do
+      assert_code("'a\0b'.length", 3)
+    end
+
     it "number for integer becomes Integer" do
       assert_code("2+3", 5)
       assert_code("18014398509481982n", 18014398509481982)

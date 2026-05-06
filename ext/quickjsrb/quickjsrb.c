@@ -142,10 +142,7 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
       if (!JS_IsUndefined(data->j_file_proxy_creator))
         return quickjsrb_file_to_js(ctx, r_value);
     }
-    if (TYPE(r_value) == T_OBJECT && RTEST(rb_funcall(
-                                         r_value,
-                                         rb_intern("is_a?"),
-                                         1, rb_const_get(rb_cClass, rb_intern("Exception")))))
+    if (rb_obj_is_kind_of(r_value, rb_eException))
     {
       return j_error_from_ruby_error(ctx, r_value);
     }
@@ -861,8 +858,8 @@ static VALUE vm_m_evalCode(VALUE r_self, VALUE r_code)
   clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
   JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
 
-  char *code = StringValueCStr(r_code);
-  JSValue j_codeResult = JS_Eval(data->context, code, strlen(code), "<code>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
+  StringValue(r_code);
+  JSValue j_codeResult = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), "<code>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
   JSValue j_awaitedResult = js_std_await(data->context, j_codeResult); // This frees j_codeResult
   // JS_EVAL_FLAG_ASYNC wraps the result in {value, done} — extract the actual value
   // Free j_awaitedResult before to_rb_return_value because it may raise (longjmp), which would skip cleanup
