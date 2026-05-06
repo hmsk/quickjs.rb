@@ -141,11 +141,13 @@ modules = {
 }
 vm.module_loader = ->(name) { modules[name] }
 
-vm.import(['a'], from: "import { a } from 'a'; export { a };")
+vm.import(['a'], filename: 'a')
 vm.eval_code('a()') #=> 'a-b-result'
 ```
 
 The Proc receives the (already normalized) module specifier and returns the module source as a `String`, or `nil` to signal "not found" (which raises `Quickjs::ReferenceError` on the JS side). Pass `nil` to clear a previously set loader.
+
+When `module_loader=` is set, pass `filename:` to `import` instead of `from:` to resolve a named specifier directly through the loader — no inline bridge source needed.
 
 #### `Quickjs::VM#define_function`: 💎 Define a global function for JS by Ruby
 
