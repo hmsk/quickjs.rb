@@ -565,6 +565,11 @@ describe Quickjs::VM do
       _ { @vm.call(42) }.must_raise TypeError
     end
 
+    it "raises ArgumentError when the function name is not a valid path" do
+      err = _ { @vm.call('foo bar') }.must_raise ArgumentError
+      _(err.message).must_include "invalid function name: 'foo bar'"
+    end
+
     it "raises an error raised within the function" do
       @vm.eval_code("function boom() { throw new TypeError('bang'); }")
       err = _ { @vm.call('boom') }.must_raise Quickjs::TypeError

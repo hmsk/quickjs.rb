@@ -1130,7 +1130,30 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
     // JS_Eval accesses both global object properties and lexical (const/let) bindings
     JSValue j_cur = JS_Eval(data->context, first_seg, strlen(first_seg), "<vm>", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(j_cur))
-      return to_rb_value(data->context, j_cur); // raises
+    {
+      // SyntaxError here means the *path string itself* is malformed (e.g. "foo bar"),
+      // not that any user-supplied JS source is broken. Surface it as ArgumentError
+      // so callers see this as a wrong-argument issue, not a JS-runtime issue.
+      JSValue j_exc = JS_GetException(data->context);
+      int is_syntax_err = 0;
+      if (JS_IsError(data->context, j_exc))
+      {
+        JSValue j_name = JS_GetPropertyStr(data->context, j_exc, "name");
+        const char *name_cstr = JS_ToCString(data->context, j_name);
+        is_syntax_err = (name_cstr != NULL && strcmp(name_cstr, "SyntaxError") == 0);
+        JS_FreeCString(data->context, name_cstr);
+        JS_FreeValue(data->context, j_name);
+      }
+      if (is_syntax_err)
+      {
+        JS_FreeValue(data->context, j_exc);
+        JS_FreeValue(data->context, j_this);
+        rb_raise(rb_eArgError, "invalid function name: '%s'", first_seg);
+      }
+      JS_Throw(data->context, j_exc);
+      JS_FreeValue(data->context, j_this);
+      return to_rb_value(data->context, JS_EXCEPTION); // raises
+    }
 
     for (long i = 1; i < path_len; i++)
     {
