@@ -55,6 +55,14 @@ Tests use minitest with `describe`/`it` blocks. Key test files:
 - `test/quickjs_test.rb` — Main test suite (value conversion, errors, VM features, ESM imports, function definitions)
 - `test/quickjs_polyfill_test.rb` — Intl polyfill tests
 
+## Release Process
+
+1. On `main`, run `bundle exec rake polyfills:build` — rebuilds polyfill bundles and syncs `polyfills/package.json` version to match the gem version
+2. Bump `lib/quickjs/version.rb` and `Gemfile.lock` to the new version
+3. Commit `lib/quickjs/version.rb`, `Gemfile.lock`, `polyfills/package.json`, `polyfills/package-lock.json` as `"prepare vX.Y.Z"`
+4. Run `bundle exec rake release` — tags, pushes to GitHub, and publishes to RubyGems (human step)
+5. Create a GitHub release via `gh release create` with notes following the pattern of previous releases
+
 ## Build Notes
 
 - `extconf.rb` compiles with `-DNDEBUG` to avoid conflicts with Ruby 4.0 GC assertions
