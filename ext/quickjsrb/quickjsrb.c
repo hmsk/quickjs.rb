@@ -1222,7 +1222,8 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   if (NIL_P(r_opts))
     r_opts = rb_hash_new();
   VALUE r_from = rb_hash_aref(r_opts, ID2SYM(rb_intern("from")));
-  if (NIL_P(r_from))
+  VALUE r_filename = rb_hash_aref(r_opts, ID2SYM(rb_intern("filename")));
+  if (NIL_P(r_from) && NIL_P(r_filename))
   {
     VALUE r_error_message = rb_str_new2("missing import source");
     rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
@@ -1233,16 +1234,24 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
-  char *filename = random_string();
-  char *source = StringValueCStr(r_from);
-  JSValue module = JS_Eval(data->context, source, strlen(source), filename, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-  if (JS_IsException(module))
+  char *filename;
+  if (!NIL_P(r_filename))
   {
-    JS_FreeValue(data->context, module);
-    return to_rb_value(data->context, module);
+    filename = StringValueCStr(r_filename);
   }
-  js_module_set_import_meta(data->context, module, TRUE, FALSE);
-  JS_FreeValue(data->context, module);
+  else
+  {
+    filename = random_string();
+    char *source = StringValueCStr(r_from);
+    JSValue module = JS_Eval(data->context, source, strlen(source), filename, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    if (JS_IsException(module))
+    {
+      JS_FreeValue(data->context, module);
+      return to_rb_value(data->context, module);
+    }
+    js_module_set_import_meta(data->context, module, TRUE, FALSE);
+    JS_FreeValue(data->context, module);
+  }
 
   VALUE r_import_settings = rb_funcall(
       rb_const_get(rb_cClass, rb_intern("Quickjs")),
