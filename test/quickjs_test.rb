@@ -734,6 +734,68 @@ describe Quickjs::VM do
     end
   end
 
+  describe "ModuleLoader" do
+    before do
+      @vm = Quickjs::VM.new
+    end
+
+    it "is nil by default" do
+      _(@vm.module_loader).must_be_nil
+    end
+
+    it "resolves bare specifiers via a Ruby callback" do
+      @vm.module_loader = ->(name) {
+        'export const greet = (who) => `Hello, ${who}!`;' if name == 'greet'
+      }
+      @vm.import(['greet'], from: "import { greet } from 'greet'; export { greet };")
+
+      _(@vm.eval_code("greet('world')")).must_equal 'Hello, world!'
+    end
+
+    it "resolves transitive imports across multiple in-memory modules" do
+      modules = {
+        'a' => "import { b } from 'b'; export const a = () => `a-${b()}`;",
+        'b' => "export const b = () => 'b-result';"
+      }
+      @vm.module_loader = ->(name) { modules[name] }
+      @vm.import(['a'], from: "import { a } from 'a'; export { a };")
+
+      _(@vm.eval_code('a()')).must_equal 'a-b-result'
+    end
+
+    it "raises ReferenceError when the loader returns nil" do
+      @vm.module_loader = ->(_) { nil }
+      _ {
+        @vm.import('Helper', from: "import x from 'missing'; export default x;")
+      }.must_raise Quickjs::ReferenceError
+    end
+
+    it "raises TypeError when the loader returns a non-string" do
+      @vm.module_loader = ->(_) { 42 }
+      _ {
+        @vm.import('Helper', from: "import x from 'mod'; export default x;")
+      }.must_raise Quickjs::TypeError
+    end
+
+    it "propagates Ruby exceptions raised inside the loader" do
+      @vm.module_loader = ->(_) { raise 'boom from loader' }
+      err = _ {
+        @vm.import('Helper', from: "import x from 'mod'; export default x;")
+      }.must_raise RuntimeError
+      _(err.message).must_match(/boom from loader/)
+    end
+
+    it "accepts nil to clear a previously set loader" do
+      @vm.module_loader = ->(_) { 'export default 1;' }
+      @vm.module_loader = nil
+      _(@vm.module_loader).must_be_nil
+    end
+
+    it "rejects non-Proc, non-nil values" do
+      _ { @vm.module_loader = 'not a proc' }.must_raise TypeError
+    end
+  end
+
   describe "ConsoleLoggers" do
     before do
       @vm = Quickjs::VM.new
