@@ -40,6 +40,13 @@ Quickjs.eval_code(code,
 )
 ```
 
+#### Filename
+
+```rb
+# Label shown in JS stack traces (default: "<code>")
+Quickjs.eval_code(code, filename: 'my_script.js')
+```
+
 #### Timeout
 
 ```rb
@@ -202,6 +209,11 @@ vm.eval_code('console.log("hello", 42)')
 | `Blob` | → | `Quickjs::Blob` — `.size`, `.type`, `.content` | requires `POLYFILL_FILE` |
 | `File` | → | `Quickjs::File` — `.name`, `.last_modified` + Blob attrs | requires `POLYFILL_FILE` |
 | `File` proxy | ← | `::File` | requires `POLYFILL_FILE`; applies to `define_function` return values |
+
+## Acknowledgements
+
+- [@ursm](https://github.com/ursm) — for continuous contributions improving performance and developer experience
+- [@persona-id](https://github.com/persona-id) — for providing real-world use cases that shape the direction of this project
 
 ## License
 
