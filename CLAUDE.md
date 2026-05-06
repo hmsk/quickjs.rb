@@ -59,8 +59,8 @@ Tests use minitest with `describe`/`it` blocks. Key test files:
 
 1. On `main`, run `bundle exec rake polyfills:build` — rebuilds polyfill bundles and syncs `polyfills/package.json` version to match the gem version
 2. Bump `lib/quickjs/version.rb` and `Gemfile.lock` to the new version
-3. Commit `lib/quickjs/version.rb`, `Gemfile.lock`, `polyfills/package.json`, `polyfills/package-lock.json` as `"prepare vX.Y.Z"`
-4. Run `bundle exec rake release` — tags, pushes to GitHub, and publishes to RubyGems (human step)
+3. Commit `lib/quickjs/version.rb`, `Gemfile.lock`, `polyfills/package.json`, `polyfills/package-lock.json` as `"prepare vX.Y.Z"` — do NOT push; `rake release` handles that
+4. Run `bundle exec rake release` — tags, pushes to GitHub, and publishes to RubyGems (human step; do not run this as Claude)
 5. Create a GitHub release via `gh release create` with notes following the pattern of previous releases
 
 ## Build Notes
