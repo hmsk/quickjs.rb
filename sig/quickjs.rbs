@@ -21,7 +21,7 @@ module Quickjs
   class VM
     def initialize: (?features: Array[Symbol], ?memory_limit: Integer, ?max_stack_size: Integer, ?timeout_msec: Integer) -> void
 
-    def eval_code: (String code) -> untyped
+    def eval_code: (String code, ?filename: String) -> untyped
 
     def call: (String | Symbol name, *untyped args) -> untyped
 
