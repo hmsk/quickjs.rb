@@ -732,6 +732,13 @@ describe Quickjs::VM do
         @vm.import('* as all', from: 'should be syntax error')
       }.must_raise Quickjs::SyntaxError
     end
+
+    it "resolves via module_loader when filename: is given instead of from:" do
+      @vm.module_loader = ->(name) { 'export const greet = (who) => `Hello, ${who}!`;' if name == 'greet' }
+      @vm.import(['greet'], filename: 'greet')
+
+      _(@vm.eval_code("greet('world')")).must_equal 'Hello, world!'
+    end
   end
 
   describe "ModuleLoader" do
