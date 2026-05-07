@@ -915,6 +915,12 @@ describe Quickjs::VM do
     it "eval_bytecode raises Quickjs::RuntimeError on garbage input" do
       _ { @vm.eval_bytecode("not a real bytecode blob") }.must_raise Quickjs::RuntimeError
     end
+
+    it "eval_bytecode honors timeout_msec" do
+      bytecode = @vm.compile('while (true) {}')
+      vm = Quickjs::VM.new(timeout_msec: 50)
+      _ { vm.eval_bytecode(bytecode) }.must_raise Quickjs::InterruptedError
+    end
   end
 
   describe "ConsoleLoggers" do

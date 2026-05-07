@@ -898,6 +898,31 @@ static VALUE to_rb_return_value(JSContext *ctx, JSValue j_val)
   return result;
 }
 
+// Validate that r_code is a String and resolve the :filename option (default "<code>")
+// from the keyword-args hash that rb_scan_args(... "1:") collects. Both eval_code and
+// compile share this argument shape.
+static const char *parse_code_and_filename(VALUE r_code, VALUE r_opts)
+{
+  if (!RB_TYPE_P(r_code, T_STRING))
+  {
+    VALUE r_code_class = rb_class_name(CLASS_OF(r_code));
+    rb_raise(rb_eTypeError, "JavaScript code must be a String, got %s", StringValueCStr(r_code_class));
+  }
+  if (NIL_P(r_opts))
+    return "<code>";
+  VALUE r_filename = rb_hash_aref(r_opts, ID2SYM(rb_intern("filename")));
+  if (NIL_P(r_filename))
+    return "<code>";
+  Check_Type(r_filename, T_STRING);
+  return StringValueCStr(r_filename);
+}
+
+static void arm_eval_timer(VMData *data)
+{
+  clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
+  JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
+}
+
 static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
 {
   VMData *data;
@@ -905,31 +930,17 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
 
   VALUE r_code, r_opts;
   rb_scan_args(argc, argv, "1:", &r_code, &r_opts);
+  const char *filename = parse_code_and_filename(r_code, r_opts);
 
-  if (!RB_TYPE_P(r_code, T_STRING))
-  {
-    VALUE r_code_class = rb_class_name(CLASS_OF(r_code));
-    rb_raise(rb_eTypeError, "JavaScript code must be a String, got %s", StringValueCStr(r_code_class));
-  }
-
-  const char *filename = "<code>";
   bool async_mode = true;
   if (!NIL_P(r_opts))
   {
-    VALUE r_filename = rb_hash_aref(r_opts, ID2SYM(rb_intern("filename")));
-    if (!NIL_P(r_filename))
-    {
-      Check_Type(r_filename, T_STRING);
-      filename = StringValueCStr(r_filename);
-    }
-
     VALUE r_async = rb_hash_aref(r_opts, ID2SYM(rb_intern("async")));
     if (r_async == Qfalse)
       async_mode = false;
   }
 
-  clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
-  JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
+  arm_eval_timer(data);
 
   StringValue(r_code);
 
@@ -955,23 +966,9 @@ static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
 
   VALUE r_code, r_opts;
   rb_scan_args(argc, argv, "1:", &r_code, &r_opts);
+  const char *filename = parse_code_and_filename(r_code, r_opts);
 
-  if (!RB_TYPE_P(r_code, T_STRING))
-  {
-    VALUE r_code_class = rb_class_name(CLASS_OF(r_code));
-    rb_raise(rb_eTypeError, "JavaScript code must be a String, got %s", StringValueCStr(r_code_class));
-  }
-
-  const char *filename = "<code>";
-  if (!NIL_P(r_opts))
-  {
-    VALUE r_filename = rb_hash_aref(r_opts, ID2SYM(rb_intern("filename")));
-    if (!NIL_P(r_filename))
-    {
-      Check_Type(r_filename, T_STRING);
-      filename = StringValueCStr(r_filename);
-    }
-  }
+  arm_eval_timer(data);
 
   StringValue(r_code);
   JSValue j_func = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), filename,
@@ -986,7 +983,8 @@ static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
   JS_FreeValue(data->context, j_func);
   if (out_buf == NULL)
   {
-    return to_rb_value(data->context, JS_EXCEPTION); // raises
+    VALUE r_msg = rb_str_new2("failed to serialize compiled bytecode");
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
   }
 
   VALUE r_bytecode = rb_str_new((const char *)out_buf, (long)out_len);
@@ -1008,8 +1006,7 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
 
   StringValue(r_bytecode);
 
-  clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
-  JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
+  arm_eval_timer(data);
 
   JSValue j_func = JS_ReadObject(data->context,
                                  (const uint8_t *)RSTRING_PTR(r_bytecode),
