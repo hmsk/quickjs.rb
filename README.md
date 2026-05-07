@@ -85,6 +85,19 @@ vm.eval_code('a.b = "d";')
 vm.eval_code('a.b;') #=> "d"
 ```
 
+#### `Quickjs::VM#compile` / `Quickjs::VM#eval_bytecode`: 🚀 Cache parsed bundles as bytecode
+
+Parsing large JS bundles is the dominant cost of a fresh evaluation. `compile` parses once and returns a serialized bytecode `String`; `eval_bytecode` runs that bytecode on any VM of the same QuickJS version, skipping the parser. Useful when the same bundle is evaluated repeatedly across short-lived VMs (test environments, page-per-VM web emulators).
+
+```rb
+bytecode = Quickjs::VM.new.compile(File.read('big_bundle.js'), filename: 'big_bundle.js')
+
+vm = Quickjs::VM.new
+vm.eval_bytecode(bytecode) # ← no parse cost
+```
+
+The bytecode is an opaque ASCII-8BIT `String` and is safe to cache in memory or on disk. Format is tied to the QuickJS build, so include the gem version in your cache key if you persist across upgrades.
+
 #### `Quickjs::VM#call`: ⚡ Call a JS function directly with Ruby arguments
 
 ```rb

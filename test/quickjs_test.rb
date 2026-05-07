@@ -853,6 +853,70 @@ describe Quickjs::VM do
     end
   end
 
+  describe "BytecodeCache" do
+    before do
+      @vm = Quickjs::VM.new
+    end
+
+    it "compile returns a frozen ASCII-8BIT String" do
+      bytecode = @vm.compile('1 + 1')
+      _(bytecode).must_be_instance_of String
+      _(bytecode.encoding).must_equal Encoding::ASCII_8BIT
+      _(bytecode.frozen?).must_equal true
+      _(bytecode.bytesize).must_be :>, 0
+    end
+
+    it "eval_bytecode runs the compiled code and returns the value" do
+      _(@vm.eval_bytecode(@vm.compile('1 + 2'))).must_equal 3
+      _(@vm.eval_bytecode(@vm.compile('"hi"'))).must_equal 'hi'
+    end
+
+    it "compiled bytecode runs across separate VMs" do
+      bytecode = @vm.compile('40 + 2')
+      vm2 = Quickjs::VM.new
+      _(vm2.eval_bytecode(bytecode)).must_equal 42
+    end
+
+    it "side effects on globalThis persist after eval_bytecode" do
+      bytecode = @vm.compile('globalThis.greeting = "hello"; globalThis.greeting;')
+      _(@vm.eval_bytecode(bytecode)).must_equal 'hello'
+      _(@vm.eval_code('globalThis.greeting')).must_equal 'hello'
+    end
+
+    it "supports top-level await in compiled code" do
+      bytecode = @vm.compile(<<~JS)
+        const p = new Promise((res) => { res('awaited'); });
+        await p;
+      JS
+      _(@vm.eval_bytecode(bytecode)).must_equal 'awaited'
+    end
+
+    it "carries filename: through to JS stack traces" do
+      bytecode = @vm.compile(<<~JS, filename: '/path/to/bundle.js')
+        try { throw new Error('boom') } catch (e) { e.stack }
+      JS
+      _(@vm.eval_bytecode(bytecode)).must_match(%r{/path/to/bundle\.js})
+    end
+
+    it "compile raises Quickjs::SyntaxError on syntactically invalid source" do
+      _ { @vm.compile('}{') }.must_raise Quickjs::SyntaxError
+    end
+
+    it "compile raises TypeError when source isn't a String" do
+      _ { @vm.compile(nil) }.must_raise TypeError
+      _ { @vm.compile(123) }.must_raise TypeError
+    end
+
+    it "eval_bytecode raises TypeError when bytecode isn't a String" do
+      _ { @vm.eval_bytecode(nil) }.must_raise TypeError
+      _ { @vm.eval_bytecode(123) }.must_raise TypeError
+    end
+
+    it "eval_bytecode raises Quickjs::RuntimeError on garbage input" do
+      _ { @vm.eval_bytecode("not a real bytecode blob") }.must_raise Quickjs::RuntimeError
+    end
+  end
+
   describe "ConsoleLoggers" do
     before do
       @vm = Quickjs::VM.new

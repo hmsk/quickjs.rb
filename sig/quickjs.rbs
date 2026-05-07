@@ -23,6 +23,10 @@ module Quickjs
 
     def eval_code: (String code, ?async: bool, ?filename: String) -> untyped
 
+    def compile: (String code, ?filename: String) -> String
+
+    def eval_bytecode: (String bytecode) -> untyped
+
     def call: (String | Symbol name, *untyped args) -> untyped
 
     def define_function: (String | Symbol name, *Symbol flags) { (*untyped) -> untyped } -> Symbol
