@@ -346,24 +346,22 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     if (js_is_plain_object(ctx, j_val))
       return js_plain_object_to_rb(ctx, j_val);
 
-    // Fallback: non-plain objects (Date, RegExp, Map, class instances, functions, etc.)
-    VALUE r_str = to_r_json(ctx, j_val);
-
-    if (rb_funcall(r_str, rb_intern("=="), 1, rb_str_new2("undefined")))
+    // Non-plain objects (Date, RegExp, Map, class instances, etc.).
+    // If the object opts in to a JSON representation via toJSON (e.g. Date),
+    // honour it — recurse on the returned value. Otherwise dump own enumerable
+    // string-keyed properties; this is faster than the JSON round-trip and
+    // preserves `undefined` values nested inside class instances.
+    JSValue j_toJSON = JS_GetPropertyStr(ctx, j_val, "toJSON");
+    if (JS_IsFunction(ctx, j_toJSON))
     {
-      return QUICKJSRB_SYM(undefinedId);
-    }
-
-    int couldntParse;
-    VALUE r_result = rb_protect(r_try_json_parse, r_str, &couldntParse);
-    if (couldntParse)
-    {
-      return Qnil;
-    }
-    else
-    {
+      JSValue j_jsonValue = JS_Call(ctx, j_toJSON, j_val, 0, NULL);
+      JS_FreeValue(ctx, j_toJSON);
+      VALUE r_result = to_rb_value(ctx, j_jsonValue);
+      JS_FreeValue(ctx, j_jsonValue);
       return r_result;
     }
+    JS_FreeValue(ctx, j_toJSON);
+    return js_plain_object_to_rb(ctx, j_val);
   }
   case JS_TAG_NULL:
     return Qnil;
