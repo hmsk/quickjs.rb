@@ -913,6 +913,7 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
   }
 
   const char *filename = "<code>";
+  bool async_mode = true;
   if (!NIL_P(r_opts))
   {
     VALUE r_filename = rb_hash_aref(r_opts, ID2SYM(rb_intern("filename")));
@@ -921,12 +922,23 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
       Check_Type(r_filename, T_STRING);
       filename = StringValueCStr(r_filename);
     }
+
+    VALUE r_async = rb_hash_aref(r_opts, ID2SYM(rb_intern("async")));
+    if (r_async == Qfalse)
+      async_mode = false;
   }
 
   clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
   JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
 
   StringValue(r_code);
+
+  if (!async_mode)
+  {
+    JSValue j_codeResult = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), filename, JS_EVAL_TYPE_GLOBAL);
+    return to_rb_return_value(data->context, j_codeResult);
+  }
+
   JSValue j_codeResult = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), filename, JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
   JSValue j_awaitedResult = js_std_await(data->context, j_codeResult); // This frees j_codeResult
   // JS_EVAL_FLAG_ASYNC wraps the result in {value, done} — extract the actual value

@@ -221,6 +221,28 @@ describe Quickjs do
     end
   end
 
+  describe "SyncEval" do
+    it "evaluates synchronously when async: false" do
+      vm = Quickjs::VM.new
+      _(vm.eval_code('1 + 1', async: false)).must_equal 2
+      _(vm.eval_code('"hi"', async: false)).must_equal "hi"
+    end
+
+    it "returns a Promise object instead of awaiting in sync mode" do
+      vm = Quickjs::VM.new
+      # In async (default) mode this would await and resolve to "ok".
+      # In sync mode the Promise leaks back to the embedder; we surface it via
+      # the existing NoAwaitError.
+      _ {
+        vm.eval_code('Promise.resolve("ok")', async: false)
+      }.must_raise Quickjs::NoAwaitError
+    end
+
+    it "Quickjs.eval_code forwards async: option" do
+      _(::Quickjs.eval_code('1 + 2', async: false)).must_equal 3
+    end
+  end
+
   it "std module can be enabled" do
     assert_code("typeof std === 'undefined'", true)
     _(::Quickjs.eval_code("!!std.urlGet", { features: [::Quickjs::MODULE_STD] })).must_equal true
