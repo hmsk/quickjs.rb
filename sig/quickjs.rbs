@@ -23,9 +23,7 @@ module Quickjs
 
     def eval_code: (String code, ?async: bool, ?filename: String) -> untyped
 
-    def compile: (String code, ?filename: String) -> String
-
-    def eval_bytecode: (String bytecode) -> untyped
+    def compile: (String code, ?filename: String) -> Runnable
 
     def call: (String | Symbol name, *untyped args) -> untyped
 
@@ -58,6 +56,14 @@ module Quickjs
     def source: () -> String
 
     def call: (*untyped args, ?on: VM | Hash[Symbol, untyped] | nil) -> untyped
+  end
+
+  class Runnable
+    def initialize: (String bytecode) -> void
+
+    def to_s: () -> String
+
+    def run: (?on: VM | Hash[Symbol, untyped] | nil) -> untyped
   end
 
   class RuntimeError < ::RuntimeError

@@ -7,6 +7,7 @@ require_relative "quickjs/subtle_crypto"
 require_relative "quickjs/crypto_key"
 require_relative "quickjs/function"
 require_relative "quickjs/quickjsrb"
+require_relative "quickjs/runnable"
 
 module Quickjs
   class Blob

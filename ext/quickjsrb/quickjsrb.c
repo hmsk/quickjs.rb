@@ -1383,8 +1383,8 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_alloc_func(r_class_vm, vm_alloc);
   rb_define_method(r_class_vm, "initialize", vm_m_initialize, -1);
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, -1);
-  rb_define_method(r_class_vm, "compile", vm_m_compile, -1);
-  rb_define_method(r_class_vm, "eval_bytecode", vm_m_evalBytecode, 1);
+  rb_define_private_method(r_class_vm, "_compile_to_bytecode", vm_m_compile, -1);
+  rb_define_private_method(r_class_vm, "_run_bytecode", vm_m_evalBytecode, 1);
   rb_define_method(r_class_vm, "call", vm_m_callGlobalFunction, -1);
   rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);

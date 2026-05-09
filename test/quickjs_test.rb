@@ -853,49 +853,62 @@ describe Quickjs::VM do
     end
   end
 
-  describe "BytecodeCache" do
+  describe "Runnable" do
     before do
       @vm = Quickjs::VM.new
     end
 
-    it "compile returns a frozen ASCII-8BIT String" do
-      bytecode = @vm.compile('1 + 1')
+    it "vm.compile returns a Quickjs::Runnable" do
+      _(@vm.compile('1 + 1')).must_be_instance_of Quickjs::Runnable
+    end
+
+    it "to_s returns a frozen ASCII-8BIT bytecode String" do
+      bytecode = @vm.compile('1 + 1').to_s
       _(bytecode).must_be_instance_of String
       _(bytecode.encoding).must_equal Encoding::ASCII_8BIT
       _(bytecode.frozen?).must_equal true
       _(bytecode.bytesize).must_be :>, 0
     end
 
-    it "eval_bytecode runs the compiled code and returns the value" do
-      _(@vm.eval_bytecode(@vm.compile('1 + 2'))).must_equal 3
-      _(@vm.eval_bytecode(@vm.compile('"hi"'))).must_equal 'hi'
+    it "run(on: vm) executes on the given VM" do
+      _(@vm.compile('1 + 2').run(on: @vm)).must_equal 3
+      _(@vm.compile('"hi"').run(on: @vm)).must_equal 'hi'
     end
 
-    it "compiled bytecode runs across separate VMs" do
-      bytecode = @vm.compile('40 + 2')
-      vm2 = Quickjs::VM.new
-      _(vm2.eval_bytecode(bytecode)).must_equal 42
-    end
-
-    it "side effects on globalThis persist after eval_bytecode" do
-      bytecode = @vm.compile('globalThis.greeting = "hello"; globalThis.greeting;')
-      _(@vm.eval_bytecode(bytecode)).must_equal 'hello'
+    it "run(on: vm) preserves side effects on the given VM" do
+      @vm.compile('globalThis.greeting = "hello";').run(on: @vm)
       _(@vm.eval_code('globalThis.greeting')).must_equal 'hello'
     end
 
+    it "run with no on: creates a fresh VM and executes" do
+      _(@vm.compile('40 + 2').run).must_equal 42
+    end
+
+    it "run(on: hash) creates a fresh VM with the given options" do
+      runnable = @vm.compile('typeof std')
+      _(runnable.run).must_equal 'undefined'
+      _(runnable.run(on: { features: [::Quickjs::MODULE_STD] })).must_equal 'object'
+    end
+
     it "supports top-level await in compiled code" do
-      bytecode = @vm.compile(<<~JS)
+      runnable = @vm.compile(<<~JS)
         const p = new Promise((res) => { res('awaited'); });
         await p;
       JS
-      _(@vm.eval_bytecode(bytecode)).must_equal 'awaited'
+      _(runnable.run(on: @vm)).must_equal 'awaited'
     end
 
     it "carries filename: through to JS stack traces" do
-      bytecode = @vm.compile(<<~JS, filename: '/path/to/bundle.js')
+      runnable = @vm.compile(<<~JS, filename: '/path/to/bundle.js')
         try { throw new Error('boom') } catch (e) { e.stack }
       JS
-      _(@vm.eval_bytecode(bytecode)).must_match(%r{/path/to/bundle\.js})
+      _(runnable.run(on: @vm)).must_match(%r{/path/to/bundle\.js})
+    end
+
+    it "Quickjs::Runnable.new(bytecode) round-trips through to_s" do
+      bytecode = @vm.compile('123 + 456').to_s
+      restored = Quickjs::Runnable.new(bytecode)
+      _(restored.run).must_equal 579
     end
 
     it "compile raises Quickjs::SyntaxError on syntactically invalid source" do
@@ -907,19 +920,21 @@ describe Quickjs::VM do
       _ { @vm.compile(123) }.must_raise TypeError
     end
 
-    it "eval_bytecode raises TypeError when bytecode isn't a String" do
-      _ { @vm.eval_bytecode(nil) }.must_raise TypeError
-      _ { @vm.eval_bytecode(123) }.must_raise TypeError
+    it "Quickjs::Runnable.new accepts any String — validation is lazy" do
+      runnable = Quickjs::Runnable.new("not a real bytecode blob")
+      _ { runnable.run }.must_raise Quickjs::RuntimeError
     end
 
-    it "eval_bytecode raises Quickjs::RuntimeError on garbage input" do
-      _ { @vm.eval_bytecode("not a real bytecode blob") }.must_raise Quickjs::RuntimeError
+    it "run(on: invalid) raises ArgumentError" do
+      runnable = @vm.compile('1')
+      _ { runnable.run(on: 42) }.must_raise ArgumentError
+      _ { runnable.run(on: 'vm') }.must_raise ArgumentError
     end
 
-    it "eval_bytecode honors timeout_msec" do
-      bytecode = @vm.compile('while (true) {}')
+    it "run(on: vm) honors timeout_msec" do
+      runnable = @vm.compile('while (true) {}')
       vm = Quickjs::VM.new(timeout_msec: 50)
-      _ { vm.eval_bytecode(bytecode) }.must_raise Quickjs::InterruptedError
+      _ { runnable.run(on: vm) }.must_raise Quickjs::InterruptedError
     end
   end
 
