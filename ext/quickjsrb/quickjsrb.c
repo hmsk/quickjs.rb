@@ -28,6 +28,7 @@ static int dispatch_log(VMData *data, const char *severity, VALUE r_row);
 
 JSValue to_js_value(JSContext *ctx, VALUE r_value);
 VALUE to_rb_value(JSContext *ctx, JSValue j_val);
+static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, VALUE r_visited);
 
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
@@ -212,7 +213,7 @@ static int js_is_plain_object(JSContext *ctx, JSValue j_val)
   return result;
 }
 
-static VALUE js_array_to_rb(JSContext *ctx, JSValue j_val)
+static VALUE js_array_to_rb(JSContext *ctx, JSValue j_val, VALUE r_visited)
 {
   JSValue j_length = JS_GetPropertyStr(ctx, j_val, "length");
   uint32_t length = 0;
@@ -223,13 +224,13 @@ static VALUE js_array_to_rb(JSContext *ctx, JSValue j_val)
   for (uint32_t i = 0; i < length; i++)
   {
     JSValue j_elem = JS_GetPropertyUint32(ctx, j_val, i);
-    rb_ary_push(r_array, to_rb_value(ctx, j_elem));
+    rb_ary_push(r_array, to_rb_value_inner(ctx, j_elem, r_visited));
     JS_FreeValue(ctx, j_elem);
   }
   return r_array;
 }
 
-static VALUE js_plain_object_to_rb(JSContext *ctx, JSValue j_val)
+static VALUE js_plain_object_to_rb(JSContext *ctx, JSValue j_val, VALUE r_visited)
 {
   JSPropertyEnum *ptab;
   uint32_t plen;
@@ -241,7 +242,7 @@ static VALUE js_plain_object_to_rb(JSContext *ctx, JSValue j_val)
   {
     const char *key = JS_AtomToCString(ctx, ptab[i].atom);
     JSValue j_prop = JS_GetProperty(ctx, j_val, ptab[i].atom);
-    rb_hash_aset(r_hash, rb_str_new2(key), to_rb_value(ctx, j_prop));
+    rb_hash_aset(r_hash, rb_str_new2(key), to_rb_value_inner(ctx, j_prop, r_visited));
     JS_FreeCString(ctx, key);
     JS_FreeValue(ctx, j_prop);
   }
@@ -250,6 +251,11 @@ static VALUE js_plain_object_to_rb(JSContext *ctx, JSValue j_val)
 }
 
 VALUE to_rb_value(JSContext *ctx, JSValue j_val)
+{
+  return to_rb_value_inner(ctx, j_val, Qnil);
+}
+
+static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, VALUE r_visited)
 {
   switch (JS_VALUE_GET_NORM_TAG(j_val))
   {
@@ -340,11 +346,21 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
         return r_maybe_file;
     }
 
+    // Below this point, conversion recurses into own properties / elements
+    // via to_rb_value_inner. Track JS object pointers to break cycles —
+    // re-entering the same object returns nil instead of blowing the stack.
+    if (NIL_P(r_visited))
+      r_visited = rb_hash_new();
+    VALUE r_visit_key = ULL2NUM((uintptr_t)JS_VALUE_GET_PTR(j_val));
+    if (RTEST(rb_hash_lookup(r_visited, r_visit_key)))
+      return Qnil;
+    rb_hash_aset(r_visited, r_visit_key, Qtrue);
+
     if (JS_IsArray(ctx, j_val))
-      return js_array_to_rb(ctx, j_val);
+      return js_array_to_rb(ctx, j_val, r_visited);
 
     if (js_is_plain_object(ctx, j_val))
-      return js_plain_object_to_rb(ctx, j_val);
+      return js_plain_object_to_rb(ctx, j_val, r_visited);
 
     // Non-plain objects (Date, RegExp, Map, class instances, etc.).
     // If the object opts in to a JSON representation via toJSON (e.g. Date),
@@ -356,12 +372,12 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     {
       JSValue j_jsonValue = JS_Call(ctx, j_toJSON, j_val, 0, NULL);
       JS_FreeValue(ctx, j_toJSON);
-      VALUE r_result = to_rb_value(ctx, j_jsonValue);
+      VALUE r_result = to_rb_value_inner(ctx, j_jsonValue, r_visited);
       JS_FreeValue(ctx, j_jsonValue);
       return r_result;
     }
     JS_FreeValue(ctx, j_toJSON);
-    return js_plain_object_to_rb(ctx, j_val);
+    return js_plain_object_to_rb(ctx, j_val, r_visited);
   }
   case JS_TAG_NULL:
     return Qnil;

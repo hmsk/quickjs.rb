@@ -115,6 +115,38 @@ describe Quickjs do
       assert_code("/abc/g", {})
     end
 
+    it "circular plain object converts cycle entry to nil" do
+      assert_code("const o = {a: 1}; o.self = o; o", {'a' => 1, 'self' => nil})
+    end
+
+    it "circular non-plain object converts cycle entry to nil" do
+      # Without cycle detection this would recurse via js_plain_object_to_rb
+      # forever and SIGILL the host.
+      assert_code(<<~JS, {'self' => nil})
+        const o = {};
+        o.self = o;
+        Object.setPrototypeOf(o, Object.create({ tag: 1 }));
+        o;
+      JS
+    end
+
+    it "circular array converts cycle entry to nil" do
+      assert_code("const a = [1, 2]; a.push(a); a", [1, 2, nil])
+    end
+
+    it "circular non-plain object via vm.call returns the same shape" do
+      vm = Quickjs::VM.new
+      vm.eval_code(<<~JS)
+        globalThis.makeCircular = () => {
+          const o = {};
+          o.self = o;
+          Object.setPrototypeOf(o, Object.create({ tag: 1 }));
+          return o;
+        };
+      JS
+      _(vm.call('makeCircular')).must_equal({'self' => nil})
+    end
+
     it "function becomes Quickjs::Function" do
       result = ::Quickjs.eval_code("() => 'hi'")
       _(result).must_be_instance_of Quickjs::Function
