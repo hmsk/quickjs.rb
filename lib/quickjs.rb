@@ -38,6 +38,20 @@ module Quickjs
   end
   module_function :_with_timeout
 
+  def _with_vm(on)
+    case on
+    when Quickjs::VM
+      yield on
+    when nil
+      yield Quickjs::VM.new
+    when Hash
+      yield Quickjs::VM.new(**on)
+    else
+      raise ArgumentError, 'on: must be a Quickjs::VM, a Hash of VM options, or nil'
+    end
+  end
+  module_function :_with_vm
+
   def _build_import(imported)
     code_define_global = ->(name) { "globalThis['#{name}'] = #{name};" }
     case imported

@@ -11,17 +11,7 @@ module Quickjs
     end
 
     def run(on: nil)
-      case on
-      when Quickjs::VM
-        on.send(:_run_bytecode, @bytecode)
-      when nil, Hash
-        vm = Quickjs::VM.new(**(on || {}))
-        res = vm.send(:_run_bytecode, @bytecode)
-        vm = nil
-        res
-      else
-        raise ArgumentError, 'on: must be a Quickjs::VM, a Hash of VM options, or nil'
-      end
+      Quickjs._with_vm(on) {|vm| vm.send(:_run_bytecode, @bytecode) }
     end
   end
 

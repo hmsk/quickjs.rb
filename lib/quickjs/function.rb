@@ -13,17 +13,7 @@ module Quickjs
     end
 
     def call(*args, on: nil)
-      case on
-      when Quickjs::VM
-        _call_on(on, args)
-      when nil, Hash
-        vm = Quickjs::VM.new(**on || {})
-        res = _call_on(vm, args)
-        vm = nil
-        res
-      else
-        raise ArgumentError, 'on: must be a Quickjs::VM, a Hash of VM options, or nil'
-      end
+      Quickjs._with_vm(on) {|vm| _call_on(vm, args) }
     end
 
     private
