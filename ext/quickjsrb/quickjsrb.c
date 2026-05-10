@@ -31,7 +31,7 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val);
 static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, VALUE r_visited);
 static VALUE vm_m_memoryUsage(VALUE r_self);
 static VALUE vm_m_runGC(VALUE r_self);
-static VALUE vm_m_oomPoisoned(VALUE r_self);
+static VALUE vm_m_memoryPoisoned(VALUE r_self);
 
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
@@ -1449,7 +1449,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "on_log", vm_m_on_log, 0);
   rb_define_method(r_class_vm, "memory_usage", vm_m_memoryUsage, 0);
   rb_define_method(r_class_vm, "gc!", vm_m_runGC, 0);
-  rb_define_method(r_class_vm, "oom_poisoned?", vm_m_oomPoisoned, 0);
+  rb_define_method(r_class_vm, "memory_poisoned?", vm_m_memoryPoisoned, 0);
   r_define_log_class(r_class_vm);
 }
 
@@ -1483,7 +1483,7 @@ static VALUE vm_m_runGC(VALUE r_self)
   return Qnil;
 }
 
-static VALUE vm_m_oomPoisoned(VALUE r_self)
+static VALUE vm_m_memoryPoisoned(VALUE r_self)
 {
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);

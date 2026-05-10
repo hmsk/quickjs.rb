@@ -43,7 +43,7 @@ module Quickjs
 
     def gc!: () -> nil
 
-    def oom_poisoned?: () -> bool
+    def memory_poisoned?: () -> bool
 
     class Log
       attr_reader severity: Symbol

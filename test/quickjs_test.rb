@@ -318,9 +318,9 @@ describe Quickjs::VM do
     it "after OOM, marks the VM poisoned and refuses further evaluation" do
       # 1 MB limit; allocate a single buffer larger than that.
       vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
-      _(vm.oom_poisoned?).must_equal false
+      _(vm.memory_poisoned?).must_equal false
       _ { vm.eval_code('new Array(2_000_000).fill(0); void 0') }.must_raise Quickjs::RuntimeError
-      _(vm.oom_poisoned?).must_equal true
+      _(vm.memory_poisoned?).must_equal true
       err = _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
       _(err.message).must_match(/poisoned/)
     end
