@@ -310,8 +310,30 @@ describe Quickjs::VM do
     it "maintains the same context within a vm" do
       @vm.eval_code('const a = { b: "c" };')
       _(@vm.eval_code('a.b')).must_equal "c"
+      _(@vm.eval_code('a.b')).must_equal "c"
       @vm.eval_code('a.b = "d"')
       _(@vm.eval_code('a.b')).must_equal "d"
+    end
+
+    it "after OOM, marks the VM poisoned and refuses further evaluation" do
+      # 1 MB limit; allocate a single buffer larger than that.
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      _(vm.memory_poisoned?).must_equal false
+      _ { vm.eval_code('new Array(2_000_000).fill(0); void 0') }.must_raise Quickjs::RuntimeError
+      _(vm.memory_poisoned?).must_equal true
+      err = _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
+      _(err.message).must_match(/poisoned/)
+    end
+
+    it "memory_usage returns a hash of QuickJS heap stats" do
+      stats = @vm.memory_usage
+      _(stats).must_be_kind_of Hash
+      _(stats[:malloc_size]).must_be :>, 0
+      _(stats[:obj_count]).must_be :>, 0
+    end
+
+    it "gc! returns nil and is callable" do
+      _(@vm.gc!).must_be_nil
     end
 
     it "does not enable std/os module as default" do

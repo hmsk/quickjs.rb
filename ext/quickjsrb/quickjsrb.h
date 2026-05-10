@@ -57,6 +57,12 @@ typedef struct VMData
   VALUE alive_objects;
   VALUE module_loader;
   JSValue j_file_proxy_creator;
+  // Once the runtime has hit JS-level "out of memory", the QuickJS heap is in
+  // a fragile state where further evaluation can trigger a use-after-free in
+  // the parser-error-during-OOM cascade (segfault inside js_shape_hash_unlink).
+  // Trip this flag so subsequent eval_code/call calls refuse cleanly with a
+  // Ruby exception instead of risking a process crash.
+  bool oom_poisoned;
 } VMData;
 
 static void vm_free(void *ptr)
@@ -119,6 +125,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->alive_objects = rb_hash_new();
   data->module_loader = Qnil;
   data->j_file_proxy_creator = JS_UNDEFINED;
+  data->oom_poisoned = false;
 
   EvalTime *eval_time = malloc(sizeof(EvalTime));
   data->eval_time = eval_time;
