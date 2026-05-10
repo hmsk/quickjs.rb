@@ -930,6 +930,31 @@ static VALUE to_rb_return_value(JSContext *ctx, JSValue j_val)
   return result;
 }
 
+// Validate that r_code is a String and resolve the :filename option (default "<code>")
+// from the keyword-args hash that rb_scan_args(... "1:") collects. Both eval_code and
+// compile share this argument shape.
+static const char *parse_code_and_filename(VALUE r_code, VALUE r_opts)
+{
+  if (!RB_TYPE_P(r_code, T_STRING))
+  {
+    VALUE r_code_class = rb_class_name(CLASS_OF(r_code));
+    rb_raise(rb_eTypeError, "JavaScript code must be a String, got %s", StringValueCStr(r_code_class));
+  }
+  if (NIL_P(r_opts))
+    return "<code>";
+  VALUE r_filename = rb_hash_aref(r_opts, ID2SYM(rb_intern("filename")));
+  if (NIL_P(r_filename))
+    return "<code>";
+  Check_Type(r_filename, T_STRING);
+  return StringValueCStr(r_filename);
+}
+
+static void arm_eval_timer(VMData *data)
+{
+  clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
+  JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
+}
+
 static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
 {
   VMData *data;
@@ -937,31 +962,17 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
 
   VALUE r_code, r_opts;
   rb_scan_args(argc, argv, "1:", &r_code, &r_opts);
+  const char *filename = parse_code_and_filename(r_code, r_opts);
 
-  if (!RB_TYPE_P(r_code, T_STRING))
-  {
-    VALUE r_code_class = rb_class_name(CLASS_OF(r_code));
-    rb_raise(rb_eTypeError, "JavaScript code must be a String, got %s", StringValueCStr(r_code_class));
-  }
-
-  const char *filename = "<code>";
   bool async_mode = true;
   if (!NIL_P(r_opts))
   {
-    VALUE r_filename = rb_hash_aref(r_opts, ID2SYM(rb_intern("filename")));
-    if (!NIL_P(r_filename))
-    {
-      Check_Type(r_filename, T_STRING);
-      filename = StringValueCStr(r_filename);
-    }
-
     VALUE r_async = rb_hash_aref(r_opts, ID2SYM(rb_intern("async")));
     if (r_async == Qfalse)
       async_mode = false;
   }
 
-  clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
-  JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
+  arm_eval_timer(data);
 
   StringValue(r_code);
 
@@ -975,6 +986,71 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
   JSValue j_awaitedResult = js_std_await(data->context, j_codeResult); // This frees j_codeResult
   // JS_EVAL_FLAG_ASYNC wraps the result in {value, done} — extract the actual value
   // Free j_awaitedResult before to_rb_return_value because it may raise (longjmp), which would skip cleanup
+  JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
+  JS_FreeValue(data->context, j_awaitedResult);
+  return to_rb_return_value(data->context, j_returnedValue);
+}
+
+static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  VALUE r_code, r_opts;
+  rb_scan_args(argc, argv, "1:", &r_code, &r_opts);
+  const char *filename = parse_code_and_filename(r_code, r_opts);
+
+  arm_eval_timer(data);
+
+  StringValue(r_code);
+  JSValue j_func = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), filename,
+                           JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC | JS_EVAL_FLAG_COMPILE_ONLY);
+  if (JS_IsException(j_func))
+  {
+    return to_rb_value(data->context, j_func); // raises Ruby exception
+  }
+
+  size_t out_len;
+  uint8_t *out_buf = JS_WriteObject(data->context, &out_len, j_func, JS_WRITE_OBJ_BYTECODE);
+  JS_FreeValue(data->context, j_func);
+  if (out_buf == NULL)
+  {
+    VALUE r_msg = rb_str_new2("failed to serialize compiled bytecode");
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
+  }
+
+  VALUE r_bytecode = rb_str_new((const char *)out_buf, (long)out_len);
+  rb_enc_associate(r_bytecode, rb_ascii8bit_encoding());
+  js_free(data->context, out_buf);
+  return rb_obj_freeze(r_bytecode);
+}
+
+static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  if (!RB_TYPE_P(r_bytecode, T_STRING))
+  {
+    VALUE r_class = rb_class_name(CLASS_OF(r_bytecode));
+    rb_raise(rb_eTypeError, "Bytecode must be a String, got %s", StringValueCStr(r_class));
+  }
+
+  StringValue(r_bytecode);
+
+  arm_eval_timer(data);
+
+  JSValue j_func = JS_ReadObject(data->context,
+                                 (const uint8_t *)RSTRING_PTR(r_bytecode),
+                                 (size_t)RSTRING_LEN(r_bytecode),
+                                 JS_READ_OBJ_BYTECODE);
+  if (JS_IsException(j_func))
+  {
+    return to_rb_value(data->context, j_func); // raises
+  }
+
+  JSValue j_codeResult = JS_EvalFunction(data->context, j_func); // frees j_func
+  JSValue j_awaitedResult = js_std_await(data->context, j_codeResult);
   JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
   JS_FreeValue(data->context, j_awaitedResult);
   return to_rb_return_value(data->context, j_returnedValue);
@@ -1339,6 +1415,8 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_alloc_func(r_class_vm, vm_alloc);
   rb_define_method(r_class_vm, "initialize", vm_m_initialize, -1);
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, -1);
+  rb_define_private_method(r_class_vm, "_compile_to_bytecode", vm_m_compile, -1);
+  rb_define_private_method(r_class_vm, "_run_bytecode", vm_m_evalBytecode, 1);
   rb_define_method(r_class_vm, "call", vm_m_callGlobalFunction, -1);
   rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);

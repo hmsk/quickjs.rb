@@ -85,6 +85,21 @@ vm.eval_code('a.b = "d";')
 vm.eval_code('a.b;') #=> "d"
 ```
 
+#### `Quickjs::VM#compile`: 🚀 Cache parsed bundles as a `Quickjs::Runnable`
+
+Parsing large JS bundles is the dominant cost of a fresh evaluation. `compile` parses once and returns a `Quickjs::Runnable` wrapping the serialized bytecode; `run(on:)` executes it on any VM of the same QuickJS build, skipping the parser. Useful when the same bundle is evaluated repeatedly across short-lived VMs (test environments, page-per-VM web emulators).
+
+```rb
+runnable = Quickjs::VM.new.compile(File.read('big_bundle.js'), filename: 'big_bundle.js')
+
+vm = Quickjs::VM.new
+runnable.run(on: vm)                                     # use the given VM (no parse cost)
+runnable.run                                             # spin up a fresh VM with default options
+runnable.run(on: { features: [::Quickjs::POLYFILL_INTL] }) # ad-hoc VM with options
+```
+
+`Runnable#to_s` returns the underlying bytecode as a frozen ASCII-8BIT `String`, suitable for caching to memory or disk. `Quickjs::Runnable.new(bytecode_string)` reconstructs a `Runnable` from that blob — validation happens lazily at `run` time, so a corrupt or wrong-build blob surfaces as `Quickjs::RuntimeError` when executed. The bytecode format is tied to the QuickJS build, so include the gem version in your cache key if you persist across upgrades.
+
 #### `Quickjs::VM#call`: ⚡ Call a JS function directly with Ruby arguments
 
 ```rb
