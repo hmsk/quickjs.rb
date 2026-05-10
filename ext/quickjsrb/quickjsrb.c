@@ -270,7 +270,11 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     return JS_ToBool(ctx, j_val) > 0 ? Qtrue : Qfalse;
   }
   case JS_TAG_STRING:
+  case JS_TAG_STRING_ROPE:
   {
+    // QuickJS keeps long `s += chunk` chains as a rope (JS_TAG_STRING_ROPE)
+    // until something materialises them. JS_ToCStringLen flattens ropes
+    // transparently, so both tags share the same conversion path.
     size_t len;
     const char *str = JS_ToCStringLen(ctx, &len, j_val);
     if (str == NULL)
