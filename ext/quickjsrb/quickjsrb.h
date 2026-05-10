@@ -3,6 +3,7 @@
 
 #include "ruby.h"
 #include "ruby/encoding.h"
+#include "ruby/thread.h"
 
 #include "quickjs.h"
 #include "quickjs-libc.h"
@@ -110,6 +111,18 @@ static const rb_data_type_t vm_type = {
     .flags = RUBY_TYPED_FREE_IMMEDIATELY,
 };
 
+struct vm_create_args
+{
+  JSContext *context;
+};
+
+static void *vm_create_no_gvl(void *p)
+{
+  struct vm_create_args *args = p;
+  args->context = JS_NewContext(JS_NewRuntime());
+  return NULL;
+}
+
 static VALUE vm_alloc(VALUE r_self)
 {
   VMData *data;
@@ -123,8 +136,12 @@ static VALUE vm_alloc(VALUE r_self)
   EvalTime *eval_time = malloc(sizeof(EvalTime));
   data->eval_time = eval_time;
 
-  JSRuntime *runtime = JS_NewRuntime();
-  data->context = JS_NewContext(runtime);
+  // JSRuntime / JSContext creation is pure QuickJS C work — no Ruby state
+  // touched. Release the GVL so a background warmer thread can run this in
+  // parallel with the main thread on multi-core hosts.
+  struct vm_create_args args = {NULL};
+  rb_thread_call_without_gvl(vm_create_no_gvl, &args, NULL, NULL);
+  data->context = args.context;
 
   return obj;
 }

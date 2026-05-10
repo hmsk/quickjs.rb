@@ -785,6 +785,40 @@ static JSValue js_console_error(JSContext *ctx, JSValueConst this, int argc, JSV
   return js_quickjsrb_log(ctx, this, argc, argv, "error");
 }
 
+// Polyfill bytecode load + eval is the heavy part of VM construction
+// (POLYFILL_INTL alone is ~140ms — FormatJS locale data + IANA TZ tables).
+// Run it without the GVL so a background warmer thread can populate a VM
+// pool in parallel with the main thread on multi-core hosts.
+//
+// Releasing the GVL here is only safe because the polyfills are pure JS
+// (FormatJS / file / encoding / URL bundles) and no Ruby-bridged callbacks
+// have been registered on globalThis yet at this point in vm_m_initialize.
+// If the order ever changes — e.g. moving define_function setup ahead of
+// the polyfill loads — the polyfill bytecode could re-enter Ruby without
+// the GVL held. Keep host callback registration after polyfill loading.
+struct polyfill_load_args
+{
+  JSContext *ctx;
+  const uint8_t *buf;
+  size_t buf_len;
+  JSValue result;
+};
+
+static void *polyfill_load_no_gvl(void *p)
+{
+  struct polyfill_load_args *args = p;
+  JSValue obj = JS_ReadObject(args->ctx, args->buf, args->buf_len, JS_READ_OBJ_BYTECODE);
+  args->result = JS_EvalFunction(args->ctx, obj); // frees obj
+  return NULL;
+}
+
+static JSValue load_polyfill_bytecode(JSContext *ctx, const uint8_t *buf, size_t buf_len)
+{
+  struct polyfill_load_args args = {ctx, buf, buf_len, JS_UNDEFINED};
+  rb_thread_call_without_gvl(polyfill_load_no_gvl, &args, NULL, NULL);
+  return args.result;
+}
+
 static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 {
   VALUE r_opts;
@@ -850,15 +884,13 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JSValue j_defineIntl = JS_Eval(data->context, defineIntl, strlen(defineIntl), "<vm>", JS_EVAL_TYPE_GLOBAL);
     JS_FreeValue(data->context, j_defineIntl);
 
-    JSValue j_polyfillIntlObject = JS_ReadObject(data->context, &qjsc_polyfill_intl_en_min, qjsc_polyfill_intl_en_min_size, JS_READ_OBJ_BYTECODE);
-    JSValue j_polyfillIntlResult = JS_EvalFunction(data->context, j_polyfillIntlObject); // Frees polyfillIntlObject
+    JSValue j_polyfillIntlResult = load_polyfill_bytecode(data->context, &qjsc_polyfill_intl_en_min, qjsc_polyfill_intl_en_min_size);
     JS_FreeValue(data->context, j_polyfillIntlResult);
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
   {
-    JSValue j_polyfillFileObject = JS_ReadObject(data->context, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, JS_READ_OBJ_BYTECODE);
-    JSValue j_polyfillFileResult = JS_EvalFunction(data->context, j_polyfillFileObject);
+    JSValue j_polyfillFileResult = load_polyfill_bytecode(data->context, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size);
     JS_FreeValue(data->context, j_polyfillFileResult);
 
     quickjsrb_init_file_proxy(data);
@@ -866,15 +898,13 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillEncodingId))))
   {
-    JSValue j_polyfillEncodingObject = JS_ReadObject(data->context, &qjsc_polyfill_encoding_min, qjsc_polyfill_encoding_min_size, JS_READ_OBJ_BYTECODE);
-    JSValue j_polyfillEncodingResult = JS_EvalFunction(data->context, j_polyfillEncodingObject);
+    JSValue j_polyfillEncodingResult = load_polyfill_bytecode(data->context, &qjsc_polyfill_encoding_min, qjsc_polyfill_encoding_min_size);
     JS_FreeValue(data->context, j_polyfillEncodingResult);
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillUrlId))))
   {
-    JSValue j_polyfillUrlObject = JS_ReadObject(data->context, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size, JS_READ_OBJ_BYTECODE);
-    JSValue j_polyfillUrlResult = JS_EvalFunction(data->context, j_polyfillUrlObject);
+    JSValue j_polyfillUrlResult = load_polyfill_bytecode(data->context, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size);
     JS_FreeValue(data->context, j_polyfillUrlResult);
   }
 
