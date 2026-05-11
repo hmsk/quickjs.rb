@@ -924,6 +924,10 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     quickjsrb_init_crypto(data->context, j_global);
   }
 
+  // Host callbacks (console, setTimeout, Ruby-bridged functions) are
+  // registered below this point — after all polyfill loading above.
+  // load_polyfill_bytecode releases the GVL; any code moved above this
+  // line that touches Ruby APIs must re-acquire it first.
   JSValue j_console = JS_NewObject(data->context);
   JS_SetPropertyStr(
       data->context, j_console, "log",
@@ -1092,6 +1096,9 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
 
   arm_eval_timer(data);
 
+  // GVL intentionally held here: user bytecode may invoke Ruby-bridged
+  // callbacks registered via define_function, which call Ruby APIs.
+  // Unlike polyfill_load_no_gvl, this path cannot release the GVL safely.
   JSValue j_func = JS_ReadObject(data->context,
                                  (const uint8_t *)RSTRING_PTR(r_bytecode),
                                  (size_t)RSTRING_LEN(r_bytecode),
