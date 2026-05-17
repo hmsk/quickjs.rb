@@ -317,6 +317,22 @@ vm.eval_code('1 + 1') # raises Quickjs::RuntimeError "VM has been disposed"
 Thread.new { vm.dispose! }
 ```
 
+#### `Quickjs::VM#drain_microtasks!`: 🌀 Run pending microtasks to completion
+
+QuickJS does not automatically drain the microtask queue at the end of a synchronous `eval_code` / `call`. Continuations scheduled via `Promise.resolve().then(...)`, `queueMicrotask`-style patterns, or `JS_EnqueueJob` stay pending until something explicitly pumps them — `await` inside JS does, but a sync return path does not.
+
+```rb
+vm = Quickjs::VM.new
+vm.eval_code('globalThis.x = 0; Promise.resolve().then(() => { x = 1 })')
+vm.eval_code('x')      #=> 0  (the .then() callback hasn't run yet)
+vm.drain_microtasks!   #=> 1  (number of jobs executed)
+vm.eval_code('x')      #=> 1
+```
+
+`drain_microtasks!` keeps pumping until the queue empties, so microtasks that schedule further microtasks all run in a single call. The drain is bounded by the VM's `timeout_msec`, and any exception that escapes a job is raised as a `Quickjs::RuntimeError`.
+
+This is mostly useful when matching the policy of engines that drain implicitly (e.g. V8) — call it after `eval_code` / `call` if downstream JS code relies on `.then()` continuations having run.
+
 ### Value Conversion
 
 | JavaScript | | Ruby | Note |

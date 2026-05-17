@@ -450,6 +450,77 @@ describe Quickjs::VM do
     _ { vm.eval_code("await longProcess()") }.must_raise Quickjs::InterruptedError
   end
 
+  describe "DrainMicrotasks" do
+    before do
+      @vm = Quickjs::VM.new
+    end
+
+    it "returns 0 when no microtasks are pending" do
+      _(@vm.drain_microtasks!).must_equal 0
+    end
+
+    it "runs a Promise.resolve().then() callback that eval_code leaves pending" do
+      @vm.eval_code('globalThis.x = 0; Promise.resolve().then(() => { x = 1 }); void 0')
+      _(@vm.eval_code('x')).must_equal 0
+      _(@vm.drain_microtasks!).must_equal 1
+      _(@vm.eval_code('x')).must_equal 1
+    end
+
+    it "drains chained then() across multiple ticks" do
+      @vm.eval_code(<<~JS)
+        globalThis.log = []
+        Promise.resolve()
+          .then(() => log.push('a'))
+          .then(() => log.push('b'))
+          .then(() => log.push('c'))
+        void 0
+      JS
+      _(@vm.drain_microtasks!).must_equal 3
+      _(@vm.eval_code('log.join(",")')).must_equal 'a,b,c'
+    end
+
+    it "drains microtasks scheduled from within other microtasks" do
+      @vm.eval_code(<<~JS)
+        globalThis.depth = 0
+        function schedule(n) {
+          if (n === 0) return
+          Promise.resolve().then(() => { depth++; schedule(n - 1) })
+        }
+        schedule(5)
+        void 0
+      JS
+      _(@vm.drain_microtasks!).must_equal 5
+      _(@vm.eval_code('depth')).must_equal 5
+    end
+
+    it "leaves the queue empty after draining" do
+      @vm.eval_code('Promise.resolve().then(() => {}); void 0')
+      _(@vm.drain_microtasks!).must_equal 1
+      _(@vm.drain_microtasks!).must_equal 0
+    end
+
+    it "respects timeout_msec while draining" do
+      vm = Quickjs::VM.new(timeout_msec: 100)
+      vm.eval_code(<<~JS)
+        function loop() { Promise.resolve().then(loop) }
+        loop()
+        void 0
+      JS
+
+      started = Time.now.to_f * 1000
+      vm.drain_microtasks!
+      elapsed = Time.now.to_f * 1000 - started
+      assert_operator elapsed, :>=, 100
+      assert_operator elapsed, :<, 300
+    end
+
+    it "raises Quickjs::RuntimeError after the VM is OOM-poisoned" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      _ { vm.eval_code('new Array(2_000_000).fill(0); void 0') }.must_raise Quickjs::RuntimeError
+      _ { vm.drain_microtasks! }.must_raise Quickjs::RuntimeError
+    end
+  end
+
   describe "GlobalFunction" do
     before do
       @vm = Quickjs::VM.new
