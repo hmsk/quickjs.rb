@@ -64,21 +64,33 @@ typedef struct VMData
   // Trip this flag so subsequent eval_code/call calls refuse cleanly with a
   // Ruby exception instead of risking a process crash.
   bool oom_poisoned;
+  // Set by VM#dispose! to release the multi-MB JS heap before Ruby GC sees
+  // enough pressure to collect the wrapper. Doubles as a double-free guard
+  // for the dfree handler.
+  bool disposed;
 } VMData;
+
+static void vm_teardown_context(JSContext *ctx)
+{
+  JSRuntime *runtime = JS_GetRuntime(ctx);
+  JS_SetInterruptHandler(runtime, NULL, NULL);
+  js_std_free_handlers(runtime);
+  JS_FreeContext(ctx);
+  JS_FreeRuntime(runtime);
+}
 
 static void vm_free(void *ptr)
 {
   VMData *data = (VMData *)ptr;
   free(data->eval_time);
 
-  if (!JS_IsUndefined(data->j_file_proxy_creator))
-    JS_FreeValue(data->context, data->j_file_proxy_creator);
+  if (!data->disposed)
+  {
+    if (!JS_IsUndefined(data->j_file_proxy_creator))
+      JS_FreeValue(data->context, data->j_file_proxy_creator);
 
-  JSRuntime *runtime = JS_GetRuntime(data->context);
-  JS_SetInterruptHandler(runtime, NULL, NULL);
-  js_std_free_handlers(runtime);
-  JS_FreeContext(data->context);
-  JS_FreeRuntime(runtime);
+    vm_teardown_context(data->context);
+  }
 
   xfree(ptr);
 }
@@ -139,6 +151,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->module_loader = Qnil;
   data->j_file_proxy_creator = JS_UNDEFINED;
   data->oom_poisoned = false;
+  data->disposed = false;
 
   EvalTime *eval_time = malloc(sizeof(EvalTime));
   data->eval_time = eval_time;
