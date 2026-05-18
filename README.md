@@ -162,7 +162,27 @@ vm.eval_code('a()') #=> 'a-b-result'
 
 The Proc receives the (already normalized) module specifier and returns the module source as a `String`, or `nil` to signal "not found" (which raises `Quickjs::ReferenceError` on the JS side). Pass `nil` to clear a previously set loader.
 
-When `module_loader=` is set, pass `filename:` to `import` instead of `from:` to resolve a named specifier directly through the loader — no inline bridge source needed.
+When `module_loader=` is set, pass `filename:` to `import` instead of `from:` to resolve a named specifier directly through the loader — no inline bridge source needed. Passing both `from:` and `filename:` raises `ArgumentError`.
+
+`import` awaits the module's top-level evaluation — top-level `await`, synchronous body execution, and any chained dynamic `import()`. The call blocks until the module's settle promise resolves. A top-level throw, a failed dynamic `import()`, or a rejected top-level `await` propagates back to Ruby as the matching `Quickjs::*Error` instead of being silently dropped.
+
+#### `Quickjs::VM#on_unhandled_rejection=`: 🚨 Catch promise rejections that have no handler
+
+Set a `Proc` to be notified when a JS Promise rejects with no `.catch` / `then(_, onRejected)` attached at the time of rejection — fire-and-forget chains, failed dynamic imports without `try`, etc.
+
+```rb
+vm = Quickjs::VM.new
+vm.on_unhandled_rejection = ->(err) {
+  warn "[JS] unhandled rejection: #{err.class} #{err.message}"
+}
+
+vm.eval_code("const _p = Promise.reject(new TypeError('drift'));")
+#=> warns: [JS] unhandled rejection: Quickjs::TypeError drift
+```
+
+The callback receives a `Quickjs::*Error` matching the rejection reason (`Quickjs::TypeError` for `new TypeError`, etc.); non-`Error` rejections (`Promise.reject('str')`, `Promise.reject({})`) are wrapped in `Quickjs::RuntimeError`. Exceptions raised inside the callback are swallowed — propagating them out would corrupt the QuickJS runtime.
+
+The tracker fires synchronously when QuickJS first observes the rejection. A `.catch` attached later in the same tick does **not** suppress the notification, and a chain like `Promise.reject(x).then(y).then(z)` without a terminating `.catch` may emit a notification per intermediate promise. If that noise is a problem, attach handlers synchronously or dedupe by reason identity in your callback. The callback runs on the QuickJS stack — heavy work blocks JS execution.
 
 #### `Quickjs::VM#define_function`: 💎 Define a global function for JS by Ruby
 

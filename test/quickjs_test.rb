@@ -852,6 +852,83 @@ describe Quickjs::VM do
 
       _(@vm.eval_code("greet('world')")).must_equal 'Hello, world!'
     end
+
+    it "raises when a module body throws synchronously" do
+      err = _ {
+        @vm.import('* as x', from: "throw new TypeError('top-level boom');")
+      }.must_raise Quickjs::TypeError
+      _(err.message).must_match(/top-level boom/)
+    end
+
+    it "raises when the loader-resolved module throws synchronously" do
+      @vm.module_loader = ->(name) {
+        "export const x = 1; throw new RangeError('loader-throw');" if name == 'bad'
+      }
+      _ {
+        @vm.import(['x'], filename: 'bad')
+      }.must_raise Quickjs::RangeError
+    end
+
+    it "raises when top-level await rejects" do
+      err = _ {
+        @vm.import('* as x', from: "await Promise.reject(new Error('async boom'));")
+      }.must_raise Quickjs::RuntimeError
+      _(err.message).must_match(/async boom/)
+    end
+
+    it "raises ArgumentError when both from: and filename: are passed" do
+      _ {
+        @vm.import('x', from: 'export default 1;', filename: 'x')
+      }.must_raise ArgumentError
+    end
+  end
+
+  describe "on_unhandled_rejection" do
+    before do
+      @vm = Quickjs::VM.new
+    end
+
+    it "is nil by default" do
+      _(@vm.on_unhandled_rejection).must_be_nil
+    end
+
+    it "fires the callback with a Ruby exception for a fire-and-forget rejection" do
+      captured = []
+      @vm.on_unhandled_rejection = ->(err) { captured << err }
+      @vm.eval_code("void Promise.reject(new TypeError('drift'));")
+
+      _(captured.size).must_equal 1
+      _(captured.first).must_be_kind_of Quickjs::TypeError
+      _(captured.first.message).must_match(/drift/)
+    end
+
+    it "wraps non-Error rejection reasons in Quickjs::RuntimeError" do
+      captured = []
+      @vm.on_unhandled_rejection = ->(err) { captured << err }
+      @vm.eval_code("void Promise.reject('just-a-string');")
+
+      _(captured.first).must_be_kind_of Quickjs::RuntimeError
+      _(captured.first.message).must_match(/just-a-string/)
+    end
+
+    it "accepts nil to clear a previously set callback" do
+      @vm.on_unhandled_rejection = ->(err) {}
+      @vm.on_unhandled_rejection = nil
+      _(@vm.on_unhandled_rejection).must_be_nil
+    end
+
+    it "rejects non-Proc, non-nil values" do
+      _ { @vm.on_unhandled_rejection = 'not a proc' }.must_raise TypeError
+    end
+
+    it "swallows exceptions raised inside the callback" do
+      called = false
+      @vm.on_unhandled_rejection = ->(_) { called = true; raise 'callback boom' }
+      @vm.eval_code("void Promise.reject(new Error('x'));")
+
+      _(called).must_equal true
+      _(@vm.eval_code('42')).must_equal 42
+    end
   end
 
   describe "ModuleLoader" do

@@ -37,6 +37,10 @@ module Quickjs
 
     def module_loader=: (^(String) -> String? | nil) -> (^(String) -> String? | nil)
 
+    def on_unhandled_rejection: () -> (^(Quickjs::RuntimeError) -> void | nil)
+
+    def on_unhandled_rejection=: (^(Quickjs::RuntimeError) -> void | nil) -> (^(Quickjs::RuntimeError) -> void | nil)
+
     def on_log: () { (Log) -> void } -> nil
 
     def memory_usage: () -> Hash[Symbol, Integer]
