@@ -31,7 +31,7 @@ module Quickjs
                        | (Array[String | Symbol] path, *Symbol flags) { (*untyped) -> untyped } -> Array[Symbol]
 
     def import: (String | Array[String] | Hash[Symbol, String] imported, from: String, ?code_to_expose: String?) -> true
-              | (String | Array[String] | Hash[Symbol, String] imported, filename: String) -> true
+              | (String | Array[String] | Hash[Symbol, String] imported, filename: String, ?code_to_expose: String?) -> true
 
     def module_loader: () -> (^(String) -> String? | nil)
 

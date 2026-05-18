@@ -840,6 +840,21 @@ describe Quickjs::VM do
       _(@vm.eval_code('!!globalThis.Imported')).must_equal false
     end
 
+    it "code_to_expose with an empty string runs the module for side effects only" do
+      @vm.import('Imported', from: 'globalThis.sideEffect = true; export default 1;', code_to_expose: '')
+
+      _(@vm.eval_code('globalThis.sideEffect')).must_equal true
+      _(@vm.eval_code('!!globalThis.Imported')).must_equal false
+    end
+
+    it "code_to_expose also works with filename:" do
+      @vm.module_loader = ->(name) { 'export const greet = () => "hi";' if name == 'greet' }
+      @vm.import(['greet'], filename: 'greet', code_to_expose: 'globalThis.shout = () => greet().toUpperCase();')
+
+      _(@vm.eval_code('shout()')).must_equal 'HI'
+      _(@vm.eval_code('typeof globalThis.greet')).must_equal 'undefined'
+    end
+
     it "imports a script which throws error result raising an exception" do
       _ {
         @vm.import('* as all', from: 'should be syntax error')

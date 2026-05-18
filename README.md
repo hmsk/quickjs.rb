@@ -144,6 +144,22 @@ vm.import('DefaultExport', from: File.read('exports.esm.js'))
 vm.import('* as all', from: File.read('exports.esm.js'))
 ```
 
+By default each imported binding is attached to `globalThis` under its own name so later `eval_code` / `call` can see it. Pass `code_to_expose:` to replace that step with your own JS — useful for renaming, attaching the import somewhere other than `globalThis`, or skipping the global assignment entirely for side-effect-only imports.
+
+```rb
+# Rename on the way in
+vm.import('Imported', from: File.read('exports.esm.js'),
+          code_to_expose: 'globalThis.RenamedImported = Imported;')
+
+vm.eval_code('RenamedImported()')   #=> calls the default export
+vm.eval_code('!!globalThis.Imported') #=> false — the original name was never assigned
+
+# Side-effect-only import: run the module body but don't expose anything
+vm.import('initSomething', from: File.read('setup.esm.js'), code_to_expose: '')
+```
+
+`code_to_expose` is just a JavaScript fragment that runs after the `import` statement, with the imported binding(s) in scope under the name(s) you requested. It works with both `from:` and `filename:`.
+
 #### `Quickjs::VM#module_loader=`: 🧩 Resolve `import` specifiers from Ruby
 
 By default, `import` specifiers that aren't already loaded fall through to QuickJS's filesystem loader. Set a `module_loader` Proc to resolve specifiers in-memory instead — useful when the source code lives in a database, an importmap, or a virtual filesystem.
