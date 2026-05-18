@@ -331,7 +331,7 @@ vm.eval_code('x')      #=> 1
 
 `drain_microtasks!` keeps pumping until the queue empties, so microtasks that schedule further microtasks all run in a single call. The drain is bounded by the VM's `timeout_msec`, and any exception that escapes a job is raised as a `Quickjs::RuntimeError`.
 
-This is mostly useful when matching the policy of engines that drain implicitly (e.g. V8) — call it after `eval_code` / `call` if downstream JS code relies on `.then()` continuations having run.
+Useful when porting JS that assumed V8's implicit-drain semantics — V8 (and therefore [mini_racer](https://github.com/rubyjs/mini_racer)) flushes microtasks at every eval boundary, so `eval_code` already sees `.then()` continuations run by the time it returns. QuickJS doesn't. Patterns like `Promise.resolve().then(() => { ... })`, `queueMicrotask`-style chains, and Stimulus/Hotwire callbacks that assume "the next microtask tick" silently fall through unless you call `drain_microtasks!` explicitly.
 
 ### Value Conversion
 
