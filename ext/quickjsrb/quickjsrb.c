@@ -1464,23 +1464,15 @@ static VALUE vm_m_get_module_loader(VALUE r_self)
   return data->module_loader;
 }
 
-static VALUE vm_m_set_on_unhandled_rejection(VALUE r_self, VALUE r_callback)
+static VALUE vm_m_on_unhandled_rejection(VALUE r_self)
 {
+  rb_need_block();
+
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
-  if (!NIL_P(r_callback) && !rb_obj_is_kind_of(r_callback, rb_cProc))
-    rb_raise(rb_eTypeError, "on_unhandled_rejection must be a Proc or nil");
-
-  data->on_unhandled_rejection = r_callback;
-  return r_callback;
-}
-
-static VALUE vm_m_get_on_unhandled_rejection(VALUE r_self)
-{
-  VMData *data;
-  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
-  return data->on_unhandled_rejection;
+  data->on_unhandled_rejection = rb_block_proc();
+  return Qnil;
 }
 
 static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
@@ -1583,8 +1575,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
   rb_define_method(r_class_vm, "module_loader", vm_m_get_module_loader, 0);
   rb_define_method(r_class_vm, "module_loader=", vm_m_set_module_loader, 1);
-  rb_define_method(r_class_vm, "on_unhandled_rejection", vm_m_get_on_unhandled_rejection, 0);
-  rb_define_method(r_class_vm, "on_unhandled_rejection=", vm_m_set_on_unhandled_rejection, 1);
+  rb_define_method(r_class_vm, "on_unhandled_rejection", vm_m_on_unhandled_rejection, 0);
   rb_define_method(r_class_vm, "on_log", vm_m_on_log, 0);
   rb_define_method(r_class_vm, "memory_usage", vm_m_memoryUsage, 0);
   rb_define_method(r_class_vm, "gc!", vm_m_runGC, 0);

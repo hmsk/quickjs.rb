@@ -888,13 +888,9 @@ describe Quickjs::VM do
       @vm = Quickjs::VM.new
     end
 
-    it "is nil by default" do
-      _(@vm.on_unhandled_rejection).must_be_nil
-    end
-
-    it "fires the callback with a Ruby exception for a fire-and-forget rejection" do
+    it "fires the block with a Ruby exception for a fire-and-forget rejection" do
       captured = []
-      @vm.on_unhandled_rejection = ->(err) { captured << err }
+      @vm.on_unhandled_rejection { |err| captured << err }
       @vm.eval_code("void Promise.reject(new TypeError('drift'));")
 
       _(captured.size).must_equal 1
@@ -904,26 +900,31 @@ describe Quickjs::VM do
 
     it "wraps non-Error rejection reasons in Quickjs::RuntimeError" do
       captured = []
-      @vm.on_unhandled_rejection = ->(err) { captured << err }
+      @vm.on_unhandled_rejection { |err| captured << err }
       @vm.eval_code("void Promise.reject('just-a-string');")
 
       _(captured.first).must_be_kind_of Quickjs::RuntimeError
       _(captured.first.message).must_match(/just-a-string/)
     end
 
-    it "accepts nil to clear a previously set callback" do
-      @vm.on_unhandled_rejection = ->(err) {}
-      @vm.on_unhandled_rejection = nil
-      _(@vm.on_unhandled_rejection).must_be_nil
+    it "replaces the previously registered block on a second call" do
+      first = []
+      second = []
+      @vm.on_unhandled_rejection { |err| first << err }
+      @vm.on_unhandled_rejection { |err| second << err }
+      @vm.eval_code("void Promise.reject(new Error('boom'));")
+
+      _(first).must_be_empty
+      _(second.size).must_equal 1
     end
 
-    it "rejects non-Proc, non-nil values" do
-      _ { @vm.on_unhandled_rejection = 'not a proc' }.must_raise TypeError
+    it "raises LocalJumpError when called without a block" do
+      _ { @vm.on_unhandled_rejection }.must_raise LocalJumpError
     end
 
-    it "swallows exceptions raised inside the callback" do
+    it "swallows exceptions raised inside the block" do
       called = false
-      @vm.on_unhandled_rejection = ->(_) { called = true; raise 'callback boom' }
+      @vm.on_unhandled_rejection { |_| called = true; raise 'callback boom' }
       @vm.eval_code("void Promise.reject(new Error('x'));")
 
       _(called).must_equal true
