@@ -391,7 +391,10 @@ describe Quickjs::VM do
 
     started = Time.now.to_f * 1000
     _ { vm.eval_code("while(1) {}") }.must_raise Quickjs::InterruptedError
-    assert_in_delta(started + 200, Time.now.to_f * 1000, 10)
+    # CI runners under load have been observed drifting ~55ms past the
+    # configured 200ms. Widen the window so the test catches "timer wildly
+    # wrong" (orders of magnitude off) without flapping on normal noise.
+    assert_in_delta(started + 200, Time.now.to_f * 1000, 100)
   end
 
   it "can enable setTimeout selectively" do
