@@ -187,6 +187,28 @@ VALUE r_try_json_parse(VALUE r_str)
   return rb_funcall(rb_const_get(rb_cClass, rb_intern("JSON")), rb_intern("parse"), 1, r_str);
 }
 
+// Convert a JS Error.stack string into a Ruby Array suitable for
+// Exception#set_backtrace. Lines are stripped; empty lines (including the
+// trailing newline that QuickJS appends) are dropped. The frames keep
+// QuickJS's native format ("at func (file:line)") — Ruby's backtrace API
+// doesn't enforce a layout, and reshaping into "file:line:in 'method'"
+// would lose information for no real win.
+static VALUE r_backtrace_from_js_stack(const char *stack)
+{
+  if (stack == NULL || stack[0] == '\0')
+    return Qnil;
+
+  VALUE r_lines = rb_str_split(rb_str_new_cstr(stack), "\n");
+  VALUE r_filtered = rb_ary_new();
+  for (long i = 0; i < RARRAY_LEN(r_lines); i++)
+  {
+    VALUE r_line = rb_funcall(rb_ary_entry(r_lines, i), rb_intern("strip"), 0);
+    if (RSTRING_LEN(r_line) > 0)
+      rb_ary_push(r_filtered, r_line);
+  }
+  return RARRAY_LEN(r_filtered) > 0 ? r_filtered : Qnil;
+}
+
 VALUE to_r_json(JSContext *ctx, JSValue j_val)
 {
   JSValue j_stringified = JS_JSONStringify(ctx, j_val, JS_UNDEFINED, JS_UNDEFINED);
@@ -431,14 +453,11 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, VALUE r_visited)
       VMData *data = JS_GetContextOpaque(ctx);
       VALUE r_headline = rb_str_new2(headline);
       dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
-
-      JS_FreeValue(ctx, j_errorClassMessage);
-      JS_FreeValue(ctx, j_errorClassName);
-      JS_FreeValue(ctx, j_stackTrace);
-      JS_FreeCString(ctx, stackTrace);
       free(headline);
 
       VALUE r_error_class, r_error_message = rb_str_new2(errorClassMessage);
+      VALUE r_error_name = rb_str_new2(errorClassName);
+      VALUE r_backtrace = r_backtrace_from_js_stack(stackTrace);
       if (is_native_error_name(errorClassName))
       {
         r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
@@ -464,11 +483,18 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, VALUE r_visited)
       {
         r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR);
       }
+      JS_FreeValue(ctx, j_errorClassMessage);
+      JS_FreeValue(ctx, j_errorClassName);
+      JS_FreeValue(ctx, j_stackTrace);
+      JS_FreeCString(ctx, stackTrace);
       JS_FreeCString(ctx, errorClassName);
       JS_FreeCString(ctx, errorClassMessage);
       JS_FreeValue(ctx, j_exceptionVal);
 
-      rb_exc_raise(rb_funcall(r_error_class, rb_intern("new"), 2, r_error_message, rb_str_new2(errorClassName)));
+      VALUE r_exc = rb_funcall(r_error_class, rb_intern("new"), 2, r_error_message, r_error_name);
+      if (!NIL_P(r_backtrace))
+        rb_funcall(r_exc, rb_intern("set_backtrace"), 1, r_backtrace);
+      rb_exc_raise(r_exc);
     }
     else // exception without Error object
     {
@@ -574,19 +600,27 @@ static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason)
 
     JSValue j_name = JS_GetPropertyStr(ctx, j_reason, "name");
     JSValue j_message = JS_GetPropertyStr(ctx, j_reason, "message");
+    JSValue j_stack = JS_GetPropertyStr(ctx, j_reason, "stack");
     const char *name = JS_ToCString(ctx, j_name);
     const char *message = JS_ToCString(ctx, j_message);
+    const char *stack = JS_ToCString(ctx, j_stack);
 
     VALUE r_class = is_native_error_name(name)
                         ? QUICKJSRB_ERROR_FOR(name)
                         : QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR);
     VALUE r_exc = rb_funcall(r_class, rb_intern("new"), 2,
                              rb_str_new2(message), rb_str_new2(name));
+    VALUE r_backtrace = r_backtrace_from_js_stack(stack);
+    if (!NIL_P(r_backtrace))
+      rb_funcall(r_exc, rb_intern("set_backtrace"), 1, r_backtrace);
 
     JS_FreeCString(ctx, name);
     JS_FreeCString(ctx, message);
+    if (stack)
+      JS_FreeCString(ctx, stack);
     JS_FreeValue(ctx, j_name);
     JS_FreeValue(ctx, j_message);
+    JS_FreeValue(ctx, j_stack);
     return r_exc;
   }
 
