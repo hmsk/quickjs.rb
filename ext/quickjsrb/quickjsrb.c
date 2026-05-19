@@ -566,6 +566,75 @@ static JSModuleDef *quickjsrb_module_loader(JSContext *ctx, const char *module_n
   return m;
 }
 
+static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason)
+{
+  if (JS_IsError(ctx, j_reason))
+  {
+    VALUE r_maybe_ruby_error = find_ruby_error(ctx, j_reason);
+    if (!NIL_P(r_maybe_ruby_error))
+      return r_maybe_ruby_error;
+
+    JSValue j_name = JS_GetPropertyStr(ctx, j_reason, "name");
+    JSValue j_message = JS_GetPropertyStr(ctx, j_reason, "message");
+    const char *name = JS_ToCString(ctx, j_name);
+    const char *message = JS_ToCString(ctx, j_message);
+
+    VALUE r_class = is_native_error_name(name)
+                        ? QUICKJSRB_ERROR_FOR(name)
+                        : QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR);
+    VALUE r_exc = rb_funcall(r_class, rb_intern("new"), 2,
+                             rb_str_new2(message), rb_str_new2(name));
+
+    JS_FreeCString(ctx, name);
+    JS_FreeCString(ctx, message);
+    JS_FreeValue(ctx, j_name);
+    JS_FreeValue(ctx, j_message);
+    return r_exc;
+  }
+
+  const char *str = JS_ToCString(ctx, j_reason);
+  VALUE r_exc = rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"),
+                           2, rb_str_new2(str ? str : "(non-stringifiable rejection)"), Qnil);
+  if (str)
+    JS_FreeCString(ctx, str);
+  return r_exc;
+}
+
+struct rejection_call_args
+{
+  VALUE proc;
+  VALUE r_reason;
+};
+
+static VALUE r_rejection_call(VALUE r_args_val)
+{
+  struct rejection_call_args *args = (struct rejection_call_args *)r_args_val;
+  return rb_funcall(args->proc, rb_intern("call"), 1, args->r_reason);
+}
+
+static void quickjsrb_promise_rejection_tracker(
+    JSContext *ctx, JSValueConst promise, JSValueConst reason,
+    JS_BOOL is_handled, void *opaque)
+{
+  if (is_handled)
+    return;
+
+  VMData *data = JS_GetContextOpaque(ctx);
+  if (NIL_P(data->on_unhandled_rejection))
+    return;
+
+  VALUE r_reason = r_exception_from_js_reason(ctx, reason);
+  struct rejection_call_args args = {data->on_unhandled_rejection, r_reason};
+  int state;
+  rb_protect(r_rejection_call, (VALUE)&args, &state);
+  if (state)
+  {
+    // Longjmping out of a QuickJS host callback corrupts the runtime, so
+    // a raise inside the user's tracker has to be dropped on the floor.
+    rb_set_errinfo(Qnil);
+  }
+}
+
 static VALUE r_try_call_proc(VALUE r_try_args)
 {
   return rb_funcall(
@@ -863,6 +932,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   JS_SetMaxStackSize(runtime, NUM2UINT(r_max_stack_size));
 
   JS_SetModuleLoaderFunc2(runtime, NULL, quickjsrb_module_loader, js_module_check_attributes, NULL);
+  JS_SetHostPromiseRejectionTracker(runtime, quickjsrb_promise_rejection_tracker, NULL);
   js_std_init_handlers(runtime);
 
   JSValue j_global = JS_GetGlobalObject(data->context);
@@ -1413,6 +1483,17 @@ static VALUE vm_m_get_module_loader(VALUE r_self)
   return data->module_loader;
 }
 
+static VALUE vm_m_on_unhandled_rejection(VALUE r_self)
+{
+  rb_need_block();
+
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  data->on_unhandled_rejection = rb_block_proc();
+  return Qnil;
+}
+
 static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
 {
   VALUE r_import_string, r_opts;
@@ -1427,6 +1508,8 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
     rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
     return Qnil;
   }
+  if (!NIL_P(r_from) && !NIL_P(r_filename))
+    rb_raise(rb_eArgError, "pass either from: (inline source) or filename: (loader-resolved), not both");
   VALUE r_custom_exposure = rb_hash_aref(r_opts, ID2SYM(rb_intern("code_to_expose")));
 
   VMData *data;
@@ -1479,7 +1562,16 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
 
   JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), "<vm>", JS_EVAL_TYPE_MODULE);
   free(result);
-  JS_FreeValue(data->context, j_codeResult);
+  if (JS_IsException(j_codeResult))
+    return to_rb_value(data->context, j_codeResult);
+
+  // Module eval returns a Promise. Awaiting it surfaces top-level throws,
+  // rejected dynamic imports, and rejected top-level awaits as Ruby
+  // exceptions instead of silently dropping them.
+  JSValue j_awaited = js_std_await(data->context, j_codeResult);
+  if (JS_IsException(j_awaited))
+    return to_rb_value(data->context, j_awaited);
+  JS_FreeValue(data->context, j_awaited);
 
   return Qtrue;
 }
@@ -1504,6 +1596,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
   rb_define_method(r_class_vm, "module_loader", vm_m_get_module_loader, 0);
   rb_define_method(r_class_vm, "module_loader=", vm_m_set_module_loader, 1);
+  rb_define_method(r_class_vm, "on_unhandled_rejection", vm_m_on_unhandled_rejection, 0);
   rb_define_method(r_class_vm, "on_log", vm_m_on_log, 0);
   rb_define_method(r_class_vm, "memory_usage", vm_m_memoryUsage, 0);
   rb_define_method(r_class_vm, "gc!", vm_m_runGC, 0);

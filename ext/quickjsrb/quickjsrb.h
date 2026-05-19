@@ -57,6 +57,7 @@ typedef struct VMData
   VALUE log_listener;
   VALUE alive_objects;
   VALUE module_loader;
+  VALUE on_unhandled_rejection;
   JSValue j_file_proxy_creator;
   // Once the runtime has hit JS-level "out of memory", the QuickJS heap is in
   // a fragile state where further evaluation can trigger a use-after-free in
@@ -107,6 +108,7 @@ static void vm_mark(void *ptr)
   rb_gc_mark_movable(data->log_listener);
   rb_gc_mark_movable(data->alive_objects);
   rb_gc_mark_movable(data->module_loader);
+  rb_gc_mark_movable(data->on_unhandled_rejection);
 }
 
 static void vm_compact(void *ptr)
@@ -116,6 +118,7 @@ static void vm_compact(void *ptr)
   data->log_listener = rb_gc_location(data->log_listener);
   data->alive_objects = rb_gc_location(data->alive_objects);
   data->module_loader = rb_gc_location(data->module_loader);
+  data->on_unhandled_rejection = rb_gc_location(data->on_unhandled_rejection);
 }
 
 static const rb_data_type_t vm_type = {
@@ -149,6 +152,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->log_listener = Qnil;
   data->alive_objects = rb_hash_new();
   data->module_loader = Qnil;
+  data->on_unhandled_rejection = Qnil;
   data->j_file_proxy_creator = JS_UNDEFINED;
   data->oom_poisoned = false;
   data->disposed = false;
