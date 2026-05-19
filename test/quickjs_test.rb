@@ -358,6 +358,51 @@ describe Quickjs::VM do
     end
   end
 
+  describe "Dispose" do
+    it "dispose! returns nil and flips disposed?" do
+      vm = Quickjs::VM.new
+      _(vm.disposed?).must_equal false
+      _(vm.dispose!).must_be_nil
+      _(vm.disposed?).must_equal true
+    end
+
+    it "dispose! is idempotent" do
+      vm = Quickjs::VM.new
+      vm.dispose!
+      _(vm.dispose!).must_be_nil
+      _(vm.disposed?).must_equal true
+    end
+
+    {
+      eval_code:       ->(vm) { vm.eval_code('1 + 1') },
+      compile:         ->(vm) { vm.compile('1 + 1') },
+      call:            ->(vm) { vm.call('foo') },
+      define_function: ->(vm) { vm.define_function('foo') { 1 } },
+      import:          ->(vm) { vm.import('x', from: 'export default 1') },
+      memory_usage:    ->(vm) { vm.memory_usage },
+      gc!:             ->(vm) { vm.gc! }
+    }.each do |method, invoke|
+      it "#{method} on a disposed VM raises Quickjs::RuntimeError" do
+        vm = Quickjs::VM.new
+        vm.dispose!
+        err = _ { invoke.call(vm) }.must_raise Quickjs::RuntimeError
+        _(err.message).must_match(/disposed/)
+      end
+    end
+
+    it "memory_poisoned? remains queryable after dispose" do
+      vm = Quickjs::VM.new
+      vm.dispose!
+      _(vm.memory_poisoned?).must_equal false
+    end
+
+    it "lets Ruby GC reclaim a disposed VM without double-free" do
+      10.times { Quickjs::VM.new.dispose! }
+      GC.start
+      pass
+    end
+  end
+
   it "accepts some options to constrain its resource" do
     vm = Quickjs::VM.new(
       memory_limit: 1024 * 1024,

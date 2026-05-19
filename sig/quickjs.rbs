@@ -45,6 +45,10 @@ module Quickjs
 
     def memory_poisoned?: () -> bool
 
+    def dispose!: () -> nil
+
+    def disposed?: () -> bool
+
     class Log
       attr_reader severity: Symbol
 

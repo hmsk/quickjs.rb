@@ -32,6 +32,8 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, VALUE r_visited);
 static VALUE vm_m_memoryUsage(VALUE r_self);
 static VALUE vm_m_runGC(VALUE r_self);
 static VALUE vm_m_memoryPoisoned(VALUE r_self);
+static VALUE vm_m_dispose(VALUE r_self);
+static VALUE vm_m_disposed(VALUE r_self);
 
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
@@ -984,6 +986,15 @@ static void check_oom_poisoned(VMData *data)
   }
 }
 
+static void check_disposed(VMData *data)
+{
+  if (data->disposed)
+  {
+    VALUE r_msg = rb_str_new2("VM has been disposed; create a new Quickjs::VM");
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
+  }
+}
+
 // Validate that r_code is a String and resolve the :filename option (default "<code>")
 // from the keyword-args hash that rb_scan_args(... "1:") collects. Both eval_code and
 // compile share this argument shape.
@@ -1014,6 +1025,7 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
+  check_disposed(data);
   check_oom_poisoned(data);
 
   VALUE r_code, r_opts;
@@ -1052,6 +1064,8 @@ static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
+  check_disposed(data);
+
   VALUE r_code, r_opts;
   rb_scan_args(argc, argv, "1:", &r_code, &r_opts);
   const char *filename = parse_code_and_filename(r_code, r_opts);
@@ -1085,6 +1099,8 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
 {
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_disposed(data);
 
   if (!RB_TYPE_P(r_bytecode, T_STRING))
   {
@@ -1126,6 +1142,8 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
 
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_disposed(data);
 
   if (RB_TYPE_P(r_name, T_ARRAY))
   {
@@ -1247,6 +1265,7 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
+  check_disposed(data);
   check_oom_poisoned(data);
 
   JSValue j_this = JS_UNDEFINED;
@@ -1413,6 +1432,8 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
+  check_disposed(data);
+
   char *filename;
   if (!NIL_P(r_filename))
   {
@@ -1487,6 +1508,8 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "memory_usage", vm_m_memoryUsage, 0);
   rb_define_method(r_class_vm, "gc!", vm_m_runGC, 0);
   rb_define_method(r_class_vm, "memory_poisoned?", vm_m_memoryPoisoned, 0);
+  rb_define_method(r_class_vm, "dispose!", vm_m_dispose, 0);
+  rb_define_method(r_class_vm, "disposed?", vm_m_disposed, 0);
   r_define_log_class(r_class_vm);
 }
 
@@ -1494,6 +1517,7 @@ static VALUE vm_m_memoryUsage(VALUE r_self)
 {
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+  check_disposed(data);
   JSMemoryUsage s;
   JS_ComputeMemoryUsage(JS_GetRuntime(data->context), &s);
   VALUE h = rb_hash_new();
@@ -1516,6 +1540,7 @@ static VALUE vm_m_runGC(VALUE r_self)
 {
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+  check_disposed(data);
   JS_RunGC(JS_GetRuntime(data->context));
   return Qnil;
 }
@@ -1525,4 +1550,54 @@ static VALUE vm_m_memoryPoisoned(VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
   return data->oom_poisoned ? Qtrue : Qfalse;
+}
+
+// JS_FreeContext + JS_FreeRuntime walk the entire heap to run finalisers.
+// On a VM with polyfills loaded this can be tens of milliseconds — run it
+// without the GVL so other Ruby threads (e.g. the next pool builder) keep
+// progressing. Safe to release because nothing in the teardown path calls
+// back into Ruby: module_loader, console, and define_function callbacks
+// only fire during JS execution, not during free.
+static void *vm_dispose_no_gvl(void *p)
+{
+  vm_teardown_context((JSContext *)p);
+  return NULL;
+}
+
+static VALUE vm_m_dispose(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  if (data->disposed)
+    return Qnil;
+
+  if (!JS_IsUndefined(data->j_file_proxy_creator))
+  {
+    JS_FreeValue(data->context, data->j_file_proxy_creator);
+    data->j_file_proxy_creator = JS_UNDEFINED;
+  }
+
+  // Mark disposed before releasing the GVL so a concurrent dfree finds
+  // disposed=true and skips its own teardown.
+  data->disposed = true;
+
+  rb_thread_call_without_gvl(vm_dispose_no_gvl, data->context, NULL, NULL);
+
+  // Drop references to user-supplied closures so Ruby GC can reclaim them
+  // (and anything they captured) before the wrapping VM object itself is
+  // collected. Matters for pool-rebuild workloads that dispose eagerly.
+  data->defined_functions = rb_hash_new();
+  data->alive_objects = rb_hash_new();
+  data->log_listener = Qnil;
+  data->module_loader = Qnil;
+
+  return Qnil;
+}
+
+static VALUE vm_m_disposed(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+  return data->disposed ? Qtrue : Qfalse;
 }

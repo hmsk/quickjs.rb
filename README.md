@@ -275,6 +275,26 @@ rescue Quickjs::RuntimeError => e
 end
 ```
 
+#### `Quickjs::VM#dispose!`: 🧹 Release the underlying C-side runtime eagerly
+
+By default, the `JSRuntime` / `JSContext` behind a `Quickjs::VM` lives until Ruby's GC reclaims the wrapping object. Ruby's GC sizes its trigger by the Ruby-side object footprint (a few pointers) and doesn't see the C-side JS heap, so a workload that rebuilds VMs frequently — per-request, per-page-visit, throwaway pool — can let several megabytes per dead VM accumulate before a major GC fires.
+
+`dispose!` frees the runtime immediately and marks the VM unusable:
+
+```rb
+vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_INTL])
+vm.eval_code('…')
+vm.dispose!           # frees JSContext + JSRuntime now
+vm.disposed?          #=> true
+vm.eval_code('1 + 1') # raises Quickjs::RuntimeError "VM has been disposed"
+```
+
+`dispose!` is idempotent and safe to call before letting Ruby drop the reference — the dfree handler is a no-op on an already-disposed VM. The teardown itself can take tens of milliseconds on a VM with polyfills loaded; the GVL is released during the free so other Ruby threads (e.g. a background pool builder) keep running. For fire-and-forget teardown that doesn't block the caller, wrap it in a thread:
+
+```rb
+Thread.new { vm.dispose! }
+```
+
 ### Value Conversion
 
 | JavaScript | | Ruby | Note |
