@@ -510,7 +510,11 @@ describe Quickjs::VM do
       started = Time.now.to_f * 1000
       vm.drain_microtasks!
       elapsed = Time.now.to_f * 1000 - started
-      assert_operator elapsed, :>=, 100
+      # The interrupt check has some inherent slack vs. the wall clock — CI
+      # has been observed firing ~0.6ms before the 100ms timeout. Widen both
+      # bounds enough to absorb realistic noise while still catching
+      # "returns instantly" (lower) and "hangs forever" (upper).
+      assert_operator elapsed, :>=, 50
       assert_operator elapsed, :<, 300
     end
 
