@@ -34,6 +34,7 @@ static VALUE vm_m_runGC(VALUE r_self);
 static VALUE vm_m_memoryPoisoned(VALUE r_self);
 static VALUE vm_m_dispose(VALUE r_self);
 static VALUE vm_m_disposed(VALUE r_self);
+static VALUE vm_m_drainJobs(VALUE r_self);
 
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
@@ -1603,6 +1604,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "memory_poisoned?", vm_m_memoryPoisoned, 0);
   rb_define_method(r_class_vm, "dispose!", vm_m_dispose, 0);
   rb_define_method(r_class_vm, "disposed?", vm_m_disposed, 0);
+  rb_define_method(r_class_vm, "drain_jobs!", vm_m_drainJobs, 0);
   r_define_log_class(r_class_vm);
 }
 
@@ -1636,6 +1638,32 @@ static VALUE vm_m_runGC(VALUE r_self)
   check_disposed(data);
   JS_RunGC(JS_GetRuntime(data->context));
   return Qnil;
+}
+
+static VALUE vm_m_drainJobs(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_oom_poisoned(data);
+
+  JSRuntime *runtime = JS_GetRuntime(data->context);
+  if (!JS_IsJobPending(runtime))
+    return INT2NUM(0);
+
+  arm_eval_timer(data);
+
+  int executed = 0;
+  for (;;)
+  {
+    int err = JS_ExecutePendingJob(runtime, NULL);
+    if (err == 0)
+      break;
+    if (err < 0)
+      return to_rb_value(data->context, JS_EXCEPTION); // raises
+    executed++;
+  }
+  return INT2NUM(executed);
 }
 
 static VALUE vm_m_memoryPoisoned(VALUE r_self)
