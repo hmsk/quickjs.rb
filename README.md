@@ -317,21 +317,21 @@ vm.eval_code('1 + 1') # raises Quickjs::RuntimeError "VM has been disposed"
 Thread.new { vm.dispose! }
 ```
 
-#### `Quickjs::VM#drain_microtasks!`: 🌀 Run pending microtasks to completion
+#### `Quickjs::VM#drain_jobs!`: Run pending JS jobs to completion
 
-QuickJS does not automatically drain the microtask queue at the end of a synchronous `eval_code` / `call`. Continuations scheduled via `Promise.resolve().then(...)`, `queueMicrotask`-style patterns, or `JS_EnqueueJob` stay pending until something explicitly pumps them — `await` inside JS does, but a sync return path does not.
+QuickJS does not automatically drain the job queue at the end of a synchronous `eval_code` / `call`. Continuations scheduled via `Promise.resolve().then(...)` or `JS_EnqueueJob` stay pending until something explicitly runs them — `await` inside JS does, but a sync return path does not.
 
 ```rb
 vm = Quickjs::VM.new
-vm.eval_code('globalThis.x = 0; Promise.resolve().then(() => { x = 1 })')
-vm.eval_code('x')      #=> 0  (the .then() callback hasn't run yet)
-vm.drain_microtasks!   #=> 1  (number of jobs executed)
-vm.eval_code('x')      #=> 1
+vm.eval_code('globalThis.x = 0; Promise.resolve().then(() => { x = 1 }); void 0')
+vm.eval_code('x')    #=> 0  (the .then() callback hasn't run yet)
+vm.drain_jobs!       #=> 1  (number of jobs executed)
+vm.eval_code('x')   #=> 1
 ```
 
-`drain_microtasks!` keeps pumping until the queue empties, so microtasks that schedule further microtasks all run in a single call. The drain is bounded by the VM's `timeout_msec`, and any exception that escapes a job is raised as a `Quickjs::RuntimeError`.
+`drain_jobs!` keeps running until the queue empties, so jobs that schedule further jobs all run in a single call. The drain is bounded by the VM's `timeout_msec`; exceeding it raises `Quickjs::InterruptedError`.
 
-Useful when porting JS that assumed V8's implicit-drain semantics — V8 (and therefore [mini_racer](https://github.com/rubyjs/mini_racer)) flushes microtasks at every eval boundary, so `eval_code` already sees `.then()` continuations run by the time it returns. QuickJS doesn't. Patterns like `Promise.resolve().then(() => { ... })`, `queueMicrotask`-style chains, and Stimulus/Hotwire callbacks that assume "the next microtask tick" silently fall through unless you call `drain_microtasks!` explicitly.
+Useful when porting JS that assumed V8's implicit-drain semantics — V8 (and therefore [mini_racer](https://github.com/rubyjs/mini_racer)) flushes pending jobs at every eval boundary, so `eval_code` already sees `.then()` continuations run by the time it returns. QuickJS doesn't. Patterns like `Promise.resolve().then(() => { ... })` and Stimulus/Hotwire callbacks that assume "the next microtask tick" silently fall through unless you call `drain_jobs!` explicitly.
 
 ### Value Conversion
 

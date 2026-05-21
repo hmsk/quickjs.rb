@@ -51,7 +51,7 @@ module Quickjs
 
     def disposed?: () -> bool
 
-    def drain_microtasks!: () -> Integer
+    def drain_jobs!: () -> Integer
 
     class Log
       attr_reader severity: Symbol

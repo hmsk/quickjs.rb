@@ -450,19 +450,19 @@ describe Quickjs::VM do
     _ { vm.eval_code("await longProcess()") }.must_raise Quickjs::InterruptedError
   end
 
-  describe "DrainMicrotasks" do
+  describe "DrainJobs" do
     before do
       @vm = Quickjs::VM.new
     end
 
-    it "returns 0 when no microtasks are pending" do
-      _(@vm.drain_microtasks!).must_equal 0
+    it "returns 0 when no jobs are pending" do
+      _(@vm.drain_jobs!).must_equal 0
     end
 
     it "runs a Promise.resolve().then() callback that eval_code leaves pending" do
       @vm.eval_code('globalThis.x = 0; Promise.resolve().then(() => { x = 1 }); void 0')
       _(@vm.eval_code('x')).must_equal 0
-      _(@vm.drain_microtasks!).must_equal 1
+      _(@vm.drain_jobs!).must_equal 1
       _(@vm.eval_code('x')).must_equal 1
     end
 
@@ -475,11 +475,11 @@ describe Quickjs::VM do
           .then(() => log.push('c'))
         void 0
       JS
-      _(@vm.drain_microtasks!).must_equal 3
+      _(@vm.drain_jobs!).must_equal 3
       _(@vm.eval_code('log.join(",")')).must_equal 'a,b,c'
     end
 
-    it "drains microtasks scheduled from within other microtasks" do
+    it "drains jobs scheduled from within other jobs" do
       @vm.eval_code(<<~JS)
         globalThis.depth = 0
         function schedule(n) {
@@ -489,14 +489,14 @@ describe Quickjs::VM do
         schedule(5)
         void 0
       JS
-      _(@vm.drain_microtasks!).must_equal 5
+      _(@vm.drain_jobs!).must_equal 5
       _(@vm.eval_code('depth')).must_equal 5
     end
 
     it "leaves the queue empty after draining" do
       @vm.eval_code('Promise.resolve().then(() => {}); void 0')
-      _(@vm.drain_microtasks!).must_equal 1
-      _(@vm.drain_microtasks!).must_equal 0
+      _(@vm.drain_jobs!).must_equal 1
+      _(@vm.drain_jobs!).must_equal 0
     end
 
     it "respects timeout_msec while draining" do
@@ -508,12 +508,8 @@ describe Quickjs::VM do
       JS
 
       started = Time.now.to_f * 1000
-      vm.drain_microtasks!
+      vm.drain_jobs!
       elapsed = Time.now.to_f * 1000 - started
-      # The interrupt check has some inherent slack vs. the wall clock — CI
-      # has been observed firing ~0.6ms before the 100ms timeout. Widen both
-      # bounds enough to absorb realistic noise while still catching
-      # "returns instantly" (lower) and "hangs forever" (upper).
       assert_operator elapsed, :>=, 50
       assert_operator elapsed, :<, 300
     end
@@ -521,7 +517,7 @@ describe Quickjs::VM do
     it "raises Quickjs::RuntimeError after the VM is OOM-poisoned" do
       vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
       _ { vm.eval_code('new Array(2_000_000).fill(0); void 0') }.must_raise Quickjs::RuntimeError
-      _ { vm.drain_microtasks! }.must_raise Quickjs::RuntimeError
+      _ { vm.drain_jobs! }.must_raise Quickjs::RuntimeError
     end
   end
 

@@ -34,7 +34,7 @@ static VALUE vm_m_runGC(VALUE r_self);
 static VALUE vm_m_memoryPoisoned(VALUE r_self);
 static VALUE vm_m_dispose(VALUE r_self);
 static VALUE vm_m_disposed(VALUE r_self);
-static VALUE vm_m_drainMicrotasks(VALUE r_self);
+static VALUE vm_m_drainJobs(VALUE r_self);
 
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
@@ -1604,7 +1604,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "memory_poisoned?", vm_m_memoryPoisoned, 0);
   rb_define_method(r_class_vm, "dispose!", vm_m_dispose, 0);
   rb_define_method(r_class_vm, "disposed?", vm_m_disposed, 0);
-  rb_define_method(r_class_vm, "drain_microtasks!", vm_m_drainMicrotasks, 0);
+  rb_define_method(r_class_vm, "drain_jobs!", vm_m_drainJobs, 0);
   r_define_log_class(r_class_vm);
 }
 
@@ -1640,7 +1640,7 @@ static VALUE vm_m_runGC(VALUE r_self)
   return Qnil;
 }
 
-static VALUE vm_m_drainMicrotasks(VALUE r_self)
+static VALUE vm_m_drainJobs(VALUE r_self)
 {
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
