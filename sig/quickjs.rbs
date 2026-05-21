@@ -14,6 +14,8 @@ module Quickjs
   def self.eval_code: (String code, ?Hash[Symbol, untyped] overwrite_opts) -> untyped
   def self.compile: (String source, ?filename: String, **untyped) -> Quickjs::Runnable
 
+  def self.register_polyfill: (Symbol name, source: String | ^() -> String, ?init: String?) -> nil
+
   class Value
     UNDEFINED: Symbol
     NAN: Symbol
