@@ -219,6 +219,31 @@ describe Quickjs do
       _(err.js_name).must_be_nil
     end
 
+    it "exposes the JS Error.stack as the Ruby exception's backtrace" do
+      err = _ {
+        ::Quickjs.eval_code(<<~JS, filename: 'demo.js')
+          function inner() { throw new TypeError('boom'); }
+          function outer() { inner(); }
+          outer();
+        JS
+      }.must_raise Quickjs::TypeError
+
+      _(err.backtrace).wont_be_nil
+      joined = err.backtrace.join("\n")
+      _(joined).must_match(/inner.*demo\.js/)
+      _(joined).must_match(/outer.*demo\.js/)
+    end
+
+    it "leaves the Ruby default backtrace in place for non-Error throws (no JS stack to surface)" do
+      err = _ {
+        ::Quickjs.eval_code("throw 'bare string';", filename: 'demo.js')
+      }.must_raise Quickjs::RuntimeError
+
+      # A bare throw has no .stack property, so no JS frame ever lands in
+      # the backtrace — Ruby's default is left in place.
+      _(err.backtrace.any? {|line| line.include?('demo.js') }).must_equal false
+    end
+
     it "throws an exception if promise instance is returned" do
       err = _ {
         ::Quickjs.eval_code("const promise = new Promise((res) => { res('awaited yo') });promise")
@@ -1039,6 +1064,23 @@ describe Quickjs::VM do
 
       _(captured.first).must_be_kind_of Quickjs::RuntimeError
       _(captured.first.message).must_match(/just-a-string/)
+    end
+
+    it "exposes the JS Error.stack as the captured exception's backtrace" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err }
+      @vm.eval_code(<<~JS, filename: 'rej.js')
+        function detonate() { throw new TypeError('rejection-stack-test'); }
+        function trigger() {
+          try { detonate(); } catch (e) { void Promise.reject(e); }
+        }
+        trigger();
+      JS
+
+      _(captured.first.backtrace).wont_be_nil
+      joined = captured.first.backtrace.join("\n")
+      _(joined).must_match(/detonate.*rej\.js/)
+      _(joined).must_match(/trigger.*rej\.js/)
     end
 
     it "replaces the previously registered block on a second call" do

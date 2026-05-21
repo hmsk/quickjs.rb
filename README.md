@@ -198,7 +198,7 @@ vm.eval_code("void Promise.reject(new TypeError('drift'));")
 
 Calling `on_unhandled_rejection` again with a new block replaces the previously registered one (matching `on_log`).
 
-The block receives a `Quickjs::*Error` matching the rejection reason (`Quickjs::TypeError` for `new TypeError`, etc.); non-`Error` rejections (`Promise.reject('str')`, `Promise.reject({})`) are wrapped in `Quickjs::RuntimeError`. Exceptions raised inside the block are swallowed — propagating them out would corrupt the QuickJS runtime.
+The block receives a `Quickjs::*Error` matching the rejection reason (`Quickjs::TypeError` for `new TypeError`, etc.); non-`Error` rejections (`Promise.reject('str')`, `Promise.reject({})`) are wrapped in `Quickjs::RuntimeError`. The exception's `#backtrace` carries the JS-side stack frames (`at func (file:line:col)`) for `Error` rejections, so the rejection site shows up directly when you log or re-raise. Exceptions raised inside the block are swallowed — propagating them out would corrupt the QuickJS runtime.
 
 The tracker fires synchronously when QuickJS first observes the rejection. A `.catch` attached later in the same tick does **not** suppress the notification, and a chain like `Promise.reject(x).then(y).then(z)` without a terminating `.catch` may emit a notification per intermediate promise. If that noise is a problem, attach handlers synchronously or dedupe by reason identity in your block. The block runs on the QuickJS stack — heavy work blocks JS execution.
 
