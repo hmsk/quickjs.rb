@@ -12,6 +12,7 @@ module Quickjs
   POLYFILL_CRYPTO: Symbol
 
   def self.eval_code: (String code, ?Hash[Symbol, untyped] overwrite_opts) -> untyped
+  def self.compile: (String source, ?filename: String, **untyped) -> Quickjs::Runnable
 
   class Value
     UNDEFINED: Symbol

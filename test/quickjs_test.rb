@@ -1274,6 +1274,20 @@ describe Quickjs::VM do
     end
   end
 
+  describe "Quickjs.compile" do
+    it "returns a Quickjs::Runnable" do
+      _(::Quickjs.compile('1 + 1')).must_be_instance_of Quickjs::Runnable
+    end
+
+    it "the Runnable runs correctly" do
+      _(::Quickjs.compile('40 + 2').run).must_equal 42
+    end
+
+    it "supports filename: option" do
+      _ { ::Quickjs.compile('}{', filename: 'app.js') }.must_raise Quickjs::SyntaxError
+    end
+  end
+
   describe "Runnable" do
     before do
       @vm = Quickjs::VM.new

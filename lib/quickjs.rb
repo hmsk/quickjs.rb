@@ -29,6 +29,16 @@ module Quickjs
   end
   module_function :eval_code
 
+  def compile(source, **opts)
+    compile_opts = {}
+    compile_opts[:filename] = opts.delete(:filename) if opts.key?(:filename)
+    vm = Quickjs::VM.new(**opts)
+    vm.compile(source, **compile_opts)
+  ensure
+    vm&.dispose!
+  end
+  module_function :compile
+
   def _with_timeout(msec, proc, args)
     Timeout.timeout(msec / 1_000.0) { proc.call(*args) }
   rescue Timeout::Error

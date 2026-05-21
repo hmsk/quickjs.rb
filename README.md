@@ -100,6 +100,15 @@ runnable.run(on: { features: [::Quickjs::POLYFILL_INTL] }) # ad-hoc VM with opti
 
 `Runnable#to_s` returns the underlying bytecode as a frozen ASCII-8BIT `String`, suitable for caching to memory or disk. `Quickjs::Runnable.new(bytecode_string)` reconstructs a `Runnable` from that blob — validation happens lazily at `run` time, so a corrupt or wrong-build blob surfaces as `Quickjs::RuntimeError` when executed. The bytecode format is tied to the QuickJS build, so include the gem version in your cache key if you persist across upgrades.
 
+`Quickjs.compile` is a one-shot convenience that creates and immediately disposes a throwaway VM:
+
+```rb
+runnable = Quickjs.compile(File.read('big_bundle.js'), filename: 'big_bundle.js')
+runnable.run  # execute on a fresh VM, no parse cost
+```
+
+Accepts `filename:` and the same VM options as `Quickjs.eval_code` (`memory_limit:`, `timeout_msec:`, etc.) — useful when compiling large bundles that exceed the default limits.
+
 #### `Quickjs::VM#call`: ⚡ Call a JS function directly with Ruby arguments
 
 ```rb
