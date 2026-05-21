@@ -516,24 +516,48 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, VALUE r_visited)
 struct module_loader_call_args
 {
   VALUE proc;
-  VALUE r_module_name;
+  VALUE r_specifier;
+  VALUE r_importer;
 };
 
+// Calls the user's loader with one or two args based on its arity. Procs
+// declared with a single positional (`->(name) { ... }`) get the legacy
+// 1-arg form so existing callers keep working; everything else (2-arity
+// lambdas, varargs procs) receives `(specifier, importer)`.
 static VALUE r_module_loader_call(VALUE r_args_val)
 {
   struct module_loader_call_args *args = (struct module_loader_call_args *)r_args_val;
-  return rb_funcall(args->proc, rb_intern("call"), 1, args->r_module_name);
+  int arity = NUM2INT(rb_funcall(args->proc, rb_intern("arity"), 0));
+  if (arity == 1)
+    return rb_funcall(args->proc, rb_intern("call"), 1, args->r_specifier);
+  return rb_funcall(args->proc, rb_intern("call"), 2, args->r_specifier, args->r_importer);
 }
 
-static JSModuleDef *quickjsrb_module_loader(JSContext *ctx, const char *module_name, void *opaque, JSValueConst attributes)
+// Normalize hook. Resolves `(specifier, importer)` to a canonical name by
+// consulting the resolution cache or invoking the user's loader Proc.
+// The Proc's return value drives both the canonical name AND the source
+// the load hook will eval:
+//   - String          → canonical = specifier, source = the string
+//   - { code:, as: }  → canonical = as,        source = code
+//   - nil / false     → ReferenceError
+// Source is stashed in `module_source_cache` keyed by canonical so the
+// load hook can pick it up. The resolution cache memoizes the call so
+// the Proc fires at most once per `(specifier, importer)` pair.
+static char *quickjsrb_module_normalize(JSContext *ctx, const char *base_name, const char *name, void *opaque)
 {
   VMData *data = JS_GetContextOpaque(ctx);
-  if (NIL_P(data->module_loader))
-    return js_module_loader(ctx, module_name, opaque, attributes);
 
-  struct module_loader_call_args args = {data->module_loader, rb_str_new_cstr(module_name)};
+  VALUE r_specifier = rb_str_new_cstr(name);
+  VALUE r_importer = rb_str_new_cstr(base_name);
+  VALUE r_key = rb_ary_new3(2, r_specifier, r_importer);
+
+  VALUE r_cached_canonical = rb_hash_aref(data->module_resolution_cache, r_key);
+  if (!NIL_P(r_cached_canonical))
+    return js_strdup(ctx, StringValueCStr(r_cached_canonical));
+
+  struct module_loader_call_args args = {data->module_loader, r_specifier, r_importer};
   int state;
-  VALUE r_source = rb_protect(r_module_loader_call, (VALUE)&args, &state);
+  VALUE r_return = rb_protect(r_module_loader_call, (VALUE)&args, &state);
   if (state)
   {
     VALUE r_error = rb_errinfo();
@@ -543,17 +567,61 @@ static JSModuleDef *quickjsrb_module_loader(JSContext *ctx, const char *module_n
     return NULL;
   }
 
-  if (NIL_P(r_source) || r_source == Qfalse)
+  if (NIL_P(r_return) || r_return == Qfalse)
   {
-    JS_ThrowReferenceError(ctx, "module loader returned no source for '%s'", module_name);
+    JS_ThrowReferenceError(ctx, "module loader returned no source for '%s'", name);
     return NULL;
   }
 
-  if (!RB_TYPE_P(r_source, T_STRING))
+  VALUE r_canonical, r_source;
+  if (RB_TYPE_P(r_return, T_STRING))
   {
-    JS_ThrowTypeError(ctx, "module loader must return a String or nil, got %s", rb_obj_classname(r_source));
+    r_canonical = r_specifier;
+    r_source = r_return;
+  }
+  else if (RB_TYPE_P(r_return, T_HASH))
+  {
+    r_source = rb_hash_aref(r_return, ID2SYM(rb_intern("code")));
+    r_canonical = rb_hash_aref(r_return, ID2SYM(rb_intern("as")));
+    if (!RB_TYPE_P(r_source, T_STRING))
+    {
+      JS_ThrowTypeError(ctx, "module loader Hash must include code: (String, the module source)");
+      return NULL;
+    }
+    if (!RB_TYPE_P(r_canonical, T_STRING))
+    {
+      JS_ThrowTypeError(ctx, "module loader Hash must include as: (String, the canonical module name)");
+      return NULL;
+    }
+  }
+  else
+  {
+    JS_ThrowTypeError(ctx, "module loader must return a String, a Hash with code: and as:, or nil; got %s",
+                      rb_obj_classname(r_return));
     return NULL;
   }
+
+  rb_hash_aset(data->module_source_cache, r_canonical, r_source);
+  rb_hash_aset(data->module_resolution_cache, r_key, r_canonical);
+
+  return js_strdup(ctx, StringValueCStr(r_canonical));
+}
+
+static JSModuleDef *quickjsrb_module_loader(JSContext *ctx, const char *module_name, void *opaque, JSValueConst attributes)
+{
+  VMData *data = JS_GetContextOpaque(ctx);
+
+  VALUE r_canonical = rb_str_new_cstr(module_name);
+  VALUE r_source = rb_hash_aref(data->module_source_cache, r_canonical);
+  if (NIL_P(r_source))
+  {
+    // Defensive: normalize populates this on every miss.
+    JS_ThrowReferenceError(ctx, "module loader: no cached source for '%s'", module_name);
+    return NULL;
+  }
+  // QuickJS won't call load again for this canonical — its own module cache
+  // takes over — so the source is dead weight once we've compiled it.
+  rb_hash_delete(data->module_source_cache, r_canonical);
 
   JSValue j_func = JS_Eval(ctx, RSTRING_PTR(r_source), RSTRING_LEN(r_source), module_name,
                            JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
@@ -564,6 +632,18 @@ static JSModuleDef *quickjsrb_module_loader(JSContext *ctx, const char *module_n
   JSModuleDef *m = JS_VALUE_GET_PTR(j_func);
   JS_FreeValue(ctx, j_func);
   return m;
+}
+
+// When no Ruby loader is set we hand resolution back to QuickJS's defaults
+// (URL-style normalize + filesystem load). When a loader is set we own both
+// phases so we can thread (specifier, importer) through and honor `as:`.
+static void register_module_loader_funcs(VMData *data)
+{
+  JSRuntime *runtime = JS_GetRuntime(data->context);
+  if (NIL_P(data->module_loader))
+    JS_SetModuleLoaderFunc2(runtime, NULL, js_module_loader, js_module_check_attributes, NULL);
+  else
+    JS_SetModuleLoaderFunc2(runtime, quickjsrb_module_normalize, quickjsrb_module_loader, js_module_check_attributes, NULL);
 }
 
 static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason)
@@ -931,7 +1011,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   JS_SetMemoryLimit(runtime, NUM2UINT(r_memory_limit));
   JS_SetMaxStackSize(runtime, NUM2UINT(r_max_stack_size));
 
-  JS_SetModuleLoaderFunc2(runtime, NULL, quickjsrb_module_loader, js_module_check_attributes, NULL);
+  register_module_loader_funcs(data);
   JS_SetHostPromiseRejectionTracker(runtime, quickjsrb_promise_rejection_tracker, NULL);
   js_std_init_handlers(runtime);
 
@@ -1473,6 +1553,11 @@ static VALUE vm_m_set_module_loader(VALUE r_self, VALUE r_loader)
     rb_raise(rb_eTypeError, "module_loader must be a Proc or nil");
 
   data->module_loader = r_loader;
+  // Stale entries from the previous loader's policy would survive the
+  // swap and silently shadow the new behavior.
+  rb_hash_clear(data->module_resolution_cache);
+  rb_hash_clear(data->module_source_cache);
+  register_module_loader_funcs(data);
   return r_loader;
 }
 
@@ -1518,6 +1603,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   check_disposed(data);
 
   char *filename;
+  VALUE r_seeded_key = Qnil;
   if (!NIL_P(r_filename))
   {
     filename = StringValueCStr(r_filename);
@@ -1533,6 +1619,18 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
       return to_rb_value(data->context, module);
     }
     js_module_set_import_meta(data->context, module, TRUE, FALSE);
+    // The bridge module below will `import` this filename; without a
+    // resolution-cache seed, our normalize hook would ask the user's
+    // module_loader for it (and fail), even though QuickJS already has
+    // the module loaded from the JS_Eval just above. Each `from:` call
+    // mints a fresh random filename, so we also delete the entry once
+    // the bridge eval finishes — otherwise the cache grows unboundedly.
+    if (!NIL_P(data->module_loader))
+    {
+      VALUE r_filename_str = rb_str_new_cstr(filename);
+      r_seeded_key = rb_ary_new3(2, r_filename_str, rb_str_new2("<vm>"));
+      rb_hash_aset(data->module_resolution_cache, r_seeded_key, r_filename_str);
+    }
     JS_FreeValue(data->context, module);
   }
 
@@ -1572,6 +1670,9 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   if (JS_IsException(j_awaited))
     return to_rb_value(data->context, j_awaited);
   JS_FreeValue(data->context, j_awaited);
+
+  if (!NIL_P(r_seeded_key))
+    rb_hash_delete(data->module_resolution_cache, r_seeded_key);
 
   return Qtrue;
 }

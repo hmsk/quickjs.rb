@@ -176,7 +176,40 @@ vm.import(['a'], filename: 'a')
 vm.eval_code('a()') #=> 'a-b-result'
 ```
 
-The Proc receives the (already normalized) module specifier and returns the module source as a `String`, or `nil` to signal "not found" (which raises `Quickjs::ReferenceError` on the JS side). Pass `nil` to clear a previously set loader.
+The Proc may accept one or two arguments. Single-arity (`->(specifier) { ... }`) is the legacy shape: the Proc gets the raw import specifier and returns the source for it. Two-arity (`->(specifier, importer) { ... }`) additionally receives the file that issued the `import`, which is what you need for importmap-style scoping. Pass `nil` to clear a previously set loader.
+
+Return value:
+
+- A `String` — that's the source. The canonical name used for QuickJS's module cache is the specifier itself.
+- A `Hash` `{ code:, as: }` — `code:` is the source, `as:` becomes the canonical name. Use this when the same specifier should resolve to different modules depending on the importer (importmap "scopes"), since QuickJS caches by canonical name and changing the canonical is what isolates the two modules.
+- `nil` or `false` — raises `Quickjs::ReferenceError` on the JS side ("module not found").
+- Anything else — `Quickjs::TypeError`.
+
+Importmap scope example:
+
+```rb
+modules = {
+  '/vendor/lodash.js'       => 'export default { v: "global" };',
+  '/vendor/lodash-admin.js' => 'export default { v: "admin"  };',
+  '/app/admin/main.js'      => "import _ from 'lodash'; export const tag = _.v;"
+}
+
+vm.module_loader = ->(specifier, importer) {
+  case specifier
+  when 'lodash'
+    importer.start_with?('/app/admin/') \
+      ? { code: modules['/vendor/lodash-admin.js'], as: '/vendor/lodash-admin.js' }
+      : { code: modules['/vendor/lodash.js'],       as: '/vendor/lodash.js' }
+  else
+    modules[specifier]
+  end
+}
+
+vm.import(['tag'], filename: '/app/admin/main.js')
+vm.eval_code('tag') #=> 'admin'
+```
+
+Without `as:`, the canonical equals the raw `specifier`. That means relative imports (`./foo.js`) from different importers all share one canonical (`./foo.js`) and therefore one cached module instance — which is rarely what you want. If you support relative imports from a plain `String` return, resolve them to absolute paths yourself before returning, or use the `Hash` form with `as:` set to the resolved path. The user-facing Proc is called at most once per `(specifier, importer)` pair across the VM's lifetime; subsequent imports hit a per-VM resolution cache.
 
 When `module_loader=` is set, pass `filename:` to `import` instead of `from:` to resolve a named specifier directly through the loader — no inline bridge source needed. Passing both `from:` and `filename:` raises `ArgumentError`.
 
