@@ -410,7 +410,6 @@ Useful when porting JS that assumed V8's implicit-drain semantics — V8 (and th
     - [@formatjs/intl-pluralrules](https://github.com/formatjs/formatjs/blob/main/packages/intl-pluralrules/LICENSE.md)
     - [@formatjs/intl-numberformat](https://github.com/formatjs/formatjs/blob/main/packages/intl-numberformat/LICENSE.md)
     - [@formatjs/intl-datetimeformat](https://github.com/formatjs/formatjs/blob/main/packages/intl-datetimeformat/LICENSE.md)
-    - [@formatjs/ecma402-abstract](https://github.com/formatjs/formatjs/blob/main/packages/ecma402-abstract/LICENSE.md)
     - [@formatjs/fast-memoize](https://github.com/formatjs/formatjs/blob/main/packages/fast-memoize/LICENSE.md)
     - [@formatjs/intl-localematcher](https://github.com/formatjs/formatjs/blob/main/packages/intl-localematcher/LICENSE.md)
   - MIT License Copyright (c) 2026 FormatJS
