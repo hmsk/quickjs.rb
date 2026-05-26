@@ -13,6 +13,7 @@ const char *featurePolyfillCryptoId = "feature_polyfill_crypto";
 
 const char *undefinedId = "undefined";
 const char *nanId = "NaN";
+const char *vmInternalFilename = "<vm>";
 
 const char *native_errors[] = {
     "SyntaxError",
@@ -1057,7 +1058,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     js_init_module_std(data->context, "std");
     const char *enableStd = "import * as std from 'std';\n"
                             "globalThis.std = std;\n";
-    JSValue j_stdEval = JS_Eval(data->context, enableStd, strlen(enableStd), "<vm>", JS_EVAL_TYPE_MODULE);
+    JSValue j_stdEval = JS_Eval(data->context, enableStd, strlen(enableStd), vmInternalFilename, JS_EVAL_TYPE_MODULE);
     JS_FreeValue(data->context, j_stdEval);
   }
 
@@ -1066,7 +1067,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     js_init_module_os(data->context, "os");
     const char *enableOs = "import * as os from 'os';\n"
                            "globalThis.os = os;\n";
-    JSValue j_osEval = JS_Eval(data->context, enableOs, strlen(enableOs), "<vm>", JS_EVAL_TYPE_MODULE);
+    JSValue j_osEval = JS_Eval(data->context, enableOs, strlen(enableOs), vmInternalFilename, JS_EVAL_TYPE_MODULE);
     JS_FreeValue(data->context, j_osEval);
   }
   else if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featureTimeoutId))))
@@ -1079,7 +1080,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillIntlId))))
   {
     const char *defineIntl = "Object.defineProperty(globalThis, 'Intl', { value:{} });\n";
-    JSValue j_defineIntl = JS_Eval(data->context, defineIntl, strlen(defineIntl), "<vm>", JS_EVAL_TYPE_GLOBAL);
+    JSValue j_defineIntl = JS_Eval(data->context, defineIntl, strlen(defineIntl), vmInternalFilename, JS_EVAL_TYPE_GLOBAL);
     JS_FreeValue(data->context, j_defineIntl);
 
     JSValue j_polyfillIntlResult = load_polyfill_bytecode(data->context, &qjsc_polyfill_intl_en_min, qjsc_polyfill_intl_en_min_size);
@@ -1373,7 +1374,7 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
     {
       VALUE r_first_str = rb_funcall(RARRAY_AREF(r_name, 0), rb_intern("to_s"), 0);
       const char *first_seg = StringValueCStr(r_first_str);
-      j_parent = JS_Eval(data->context, first_seg, strlen(first_seg), "<vm>", JS_EVAL_TYPE_GLOBAL);
+      j_parent = JS_Eval(data->context, first_seg, strlen(first_seg), vmInternalFilename, JS_EVAL_TYPE_GLOBAL);
 
       if (JS_IsException(j_parent) || !JS_IsObject(j_parent))
       {
@@ -1511,7 +1512,7 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
     const char *first_seg = StringValueCStr(r_first_str);
 
     // JS_Eval accesses both global object properties and lexical (const/let) bindings
-    JSValue j_cur = JS_Eval(data->context, first_seg, strlen(first_seg), "<vm>", JS_EVAL_TYPE_GLOBAL);
+    JSValue j_cur = JS_Eval(data->context, first_seg, strlen(first_seg), vmInternalFilename, JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(j_cur))
       return to_rb_value(data->context, j_cur); // raises
 
@@ -1663,7 +1664,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
     if (!NIL_P(data->module_loader))
     {
       VALUE r_filename_str = rb_str_new_cstr(filename);
-      r_seeded_key = rb_ary_new3(2, r_filename_str, rb_str_new2("<vm>"));
+      r_seeded_key = rb_ary_new3(2, r_filename_str, rb_str_new2(vmInternalFilename));
       rb_hash_aset(data->module_resolution_cache, r_seeded_key, r_filename_str);
     }
     JS_FreeValue(data->context, module);
@@ -1693,7 +1694,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   char *result = (char *)malloc(length + 1);
   snprintf(result, length + 1, importAndGlobalizeModule, import_name, filename, globalize);
 
-  JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), "<vm>", JS_EVAL_TYPE_MODULE);
+  JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), vmInternalFilename, JS_EVAL_TYPE_MODULE);
   free(result);
   if (JS_IsException(j_codeResult))
     return to_rb_value(data->context, j_codeResult);
