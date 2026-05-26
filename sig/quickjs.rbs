@@ -33,9 +33,12 @@ module Quickjs
     def import: (String | Array[String] | Hash[Symbol, String] imported, from: String, ?code_to_expose: String?) -> true
               | (String | Array[String] | Hash[Symbol, String] imported, filename: String, ?code_to_expose: String?) -> true
 
-    def module_loader: () -> (^(String) -> String? | nil)
+    type module_loader_return = String | Hash[Symbol, String] | nil
+    type module_loader_proc = ^(String, String) -> module_loader_return | ^(String) -> module_loader_return
 
-    def module_loader=: (^(String) -> String? | nil) -> (^(String) -> String? | nil)
+    def module_loader: () -> (module_loader_proc | nil)
+
+    def module_loader=: (module_loader_proc | nil) -> (module_loader_proc | nil)
 
     def on_unhandled_rejection: () { (Quickjs::RuntimeError) -> void } -> nil
 

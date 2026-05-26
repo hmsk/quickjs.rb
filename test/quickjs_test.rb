@@ -1168,6 +1168,98 @@ describe Quickjs::VM do
     it "rejects non-Proc, non-nil values" do
       _ { @vm.module_loader = 'not a proc' }.must_raise TypeError
     end
+
+    it "passes the importer as a second arg to a 2-arity loader" do
+      seen = []
+      @vm.module_loader = ->(specifier, importer) {
+        seen << [specifier, importer]
+        case specifier
+        when 'a' then "import { b } from 'b'; export const a = () => b();"
+        when 'b' then "export const b = () => 'b-result';"
+        end
+      }
+      @vm.import(['a'], filename: 'a')
+
+      _(seen).must_include ['b', 'a']
+    end
+
+    it "supports importmap-style scopes via the Hash return form" do
+      modules = {
+        '/vendor/lodash.js'       => 'export default { v: "global" };',
+        '/vendor/lodash-admin.js' => 'export default { v: "admin"  };',
+        '/app/admin/main.js'      => "import _ from 'lodash'; export const tag = _.v;",
+        '/app/main.js'            => "import _ from 'lodash'; export const tag = _.v;"
+      }
+      @vm.module_loader = ->(specifier, importer) {
+        case specifier
+        when 'lodash'
+          target = importer.start_with?('/app/admin/') ? '/vendor/lodash-admin.js' : '/vendor/lodash.js'
+          {code: modules[target], as: target}
+        else
+          modules[specifier]
+        end
+      }
+      @vm.import(['tag'], filename: '/app/admin/main.js')
+      _(@vm.eval_code('tag')).must_equal 'admin'
+
+      vm2 = Quickjs::VM.new
+      vm2.module_loader = @vm.module_loader
+      vm2.import(['tag'], filename: '/app/main.js')
+      _(vm2.eval_code('tag')).must_equal 'global'
+    end
+
+    it "memoizes resolution per (specifier, importer) so the loader fires once" do
+      call_count = 0
+      @vm.module_loader = ->(specifier, _importer) {
+        call_count += 1
+        'export const x = 1;' if specifier == 'mod'
+      }
+      @vm.eval_code(<<~JS, async: true)
+        await import('mod');
+        await import('mod');
+        await import('mod');
+      JS
+
+      _(call_count).must_equal 1
+    end
+
+    it "raises TypeError when the loader Hash is missing code:" do
+      @vm.module_loader = ->(_specifier, _importer) { {as: '/anywhere'} }
+      _ {
+        @vm.import(['x'], from: "import { x } from 'mod'; export { x };")
+      }.must_raise Quickjs::TypeError
+    end
+
+    it "raises TypeError when the loader Hash is missing as:" do
+      @vm.module_loader = ->(_specifier, _importer) { {code: 'export const x = 1;'} }
+      _ {
+        @vm.import(['x'], from: "import { x } from 'mod'; export { x };")
+      }.must_raise Quickjs::TypeError
+    end
+
+    it "raises TypeError when the loader returns an unexpected type" do
+      @vm.module_loader = ->(_specifier, _importer) { 42 }
+      _ {
+        @vm.import(['x'], from: "import { x } from 'mod'; export { x };")
+      }.must_raise Quickjs::TypeError
+    end
+
+    it "fires the loader again when the same specifier comes from a different importer" do
+      call_count = 0
+      @vm.module_loader = ->(specifier, _importer) {
+        call_count += 1
+        case specifier
+        when 'app1' then "import 'dep'; export const x = 1;"
+        when 'app2' then "import 'dep'; export const x = 2;"
+        when 'dep'  then 'export const d = 1;'
+        end
+      }
+      @vm.import(['x'], filename: 'app1')
+      @vm.import(['x'], filename: 'app2')
+
+      # 'app1', 'app2' once each; 'dep' resolved from each — distinct importer pairs.
+      _(call_count).must_equal 4
+    end
   end
 
   describe "Runnable" do

@@ -58,6 +58,15 @@ typedef struct VMData
   VALUE alive_objects;
   VALUE module_loader;
   VALUE on_unhandled_rejection;
+  // Memoize (specifier, importer) → canonical so the user's loader Proc
+  // runs at most once per distinct pair across the VM's lifetime. Without
+  // this, QuickJS calls normalize on every import statement — including
+  // duplicates within the same file — and we'd re-invoke the user proc.
+  VALUE module_resolution_cache;
+  // Carries `code` from the normalize-phase Proc call to the load-phase
+  // JS_Eval that follows. Keyed by canonical; populated when the user's
+  // loader returns either a raw source String or `{ code:, as: }`.
+  VALUE module_source_cache;
   JSValue j_file_proxy_creator;
   // Once the runtime has hit JS-level "out of memory", the QuickJS heap is in
   // a fragile state where further evaluation can trigger a use-after-free in
@@ -109,6 +118,8 @@ static void vm_mark(void *ptr)
   rb_gc_mark_movable(data->alive_objects);
   rb_gc_mark_movable(data->module_loader);
   rb_gc_mark_movable(data->on_unhandled_rejection);
+  rb_gc_mark_movable(data->module_resolution_cache);
+  rb_gc_mark_movable(data->module_source_cache);
 }
 
 static void vm_compact(void *ptr)
@@ -119,6 +130,8 @@ static void vm_compact(void *ptr)
   data->alive_objects = rb_gc_location(data->alive_objects);
   data->module_loader = rb_gc_location(data->module_loader);
   data->on_unhandled_rejection = rb_gc_location(data->on_unhandled_rejection);
+  data->module_resolution_cache = rb_gc_location(data->module_resolution_cache);
+  data->module_source_cache = rb_gc_location(data->module_source_cache);
 }
 
 static const rb_data_type_t vm_type = {
@@ -153,6 +166,8 @@ static VALUE vm_alloc(VALUE r_self)
   data->alive_objects = rb_hash_new();
   data->module_loader = Qnil;
   data->on_unhandled_rejection = Qnil;
+  data->module_resolution_cache = rb_hash_new();
+  data->module_source_cache = rb_hash_new();
   data->j_file_proxy_creator = JS_UNDEFINED;
   data->oom_poisoned = false;
   data->disposed = false;
