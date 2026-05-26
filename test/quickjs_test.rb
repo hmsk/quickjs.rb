@@ -942,6 +942,23 @@ describe Quickjs::VM do
       @vm.eval_code("capture(() => 1)")
       _ { received.call(on: "bad") }.must_raise ArgumentError
     end
+
+    it "call with no on: disposes the temporary VM after execution" do
+      received = nil
+      @vm.define_function("capture") { |fn| received = fn }
+      @vm.eval_code("capture(() => 42)")
+      _(received.call).must_equal 42
+    end
+
+    it "call with on: vm does not dispose the external VM" do
+      received = nil
+      @vm.define_function("capture") { |fn| received = fn }
+      @vm.eval_code("capture(() => 1)")
+      other_vm = Quickjs::VM.new
+      received.call(on: other_vm)
+      _(other_vm.disposed?).must_equal false
+      other_vm.dispose!
+    end
   end
 
   describe "Import" do
@@ -1356,6 +1373,19 @@ describe Quickjs::VM do
       runnable = @vm.compile('while (true) {}')
       vm = Quickjs::VM.new(timeout_msec: 50)
       _ { runnable.run(on: vm) }.must_raise Quickjs::InterruptedError
+    end
+
+    it "run with no on: disposes the temporary VM after execution" do
+      runnable = @vm.compile('40 + 2')
+      _(runnable.run).must_equal 42
+    end
+
+    it "run(on: vm) does not dispose the external VM" do
+      runnable = @vm.compile('1 + 1')
+      other_vm = Quickjs::VM.new
+      runnable.run(on: other_vm)
+      _(other_vm.disposed?).must_equal false
+      other_vm.dispose!
     end
   end
 

@@ -43,12 +43,16 @@ module Quickjs
     when Quickjs::VM
       yield on
     when nil
-      yield Quickjs::VM.new
+      vm = Quickjs::VM.new
+      yield vm
     when Hash
-      yield Quickjs::VM.new(**on)
+      vm = Quickjs::VM.new(**on)
+      yield vm
     else
       raise ArgumentError, 'on: must be a Quickjs::VM, a Hash of VM options, or nil'
     end
+  ensure
+    vm&.dispose!
   end
   module_function :_with_vm
 
