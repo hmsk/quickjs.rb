@@ -1169,6 +1169,18 @@ describe Quickjs::VM do
       _ { @vm.module_loader = 'not a proc' }.must_raise TypeError
     end
 
+    it "passes the from: bridge filename as importer to a 2-arity loader" do
+      seen_importer = nil
+      @vm.module_loader = ->(specifier, importer) {
+        seen_importer = importer
+        'export const x = 42;' if specifier == 'dep'
+      }
+      @vm.import(['x'], from: "import { x } from 'dep'; export { x };")
+      _(@vm.eval_code('x')).must_equal 42
+      _(seen_importer).must_be_kind_of String
+      _(seen_importer).wont_equal 'dep'
+    end
+
     it "passes the importer as a second arg to a 2-arity loader" do
       seen = []
       @vm.module_loader = ->(specifier, importer) {
