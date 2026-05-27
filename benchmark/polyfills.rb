@@ -22,7 +22,8 @@ CASES = [
   ['VM instantiation (POLYFILL_FILE)',  -> { Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE]) }],
   ['VM instantiation (POLYFILL_URL)',   -> { Quickjs::VM.new(features: [Quickjs::POLYFILL_URL]) }],
   ['VM instantiation (POLYFILL_CRYPTO)', -> { Quickjs::VM.new(features: [Quickjs::POLYFILL_CRYPTO]) }],
-  ['VM instantiation (all polyfills)',  -> { Quickjs::VM.new(features: [Quickjs::POLYFILL_INTL, Quickjs::POLYFILL_ENCODING, Quickjs::POLYFILL_FILE, Quickjs::POLYFILL_URL, Quickjs::POLYFILL_CRYPTO]) }],
+  ['VM instantiation (POLYFILL_HTML_BASE64)', -> { Quickjs::VM.new(features: [Quickjs::POLYFILL_HTML_BASE64]) }],
+  ['VM instantiation (all polyfills)',  -> { Quickjs::VM.new(features: [Quickjs::POLYFILL_INTL, Quickjs::POLYFILL_ENCODING, Quickjs::POLYFILL_FILE, Quickjs::POLYFILL_URL, Quickjs::POLYFILL_CRYPTO, Quickjs::POLYFILL_HTML_BASE64]) }],
   nil,
   ['eval simple expr (no polyfill)',    -> { vm = Quickjs::VM.new;                                    -> { vm.eval_code('1 + 1') } }],
   ['eval simple expr (POLYFILL_INTL)',  -> { vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_INTL]); -> { vm.eval_code('1 + 1') } }],
@@ -32,6 +33,7 @@ CASES = [
   ['TextEncoder/Decoder (POLYFILL_ENCODING)', -> { vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_ENCODING]); -> { vm.eval_code("new TextEncoder().encode('hello').length") } }],
   ['new URL() (POLYFILL_URL)',            -> { vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_URL]);      -> { vm.eval_code("new URL('https://example.com/path?q=1').hostname") } }],
   ['crypto.getRandomValues (POLYFILL_CRYPTO)', -> { vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_CRYPTO]); -> { vm.eval_code("crypto.getRandomValues(new Uint8Array(8)).length") } }],
+  ['btoa/atob (POLYFILL_HTML_BASE64)',         -> { vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_HTML_BASE64]); -> { vm.eval_code("atob(btoa('hello world'))") } }],
 ]
 
 label_width = CASES.compact.map { |label, _| label.length }.max

@@ -16,6 +16,7 @@ $srcs = [
   'polyfill-file.min.c',
   'polyfill-encoding.min.c',
   'polyfill-url.min.c',
+  'polyfill-html-base64.min.c',
   'quickjsrb.c',
   'quickjsrb_file.c',
   'quickjsrb_crypto.c',
@@ -78,6 +79,10 @@ polyfill-url.min.js:
 		$(COPY) $(srcdir)/vendor/$@ $@
 polyfill-url.min.c: ./qjsc polyfill-url.min.js
 		./qjsc -fno-string-normalize -fno-eval -fno-proxy -fno-module-loader -c -M polyfill/url.so,url -m -o $@ polyfill-url.min.js
+polyfill-html-base64.min.js:
+		$(COPY) $(srcdir)/vendor/$@ $@
+polyfill-html-base64.min.c: ./qjsc polyfill-html-base64.min.js
+		./qjsc -fno-string-normalize -fno-eval -fno-proxy -fno-module-loader -c -M polyfill/html-base64.so,htmlbase64 -m -o $@ polyfill-html-base64.min.js
 COMPILE_POLYFILL
   conf
 end
