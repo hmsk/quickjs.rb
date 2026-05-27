@@ -452,6 +452,16 @@ describe Quickjs::VM do
       _(@vm.eval_code('a_ruby.toString()')).must_match(/native code/)
     end
 
+    it "receives a long string argument (QuickJS rope) correctly" do
+      received = nil
+      @vm.define_function("capture") { |arg| received = arg }
+      @vm.eval_code(<<~JS)
+        const long = "x".repeat(10000);
+        capture(`Hey ${long}`);
+      JS
+      _(received).must_equal "Hey #{'x' * 10000}"
+    end
+
     describe "nested via array path" do
       it "defines a function on an existing object" do
         @vm.eval_code("const myLib = {}")
@@ -915,6 +925,18 @@ describe Quickjs::VM do
       _(received.size).must_equal 1
       _(received.first.to_s).must_equal 'hello 42 world'
       _(received.first.raw).must_equal ['hello', 42, 'world']
+    end
+
+    it "raw value of a long logged string (QuickJS rope) is correct" do
+      received = []
+      @vm.on_log { |log| received << log }
+
+      @vm.eval_code(<<~JS)
+        const long = "x".repeat(10000);
+        console.log(`Hey ${long}`);
+      JS
+
+      _(received.first.raw).must_equal ["Hey #{'x' * 10000}"]
     end
 
     it "receives error logs from unhandled exceptions" do
