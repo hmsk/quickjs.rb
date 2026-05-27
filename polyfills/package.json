@@ -1,6 +1,6 @@
 {
   "name": "quickjs-rb-polyfills",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "private": true,
   "scripts": {
     "build": "rolldown -c rolldown.config.mjs",
