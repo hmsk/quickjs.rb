@@ -178,17 +178,18 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
     return JS_ToBool(ctx, j_val) > 0 ? Qtrue : Qfalse;
   }
   case JS_TAG_STRING:
+  case JS_TAG_STRING_ROPE:
   {
-    int couldntParse;
-    VALUE r_result = rb_protect(r_try_json_parse, to_r_json(ctx, j_val), &couldntParse);
-    if (couldntParse)
-    {
+    // QuickJS keeps long `s += chunk` chains as a rope (JS_TAG_STRING_ROPE)
+    // until something materialises them. JS_ToCStringLen flattens ropes
+    // transparently, so both tags share the same conversion path.
+    size_t len;
+    const char *str = JS_ToCStringLen(ctx, &len, j_val);
+    if (str == NULL)
       return Qnil;
-    }
-    else
-    {
-      return r_result;
-    }
+    VALUE r_str = rb_utf8_str_new(str, (long)len);
+    JS_FreeCString(ctx, str);
+    return r_str;
   }
   case JS_TAG_OBJECT:
   {

@@ -40,6 +40,16 @@ describe Quickjs do
       assert_code("'🆔'", "🆔")
     end
 
+    it "string built via repeated concat (QuickJS rope) round-trips" do
+      result = ::Quickjs.eval_code(<<~JS)
+        let s = "";
+        for (let i = 0; i < 10000; i++) s += "abc";
+        s;
+      JS
+      _(result).must_equal 'abc' * 10000
+    end
+
+
     it "number for integer becomes Integer" do
       assert_code("2+3", 5)
       assert_code("18014398509481982n", 18014398509481982)
