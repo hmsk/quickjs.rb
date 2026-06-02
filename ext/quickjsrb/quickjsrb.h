@@ -14,8 +14,6 @@
 #include <string.h>
 #include <time.h>
 
-extern const uint32_t qjsc_polyfill_intl_en_min_size;
-extern const uint8_t qjsc_polyfill_intl_en_min;
 extern const uint32_t qjsc_polyfill_file_min_size;
 extern const uint8_t qjsc_polyfill_file_min;
 extern const uint32_t qjsc_polyfill_encoding_min_size;

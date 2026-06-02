@@ -12,7 +12,6 @@ $srcs = [
   'cutils.c',
   'quickjs.c',
   'quickjs-libc.c',
-  'polyfill-intl-en.min.c',
   'polyfill-file.min.c',
   'polyfill-encoding.min.c',
   'polyfill-url.min.c',
@@ -62,10 +61,6 @@ POLYFILL_OPTS=-fno-string-normalize -fno-typedarray -fno-typedarray -fno-eval -f
 
 qjsc: ./qjsc.o $(QJS_LIB_OBJS)
 		$(CC) -g -o $@ $^ -lm -ldl -lpthread
-polyfill-intl-en.min.js:
-		$(COPY) $(srcdir)/vendor/$@ $@
-polyfill-intl-en.min.c: ./qjsc polyfill-intl-en.min.js
-		./qjsc $(POLYFILL_OPTS) -c -M polyfill/intl-en.so,intlen -m -o $@ polyfill-intl-en.min.js
 polyfill-file.min.js:
 		$(COPY) $(srcdir)/vendor/$@ $@
 polyfill-file.min.c: ./qjsc polyfill-file.min.js

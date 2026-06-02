@@ -8,6 +8,10 @@ require_relative "quickjs/crypto_key"
 require_relative "quickjs/function"
 require_relative "quickjs/quickjsrb"
 require_relative "quickjs/runnable"
+# Polyfills.rb defines Quickjs.register_polyfill; polyfills/intl.rb calls
+# it at load time, so the order matters.
+require_relative "quickjs/polyfills"
+require_relative "quickjs/polyfills/intl"
 
 module Quickjs
   class Blob

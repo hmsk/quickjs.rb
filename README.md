@@ -392,6 +392,25 @@ Useful when porting JS that assumed V8's implicit-drain semantics — V8 (and th
 | `File` | → | `Quickjs::File` — `.name`, `.last_modified` + Blob attrs | requires `POLYFILL_FILE` |
 | `File` proxy | ← | `::File` | requires `POLYFILL_FILE`; applies to `define_function` return values |
 
+## Extending: registering polyfills
+
+`Quickjs.register_polyfill(name, source:, init: nil)` adds a polyfill to a process-wide registry. Any VM constructed with `name` in its `features:` list runs the registered bundle on top of the JS runtime. Companion gems use this hook to ship additional polyfills (e.g. `Intl.Collator`, `DisplayNames`) without bundling them into the main gem.
+
+```rb
+Quickjs.register_polyfill(
+  :polyfill_my_thing,
+  source: File.read('vendor/my-polyfill.min.js'),
+  init: 'globalThis.MyThing ||= {};'  # optional, runs before the bundle
+)
+
+vm = Quickjs::VM.new(features: [:polyfill_my_thing])
+vm.eval_code('MyThing.greet("hi")')
+```
+
+The first VM with a given polyfill pays the parse cost (the source is compiled to QuickJS bytecode on a disposable VM with a generous timeout); subsequent VMs reuse the cached bytecode. The polyfill body runs without consuming the user VM's `timeout_msec` budget — that's reserved for user code.
+
+The bundled `POLYFILL_INTL` (FormatJS Intl, `en` locale) is itself registered through this API at gem load time.
+
 ## Acknowledgements
 
 - [@ursm](https://github.com/ursm) — for continuous contributions improving performance and developer experience
@@ -401,7 +420,7 @@ Useful when porting JS that assumed V8's implicit-drain semantics — V8 (and th
 
 - `ext/quickjsrb/quickjs`
   - [MIT License Copyright (c) 2017-2021 by Fabrice Bellard and Charlie Gordon](https://github.com/bellard/quickjs/blob/6e2e68fd0896957f92eb6c242a2e048c1ef3cae0/LICENSE).
-- `ext/quickjsrb/vendor/polyfill-intl-en.min.js` ([bundled and minified from `polyfills/`](https://github.com/hmsk/quickjs.rb/tree/main/polyfills))
+- `lib/quickjs/polyfills/intl-en.min.js` ([bundled and minified from `polyfills/`](https://github.com/hmsk/quickjs.rb/tree/main/polyfills))
   - MIT License Copyright (c) 2022 FormatJS
     - [@formatjs/intl-supportedvaluesof](https://github.com/formatjs/formatjs/blob/main/packages/intl-supportedvaluesof/LICENSE.md)
   - MIT License Copyright (c) 2023 FormatJS

@@ -1077,15 +1077,8 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
         JS_NewCFunction(data->context, js_quickjsrb_set_timeout, "setTimeout", 2));
   }
 
-  if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillIntlId))))
-  {
-    const char *defineIntl = "Object.defineProperty(globalThis, 'Intl', { value:{} });\n";
-    JSValue j_defineIntl = JS_Eval(data->context, defineIntl, strlen(defineIntl), vmInternalFilename, JS_EVAL_TYPE_GLOBAL);
-    JS_FreeValue(data->context, j_defineIntl);
-
-    JSValue j_polyfillIntlResult = load_polyfill_bytecode(data->context, &qjsc_polyfill_intl_en_min, qjsc_polyfill_intl_en_min_size);
-    JS_FreeValue(data->context, j_polyfillIntlResult);
-  }
+  // POLYFILL_INTL is registered Ruby-side via Quickjs.register_polyfill and
+  // applied by the wrapper around VM#initialize in lib/quickjs/polyfills.rb.
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
   {
@@ -1315,6 +1308,36 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
   JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
   JS_FreeValue(data->context, j_awaitedResult);
   return to_rb_return_value(data->context, j_returnedValue);
+}
+
+// Loads pre-compiled polyfill bytecode without arming the eval timer.
+// The user's `timeout_msec` is a budget for *their* code; running our
+// own polyfill (~140 ms for FormatJS Intl) under that budget would
+// interrupt the load on tight defaults. Unlike load_polyfill_bytecode
+// above we hold the GVL through JS_ReadObject + JS_EvalFunction: the
+// bytecode buffer is a Ruby String, so releasing would let GC compact
+// the backing storage out from under us. The static-symbol path can
+// release safely; this path cannot.
+static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_disposed(data);
+  StringValue(r_bytecode);
+
+  JSValue j_func = JS_ReadObject(data->context,
+                                 (const uint8_t *)RSTRING_PTR(r_bytecode),
+                                 (size_t)RSTRING_LEN(r_bytecode),
+                                 JS_READ_OBJ_BYTECODE);
+  if (JS_IsException(j_func))
+    return to_rb_value(data->context, j_func); // raises
+
+  JSValue j_result = JS_EvalFunction(data->context, j_func); // frees j_func
+  if (JS_IsException(j_result))
+    return to_rb_value(data->context, j_result); // raises
+  JS_FreeValue(data->context, j_result);
+  return Qnil;
 }
 
 static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
@@ -1728,6 +1751,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, -1);
   rb_define_private_method(r_class_vm, "_compile_to_bytecode", vm_m_compile, -1);
   rb_define_private_method(r_class_vm, "_run_bytecode", vm_m_evalBytecode, 1);
+  rb_define_private_method(r_class_vm, "_load_polyfill_bytecode", vm_m_loadPolyfillBytecode, 1);
   rb_define_method(r_class_vm, "call", vm_m_callGlobalFunction, -1);
   rb_define_method(r_class_vm, "define_function", vm_m_defineGlobalFunction, -1);
   rb_define_method(r_class_vm, "import", vm_m_import, -1);
