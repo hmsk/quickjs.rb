@@ -24,7 +24,6 @@ extern const uint8_t qjsc_polyfill_url_min;
 extern const char *featureStdId;
 extern const char *featureOsId;
 extern const char *featureTimeoutId;
-extern const char *featurePolyfillIntlId;
 extern const char *featurePolyfillFileId;
 extern const char *featurePolyfillEncodingId;
 extern const char *featurePolyfillUrlId;
@@ -212,7 +211,6 @@ static void r_define_constants(VALUE r_parent_class)
   rb_define_const(r_parent_class, "MODULE_STD", QUICKJSRB_SYM(featureStdId));
   rb_define_const(r_parent_class, "MODULE_OS", QUICKJSRB_SYM(featureOsId));
   rb_define_const(r_parent_class, "FEATURE_TIMEOUT", QUICKJSRB_SYM(featureTimeoutId));
-  rb_define_const(r_parent_class, "POLYFILL_INTL", QUICKJSRB_SYM(featurePolyfillIntlId));
   rb_define_const(r_parent_class, "POLYFILL_FILE", QUICKJSRB_SYM(featurePolyfillFileId));
   rb_define_const(r_parent_class, "POLYFILL_ENCODING", QUICKJSRB_SYM(featurePolyfillEncodingId));
   rb_define_const(r_parent_class, "POLYFILL_URL", QUICKJSRB_SYM(featurePolyfillUrlId));

@@ -14,7 +14,7 @@ bundle exec rake compile      # Compile C extension only
 bundle exec rake test         # Run all tests
 bundle exec ruby -Itest:lib test/quickjs_test.rb              # Run single test file
 bundle exec ruby -Itest:lib test/quickjs_test.rb -n test_name # Run single test
-rake polyfills:build          # Rebuild Intl polyfill bundle (requires npm)
+rake polyfills:build          # Rebuild polyfill bundles (Blob/File, Encoding, URL) — requires npm
 ```
 
 QuickJS source lives as a git submodule under `ext/quickjsrb/quickjs/` — clone with `--recurse-submodules`.
@@ -43,17 +43,18 @@ QuickJS source lives as a git submodule under `ext/quickjsrb/quickjs/` — clone
 **Feature flags** (passed to `VM.new` via `features:` array):
 - `:feature_std`, `:feature_os` — QuickJS std/os modules
 - `:feature_timeout` — setTimeout/setInterval via CRuby threads
-- `:feature_polyfill_intl` — Intl API polyfill (DateTimeFormat, NumberFormat, PluralRules, Locale)
 
 **Polyfills** (`polyfills/`):
-- Built from FormatJS packages via rolldown, output minified JS embedded as C source
+- Hand-written W3C-spec polyfills (Blob/File, TextEncoder/Decoder, URL) bundled via rolldown into minified JS embedded as C source
 - Polyfill version must match gem version (enforced during `rake release`)
+- Intl APIs live in a separate companion gem ([`quickjs-polyfill-intl`](https://github.com/hmsk/quickjs-polyfill-intl)) registered via `Quickjs.register_polyfill`
 
 ## Testing
 
 Tests use minitest with `describe`/`it` blocks. Key test files:
 - `test/quickjs_test.rb` — Main test suite (value conversion, errors, VM features, ESM imports, function definitions)
-- `test/quickjs_polyfill_test.rb` — Intl polyfill tests
+- `test/quickjs_polyfill_test.rb` — Blob/File, Encoding, URL, Crypto polyfill tests
+- `test/quickjs_register_polyfill_test.rb` — `Quickjs.register_polyfill` API tests
 
 ## Release Process
 

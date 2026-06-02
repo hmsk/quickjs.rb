@@ -65,7 +65,6 @@ Quickjs.eval_code(code, features: [::Quickjs::MODULE_STD, ::Quickjs::POLYFILL_FI
 | `MODULE_STD` | QuickJS [`std` module](https://bellard.org/quickjs/quickjs.html#std-module) |
 | `MODULE_OS` | QuickJS [`os` module](https://bellard.org/quickjs/quickjs.html#os-module) |
 | `FEATURE_TIMEOUT` | `setTimeout` / `setInterval` managed by CRuby |
-| `POLYFILL_INTL` | Intl API (DateTimeFormat, NumberFormat, PluralRules, Locale) |
 | `POLYFILL_FILE` | W3C File API (Blob and File) |
 | `POLYFILL_ENCODING` | Encoding API (TextEncoder and TextDecoder) |
 | `POLYFILL_URL` | URL API (URL and URLSearchParams) |
@@ -95,7 +94,7 @@ runnable = Quickjs::VM.new.compile(File.read('big_bundle.js'), filename: 'big_bu
 vm = Quickjs::VM.new
 runnable.run(on: vm)                                     # use the given VM (no parse cost)
 runnable.run                                             # spin up a fresh VM with default options
-runnable.run(on: { features: [::Quickjs::POLYFILL_INTL] }) # ad-hoc VM with options
+runnable.run(on: { features: [::Quickjs::POLYFILL_FILE] }) # ad-hoc VM with options
 ```
 
 `Runnable#to_s` returns the underlying bytecode as a frozen ASCII-8BIT `String`, suitable for caching to memory or disk. `Quickjs::Runnable.new(bytecode_string)` reconstructs a `Runnable` from that blob — validation happens lazily at `run` time, so a corrupt or wrong-build blob surfaces as `Quickjs::RuntimeError` when executed. The bytecode format is tied to the QuickJS build, so include the gem version in your cache key if you persist across upgrades.
@@ -346,7 +345,7 @@ By default, the `JSRuntime` / `JSContext` behind a `Quickjs::VM` lives until Rub
 `dispose!` frees the runtime immediately and marks the VM unusable:
 
 ```rb
-vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_INTL])
+vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_FILE])
 vm.eval_code('…')
 vm.dispose!           # frees JSContext + JSRuntime now
 vm.disposed?          #=> true
@@ -409,7 +408,7 @@ vm.eval_code('MyThing.greet("hi")')
 
 The first VM with a given polyfill pays the parse cost (the source is compiled to QuickJS bytecode on a disposable VM with a generous timeout); subsequent VMs reuse the cached bytecode. The polyfill body runs without consuming the user VM's `timeout_msec` budget — that's reserved for user code.
 
-The bundled `POLYFILL_INTL` (FormatJS Intl, `en` locale) is itself registered through this API at gem load time.
+Intl APIs (Collator, DateTimeFormat, NumberFormat, PluralRules, Locale, etc.) live in a separate companion gem: [`quickjs-polyfill-intl`](https://github.com/hmsk/quickjs-polyfill-intl). Granular, dependency-aware, opt-in per API.
 
 ## Acknowledgements
 
@@ -420,18 +419,5 @@ The bundled `POLYFILL_INTL` (FormatJS Intl, `en` locale) is itself registered th
 
 - `ext/quickjsrb/quickjs`
   - [MIT License Copyright (c) 2017-2021 by Fabrice Bellard and Charlie Gordon](https://github.com/bellard/quickjs/blob/6e2e68fd0896957f92eb6c242a2e048c1ef3cae0/LICENSE).
-- `lib/quickjs/polyfills/intl-en.min.js` ([bundled and minified from `polyfills/`](https://github.com/hmsk/quickjs.rb/tree/main/polyfills))
-  - MIT License Copyright (c) 2022 FormatJS
-    - [@formatjs/intl-supportedvaluesof](https://github.com/formatjs/formatjs/blob/main/packages/intl-supportedvaluesof/LICENSE.md)
-  - MIT License Copyright (c) 2023 FormatJS
-    - [@formatjs/intl-getcanonicallocales](https://github.com/formatjs/formatjs/blob/main/packages/intl-getcanonicallocales/LICENSE.md)
-    - [@formatjs/intl-locale](https://github.com/formatjs/formatjs/blob/main/packages/intl-locale/LICENSE.md)
-    - [@formatjs/intl-pluralrules](https://github.com/formatjs/formatjs/blob/main/packages/intl-pluralrules/LICENSE.md)
-    - [@formatjs/intl-numberformat](https://github.com/formatjs/formatjs/blob/main/packages/intl-numberformat/LICENSE.md)
-    - [@formatjs/intl-datetimeformat](https://github.com/formatjs/formatjs/blob/main/packages/intl-datetimeformat/LICENSE.md)
-    - [@formatjs/fast-memoize](https://github.com/formatjs/formatjs/blob/main/packages/fast-memoize/LICENSE.md)
-    - [@formatjs/intl-localematcher](https://github.com/formatjs/formatjs/blob/main/packages/intl-localematcher/LICENSE.md)
-  - MIT License Copyright (c) 2026 FormatJS
-    - [@formatjs/bigdecimal](https://github.com/formatjs/formatjs/blob/main/packages/bigdecimal/LICENSE.md)
 
 Otherwise, [the MIT License, Copyright 2024 by Kengo Hamasaki](/LICENSE).
