@@ -24,6 +24,7 @@ CASES = [
   ['VM instantiation (all polyfills)',  -> { Quickjs::VM.new(features: [Quickjs::POLYFILL_ENCODING, Quickjs::POLYFILL_FILE, Quickjs::POLYFILL_URL, Quickjs::POLYFILL_CRYPTO]) }],
   nil,
   ['eval simple expr (no polyfill)',    -> { vm = Quickjs::VM.new; -> { vm.eval_code('1 + 1') } }],
+  nil,
   ['TextEncoder/Decoder (POLYFILL_ENCODING)', -> { vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_ENCODING]); -> { vm.eval_code("new TextEncoder().encode('hello').length") } }],
   ['new URL() (POLYFILL_URL)',            -> { vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_URL]);      -> { vm.eval_code("new URL('https://example.com/path?q=1').hostname") } }],
   ['crypto.getRandomValues (POLYFILL_CRYPTO)', -> { vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_CRYPTO]); -> { vm.eval_code("crypto.getRandomValues(new Uint8Array(8)).length") } }],
