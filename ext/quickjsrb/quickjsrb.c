@@ -5,7 +5,6 @@
 const char *featureStdId = "feature_std";
 const char *featureOsId = "feature_os";
 const char *featureTimeoutId = "feature_timeout";
-const char *featurePolyfillIntlId = "feature_polyfill_intl";
 const char *featurePolyfillFileId = "feature_polyfill_file";
 const char *featurePolyfillEncodingId = "feature_polyfill_encoding";
 const char *featurePolyfillUrlId = "feature_polyfill_url";
@@ -983,14 +982,13 @@ static JSValue js_console_error(JSContext *ctx, JSValueConst this, int argc, JSV
   return js_quickjsrb_log(ctx, this, argc, argv, "error");
 }
 
-// Polyfill bytecode load + eval is the heavy part of VM construction
-// (POLYFILL_INTL alone is ~140ms — FormatJS locale data + IANA TZ tables).
-// Run it without the GVL so a background warmer thread can populate a VM
-// pool in parallel with the main thread on multi-core hosts.
+// Run polyfill bytecode load + eval without the GVL so a background
+// warmer thread can populate a VM pool in parallel with the main thread
+// on multi-core hosts.
 //
-// Releasing the GVL here is only safe because the polyfills are pure JS
-// (FormatJS / file / encoding / URL bundles) and no Ruby-bridged callbacks
-// have been registered on globalThis yet at this point in vm_m_initialize.
+// Releasing the GVL here is only safe because the bundled polyfills are
+// pure JS (file / encoding / url) and no Ruby-bridged callbacks have
+// been registered on globalThis yet at this point in vm_m_initialize.
 // If the order ever changes — e.g. moving define_function setup ahead of
 // the polyfill loads — the polyfill bytecode could re-enter Ruby without
 // the GVL held. Keep host callback registration after polyfill loading.
@@ -1076,9 +1074,6 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
         data->context, j_global, "setTimeout",
         JS_NewCFunction(data->context, js_quickjsrb_set_timeout, "setTimeout", 2));
   }
-
-  // POLYFILL_INTL is registered Ruby-side via Quickjs.register_polyfill and
-  // applied by the wrapper around VM#initialize in lib/quickjs/polyfills.rb.
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
   {
@@ -1311,8 +1306,9 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
 }
 
 // Loads pre-compiled polyfill bytecode without arming the eval timer.
-// The user's `timeout_msec` is a budget for *their* code; running our
-// own polyfill (~140 ms for FormatJS Intl) under that budget would
+// The user's `timeout_msec` is a budget for *their* code; running a
+// multi-MB polyfill bundle (e.g. the companion `quickjs-polyfill-intl`
+// gem registered via Quickjs.register_polyfill) under that budget would
 // interrupt the load on tight defaults. Unlike load_polyfill_bytecode
 // above we hold the GVL through JS_ReadObject + JS_EvalFunction: the
 // bytecode buffer is a Ruby String, so releasing would let GC compact

@@ -43,11 +43,12 @@ module Quickjs
   end
 
   # Compiled once per process per polyfill on a disposable VM whose
-  # generous timeout covers parsing multi-MB bundles (FormatJS Intl is
-  # ~2 MB). The user's per-VM `timeout_msec` is for their own JS — it
-  # would otherwise interrupt our infrastructure on tight defaults.
-  # `features: []` skips applying any registered polyfills to the temp
-  # VM (no recursion / no wasted polyfill loads).
+  # generous timeout covers parsing multi-MB bundles (e.g. the companion
+  # `quickjs-polyfill-intl` gem's FormatJS bundles run a couple MB). The
+  # user's per-VM `timeout_msec` is for their own JS — it would otherwise
+  # interrupt our infrastructure on tight defaults. `features: []` skips
+  # applying any registered polyfills to the temp VM (no recursion / no
+  # wasted polyfill loads).
   def self._precompile_polyfill(entry, feature)
     source = entry[:source]
     source = source.call if source.is_a?(Proc)
