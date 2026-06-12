@@ -902,7 +902,7 @@ static VALUE vm_m_on_log(VALUE r_self)
   return Qnil;
 }
 
-static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, const char *severity)
+static JSValue js_quickjsrb_log_inner(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, const char *severity)
 {
   VMData *data = JS_GetContextOpaque(ctx);
   VALUE r_row = rb_ary_new();
@@ -960,6 +960,40 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JS
     return JS_Throw(ctx, j_error);
   }
   return JS_UNDEFINED;
+}
+
+// Dispatcher: when the caller released the GVL around JS_Eval (see
+// vm_m_evalCode pure-path), Ruby APIs can't be touched directly. Re-acquire
+// the GVL via rb_thread_call_with_gvl before running the row-building body.
+// When the GVL is already held, call the body inline to avoid the re-acquire
+// overhead.
+struct quickjsrb_log_call
+{
+  JSContext *ctx;
+  JSValueConst this_val;
+  int argc;
+  JSValueConst *argv;
+  const char *severity;
+  JSValue result;
+};
+
+static void *quickjsrb_log_with_gvl(void *p)
+{
+  struct quickjsrb_log_call *c = p;
+  c->result = js_quickjsrb_log_inner(c->ctx, c->this_val, c->argc, c->argv, c->severity);
+  return NULL;
+}
+
+static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, const char *severity)
+{
+  VMData *data = JS_GetContextOpaque(ctx);
+  if (data->gvl_released_eval)
+  {
+    struct quickjsrb_log_call c = {ctx, this_val, argc, argv, severity, JS_UNDEFINED};
+    rb_thread_call_with_gvl(quickjsrb_log_with_gvl, &c);
+    return c.result;
+  }
+  return js_quickjsrb_log_inner(ctx, this_val, argc, argv, severity);
 }
 
 static JSValue js_console_info(JSContext *ctx, JSValueConst this, int argc, JSValueConst *argv)
@@ -1073,6 +1107,10 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JS_SetPropertyStr(
         data->context, j_global, "setTimeout",
         JS_NewCFunction(data->context, js_quickjsrb_set_timeout, "setTimeout", 2));
+    // js_delay_and_eval_job (the actual setTimeout callback) calls rb_funcall
+    // and rb_thread_wait_for synchronously, so eval must keep the GVL while
+    // js_std_await is draining the job queue.
+    data->has_native_ruby_bridge = true;
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
@@ -1081,6 +1119,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     JS_FreeValue(data->context, j_polyfillFileResult);
 
     quickjsrb_init_file_proxy(data);
+    data->has_native_ruby_bridge = true;
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillEncodingId))))
@@ -1098,6 +1137,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillCryptoId))))
   {
     quickjsrb_init_crypto(data->context, j_global);
+    data->has_native_ruby_bridge = true;
   }
 
   // Host callbacks (console, setTimeout, Ruby-bridged functions) are
@@ -1194,6 +1234,91 @@ static void arm_eval_timer(VMData *data)
   JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
 }
 
+// Pure-path predicate: true when no JS→Ruby bridge can fire during eval
+// other than console.log (which is handled by js_quickjsrb_log's
+// gvl_released_eval re-acquire). When true, eval can safely run with the
+// GVL released so other Ruby threads make progress on different cores.
+// POLYFILL_FILE / POLYFILL_CRYPTO install C functions that call rb_funcall
+// directly — those would need to learn the gvl_released_eval pattern before
+// they can run under a released GVL, so we hold the GVL when they're loaded.
+static bool can_eval_gvl_free(VMData *data)
+{
+  return RHASH_SIZE(data->defined_functions) == 0
+      && NIL_P(data->module_loader)
+      && NIL_P(data->on_unhandled_rejection)
+      && !data->has_native_ruby_bridge;
+}
+
+struct eval_code_no_gvl_args
+{
+  JSContext *ctx;
+  const char *code;
+  size_t code_len;
+  const char *filename;
+  int eval_flags;
+  bool async_mode;
+  JSValue result;
+};
+
+static void *eval_code_no_gvl(void *p)
+{
+  struct eval_code_no_gvl_args *args = p;
+  JSValue j_codeResult = JS_Eval(args->ctx, args->code, args->code_len, args->filename, args->eval_flags);
+  if (args->async_mode)
+  {
+    JSValue j_awaitedResult = js_std_await(args->ctx, j_codeResult); // frees j_codeResult
+    args->result = JS_GetPropertyStr(args->ctx, j_awaitedResult, "value");
+    JS_FreeValue(args->ctx, j_awaitedResult);
+  }
+  else
+  {
+    args->result = j_codeResult;
+  }
+  return NULL;
+}
+
+// Run JS_Eval (+ js_std_await for async) without the GVL. Inputs are copied
+// to malloc'd buffers because RSTRING_PTR can be invalidated by GC compaction
+// while we're released — see feedback memory on RSTRING_PTR + GVL release.
+static VALUE eval_code_release_gvl(VMData *data, VALUE r_code, const char *filename, bool async_mode)
+{
+  size_t code_len = (size_t)RSTRING_LEN(r_code);
+  // QuickJS's parser reads code_len bytes plus a sentinel NUL; Ruby strings
+  // are always NUL-terminated past RSTRING_LEN, so the original GVL-held path
+  // works by accident. Our malloc'd copy must preserve that invariant.
+  char *code_buf = malloc(code_len + 1);
+  if (code_buf == NULL)
+    rb_raise(rb_eNoMemError, "failed to allocate eval code buffer");
+  memcpy(code_buf, RSTRING_PTR(r_code), code_len);
+  code_buf[code_len] = '\0';
+
+  char *filename_buf = strdup(filename);
+  if (filename_buf == NULL)
+  {
+    free(code_buf);
+    rb_raise(rb_eNoMemError, "failed to allocate eval filename buffer");
+  }
+
+  struct eval_code_no_gvl_args args = {
+      .ctx = data->context,
+      .code = code_buf,
+      .code_len = code_len,
+      .filename = filename_buf,
+      .eval_flags = async_mode ? (JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC) : JS_EVAL_TYPE_GLOBAL,
+      .async_mode = async_mode,
+      .result = JS_UNDEFINED,
+  };
+
+  data->gvl_released_eval = true;
+  rb_thread_call_without_gvl(eval_code_no_gvl, &args, NULL, NULL);
+  data->gvl_released_eval = false;
+
+  free(code_buf);
+  free(filename_buf);
+
+  return to_rb_return_value(data->context, args.result);
+}
+
 static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
 {
   VMData *data;
@@ -1217,6 +1342,9 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
   arm_eval_timer(data);
 
   StringValue(r_code);
+
+  if (can_eval_gvl_free(data))
+    return eval_code_release_gvl(data, r_code, filename, async_mode);
 
   if (!async_mode)
   {

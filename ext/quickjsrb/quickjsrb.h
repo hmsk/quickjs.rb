@@ -75,6 +75,16 @@ typedef struct VMData
   // enough pressure to collect the wrapper. Doubles as a double-free guard
   // for the dfree handler.
   bool disposed;
+  // Set while eval is running with the GVL released so JS→Ruby bridges
+  // (currently js_quickjsrb_log) can re-acquire the GVL before touching
+  // Ruby APIs. Reset before to_rb_return_value runs under the GVL.
+  bool gvl_released_eval;
+  // Set when POLYFILL_FILE or POLYFILL_CRYPTO is enabled — those install
+  // C functions that call rb_funcall synchronously (e.g. crypto.subtle.*,
+  // File proxy). Until those bridges learn to re-acquire the GVL through
+  // gvl_released_eval, vm_m_evalCode must keep the GVL held when this flag
+  // is true.
+  bool has_native_ruby_bridge;
 } VMData;
 
 static void vm_teardown_context(JSContext *ctx)
@@ -168,6 +178,8 @@ static VALUE vm_alloc(VALUE r_self)
   data->j_file_proxy_creator = JS_UNDEFINED;
   data->oom_poisoned = false;
   data->disposed = false;
+  data->gvl_released_eval = false;
+  data->has_native_ruby_bridge = false;
 
   EvalTime *eval_time = malloc(sizeof(EvalTime));
   data->eval_time = eval_time;

@@ -1644,10 +1644,6 @@ describe "Quickjs::Blocking" do
     _(run_threads(&block)).must_equal %w(t1 t1 t1 t2)
   end
 
-  def refute_sleep_a_sec_within_thread(&block)
-    _(run_threads(&block)).wont_equal %w(t1 t1 t1 t2)
-  end
-
   def pend_on_ubuntu
     skip('unresolved stack overflow on Ubuntu of GitHub Actions') unless RUBY_PLATFORM.match(/darwin/)
   end
@@ -1678,30 +1674,33 @@ describe "Quickjs::Blocking" do
       end
     end
 
-    it "os sleep messes" do
+    # The GVL is released during VM#eval_code on the pure path, so these
+    # blocking-looking calls (os.sleep, os.setTimeout, os.sleepAsync) no
+    # longer hold up sibling Ruby threads.
+    it "os.sleep does not block other threads" do
       pend_on_ubuntu
-      refute_sleep_a_sec_within_thread do
+      assert_sleep_a_sec_within_thread do
         @vm.eval_code('os.sleep(200);')
       end
     end
 
-    it "awaiting os.setTimeout messes" do
+    it "awaiting os.setTimeout does not block other threads" do
       pend_on_ubuntu
-      refute_sleep_a_sec_within_thread do
+      assert_sleep_a_sec_within_thread do
         @vm.eval_code('await new Promise(resolve => os.setTimeout(resolve, 200));')
       end
     end
 
-    it "awaiting async function which wraps os.setTimeout messes" do
+    it "awaiting async function which wraps os.setTimeout does not block other threads" do
       pend_on_ubuntu
-      refute_sleep_a_sec_within_thread do
+      assert_sleep_a_sec_within_thread do
         @vm.eval_code('async function top () { await new Promise(resolve => os.setTimeout(resolve, 200)); } await top();')
       end
     end
 
-    it "awaiting os.sleepAsync messes" do
+    it "awaiting os.sleepAsync does not block other threads" do
       pend_on_ubuntu
-      refute_sleep_a_sec_within_thread do
+      assert_sleep_a_sec_within_thread do
         @vm.eval_code('async function top () { await os.sleepAsync(200); } await top();')
       end
     end
@@ -1716,6 +1715,57 @@ describe "Quickjs::Blocking" do
       pend_on_ubuntu
       assert_sleep_a_sec_within_thread do
         @vm.eval_code('await new Promise(resolve => setTimeout(resolve, 200));')
+      end
+    end
+  end
+
+  describe "ParallelEval" do
+    # Smoke test for VM#eval_code releasing the GVL: N threads each running
+    # a CPU-bound JS workload on their own VM should all complete with the
+    # expected result. Regressions in the pure-eval fast path (lost work,
+    # corrupted state, missing GVL re-acquire) surface as crashes or wrong
+    # return values here, even without measuring wall-clock scaling.
+    def cpu_workload
+      <<~JS
+        (() => {
+          let acc = 0;
+          for (let i = 0; i < 5000; i++) {
+            acc = (acc + i) % 1e9;
+          }
+          return acc;
+        })();
+      JS
+    end
+
+    it "runs eval_code in parallel across multiple VMs without crashing" do
+      expected = (0...5000).sum % 1_000_000_000
+      threads  = Array.new(4) {
+        Thread.new {
+          vm = Quickjs::VM.new
+
+          begin
+            5.times.map { vm.eval_code(cpu_workload) }
+          ensure
+            vm.dispose!
+          end
+        }
+      }
+      results = threads.map(&:value)
+      _(results.flatten.uniq).must_equal [expected]
+    end
+
+    # Regression test: setTimeout enqueues js_delay_and_eval_job which calls
+    # rb_funcall and rb_thread_wait_for synchronously. The pure-eval fast
+    # path must keep the GVL held when FEATURE_TIMEOUT is enabled, otherwise
+    # those Ruby APIs run without the GVL and crash.
+    it "tolerates setTimeout in JS without crashing the interpreter" do
+      pend_on_ubuntu
+      vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
+
+      begin
+        _(vm.eval_code('await new Promise(resolve => setTimeout(() => resolve(42), 10));')).must_equal 42
+      ensure
+        vm.dispose!
       end
     end
   end
