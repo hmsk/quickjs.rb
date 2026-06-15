@@ -1249,7 +1249,7 @@ static bool can_eval_gvl_free(VMData *data)
       && !data->has_native_ruby_bridge;
 }
 
-struct eval_code_no_gvl_args
+struct eval_code_no_gvl_body_args
 {
   JSContext *ctx;
   const char *code;
@@ -1260,9 +1260,12 @@ struct eval_code_no_gvl_args
   JSValue result;
 };
 
-static void *eval_code_no_gvl(void *p)
+// Worker body passed to rb_thread_call_without_gvl. Runs JS_Eval (+ js_std_await
+// for async) on the calling thread with the GVL released. MUST NOT touch the
+// Ruby VM directly — see js_quickjsrb_log's dispatcher for the re-acquire pattern.
+static void *eval_code_no_gvl_body(void *p)
 {
-  struct eval_code_no_gvl_args *args = p;
+  struct eval_code_no_gvl_body_args *args = p;
   JSValue j_codeResult = JS_Eval(args->ctx, args->code, args->code_len, args->filename, args->eval_flags);
   if (args->async_mode)
   {
@@ -1299,7 +1302,7 @@ static VALUE eval_code_release_gvl(VMData *data, VALUE r_code, const char *filen
     rb_raise(rb_eNoMemError, "failed to allocate eval filename buffer");
   }
 
-  struct eval_code_no_gvl_args args = {
+  struct eval_code_no_gvl_body_args args = {
       .ctx = data->context,
       .code = code_buf,
       .code_len = code_len,
@@ -1310,7 +1313,7 @@ static VALUE eval_code_release_gvl(VMData *data, VALUE r_code, const char *filen
   };
 
   data->gvl_released_eval = true;
-  rb_thread_call_without_gvl(eval_code_no_gvl, &args, NULL, NULL);
+  rb_thread_call_without_gvl(eval_code_no_gvl_body, &args, NULL, NULL);
   data->gvl_released_eval = false;
 
   free(code_buf);

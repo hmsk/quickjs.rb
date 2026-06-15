@@ -47,11 +47,8 @@ def median(values)
   sorted.length.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
 end
 
-# Subtract the heredoc's trailing newline so a 6-line JS body reports as 6.
-js_line_count = WORKLOAD.lines.count - (WORKLOAD.end_with?("\n") ? 1 : 0)
-
 puts "Ruby #{RUBY_VERSION} / quickjs.rb #{Quickjs::VERSION}"
-puts "Workload: #{js_line_count} lines of CPU-bound JS, #{ITERATIONS_PER_THREAD} iterations/thread, median of #{TRIALS} trials"
+puts "Workload: #{WORKLOAD.lines.count} lines of CPU-bound JS, #{ITERATIONS_PER_THREAD} iterations/thread, median of #{TRIALS} trials"
 puts "Cores reported: #{Etc.nprocessors}"
 puts
 
