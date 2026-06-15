@@ -1,5 +1,5 @@
 # frozen_string_literal: true
 
 module Quickjs
-  VERSION = "0.19.0.pre2"
+  VERSION = "0.19.0.rc1"
 end
