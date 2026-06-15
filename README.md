@@ -406,6 +406,15 @@ vm = Quickjs::VM.new(features: [:polyfill_my_thing])
 vm.eval_code('MyThing.greet("hi")')
 ```
 
+`source:` also accepts a `Proc` returning a `String` — useful in companion gems that call `register_polyfill` at `require` time without paying the file-read cost unless a VM actually opts into the feature:
+
+```rb
+Quickjs.register_polyfill(
+  :polyfill_my_thing,
+  source: -> { File.read('vendor/my-polyfill.min.js') }
+)
+```
+
 The first VM with a given polyfill pays the parse cost (the source is compiled to QuickJS bytecode on a disposable VM with a generous timeout); subsequent VMs reuse the cached bytecode. The polyfill body runs without consuming the user VM's `timeout_msec` budget — that's reserved for user code.
 
 Intl APIs (Collator, DateTimeFormat, NumberFormat, PluralRules, Locale, etc.) live in a separate companion gem: [`quickjs-polyfill-intl`](https://github.com/hmsk/quickjs-polyfill-intl). Granular, dependency-aware, opt-in per API.
