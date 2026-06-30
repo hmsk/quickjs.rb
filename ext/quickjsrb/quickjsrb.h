@@ -75,21 +75,23 @@ typedef struct VMData
   // enough pressure to collect the wrapper. Doubles as a double-free guard
   // for the dfree handler.
   bool disposed;
-  // Set while eval is running with the GVL released so JS→Ruby bridges
+  // Set while JS is executing with the GVL released so JS→Ruby bridges
   // (currently js_quickjsrb_log) can re-acquire the GVL before touching
-  // Ruby APIs. Reset before to_rb_return_value runs under the GVL.
-  // Saved/restored (not blindly cleared) so an eval nested through an
-  // on_log listener doesn't clear the outer eval's flag.
-  bool gvl_released_eval;
+  // Ruby APIs. Covers both vm_m_evalCode and vm_m_loadPolyfillBytecode;
+  // reset before to_rb_return_value or other Ruby-touching code runs.
+  // Saved/restored (not blindly cleared) so a region nested through an
+  // on_log listener doesn't clear the outer region's flag.
+  bool gvl_released_js;
   // Number of JS executions currently in flight on this VM — eval_code
   // (both the GVL-released and GVL-held paths), call, bytecode runs,
-  // import, and job drains. vm_m_dispose refuses (ThreadError) while
-  // nonzero: freeing the runtime under live JS is a use-after-free, and
-  // both the GVL release and GVL-yielding bridge callbacks (setTimeout's
-  // rb_thread_wait_for, define_function procs, on_log listeners) make
-  // that overlap reachable — e.g. the README's `Thread.new { vm.dispose! }`
-  // pattern, or a listener calling dispose! mid-eval. Only mutated while
-  // holding the GVL, so plain int accesses are race-free.
+  // polyfill bytecode loads, import, and job drains. vm_m_dispose refuses
+  // (ThreadError) while nonzero: freeing the runtime under live JS is a
+  // use-after-free, and both the GVL release and GVL-yielding bridge
+  // callbacks (setTimeout's rb_thread_wait_for, define_function procs,
+  // on_log listeners) make that overlap reachable — e.g. the README's
+  // `Thread.new { vm.dispose! }` pattern, or a listener calling dispose!
+  // mid-eval. Only mutated while holding the GVL, so plain int accesses
+  // are race-free.
   int evals_in_flight;
   // Number of GVL-release regions currently open on this VM (a subset of
   // evals_in_flight). Bridge-registration APIs (define_function,
@@ -102,7 +104,7 @@ typedef struct VMData
   int gvl_release_regions;
   // Latched by quickjsrb_new_ruby_bridge whenever a C function that calls
   // into Ruby synchronously (rb_funcall & friends) WITHOUT honoring
-  // gvl_released_eval is installed into this context. While true,
+  // gvl_released_js is installed into this context. While true,
   // can_eval_gvl_free fails and eval keeps the GVL held. Register every
   // such function through that helper — a bridge registered with plain
   // JS_NewCFunction would run against Ruby under a released GVL and
@@ -111,7 +113,7 @@ typedef struct VMData
 } VMData;
 
 // Drop-in replacement for JS_NewCFunction for C functions that call into
-// Ruby synchronously without honoring gvl_released_eval (crypto.*, File
+// Ruby synchronously without honoring gvl_released_js (crypto.*, File
 // proxy helpers, setTimeout's job). Latching has_native_ruby_bridge here
 // makes the "keep the GVL held" contract structural instead of relying on
 // each feature-init site to remember a flag assignment. Requires
@@ -218,7 +220,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->j_file_proxy_creator = JS_UNDEFINED;
   data->oom_poisoned = false;
   data->disposed = false;
-  data->gvl_released_eval = false;
+  data->gvl_released_js = false;
   data->evals_in_flight = 0;
   data->gvl_release_regions = 0;
   data->has_native_ruby_bridge = false;

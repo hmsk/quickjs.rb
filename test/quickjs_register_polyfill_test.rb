@@ -93,4 +93,61 @@ describe "Quickjs.register_polyfill" do
 
     _(vm.eval_code('installed', async: false)).must_equal true
   end
+
+  # Mirrors the GVL-release pattern from VM#eval_code: _load_polyfill_bytecode
+  # copies the Ruby String to a malloc'd buffer and releases the GVL during
+  # JS_ReadObject + JS_EvalFunction. Without that, csim-style warmer-thread VM
+  # pools serialize all polyfill loads through the GVL and lose multi-core
+  # scaling — the original motivation for this code path. The workload calls
+  # _load_polyfill_bytecode directly on a bare VM so the timing isolates the
+  # bytecode-load step from VM construction (which would otherwise release the
+  # GVL itself if any bundled polyfill features were enabled).
+  it "loads polyfill bytecode in parallel across VMs (GVL released)" do
+    Quickjs.register_polyfill(@feature, source: cpu_workload_js)
+
+    Quickjs::VM.new(features: [@feature]).dispose! # populate the bytecode cache
+    bytecode = Quickjs._polyfill_for(@feature)[:bytecode]
+
+    assert_run_in_parallel do |iterations|
+      iterations.times do
+        vm = Quickjs::VM.new
+        vm.send(:_load_polyfill_bytecode, bytecode)
+        vm.dispose!
+      end
+    end
+  end
+
+  # JS_EvalFunction on a JS_EXCEPTION input replaces the pending exception
+  # with a generic "bytecode function expected" TypeError, losing the actual
+  # deserialization diagnostic. bytecode_load_job_run (shared by the released
+  # and GVL-held paths) short-circuits on JS_IsException to preserve the
+  # original error.
+  it "preserves the original JS_ReadObject error for corrupt bytecode" do
+    vm = Quickjs::VM.new
+
+    err = _ {
+      vm.send(:_load_polyfill_bytecode, 'this is not valid bytecode')
+    }.must_raise Quickjs::SyntaxError
+
+    _(err.message).wont_match(/bytecode function expected/)
+  ensure
+    vm&.dispose!
+  end
+
+  # vm_m_loadPolyfillBytecode gates on can_eval_gvl_free: when POLYFILL_CRYPTO
+  # is enabled, the polyfill's top-level code can reach crypto.getRandomValues
+  # (a C bridge that calls rb_funcall directly without honoring gvl_released_js).
+  # Releasing the GVL would crash; the gate keeps it held. This test exercises
+  # the combo to prove the gate is wired — without it, the crypto bridge runs
+  # off-GVL and segfaults under MRI.
+  it "loads with GVL held when a Ruby-bridged feature is also enabled" do
+    Quickjs.register_polyfill(@feature, source: <<~JS)
+      globalThis.fromPolyfill = crypto.getRandomValues(new Uint8Array(4)).length;
+    JS
+    vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_CRYPTO, @feature])
+
+    _(vm.eval_code('fromPolyfill')).must_equal 4
+  ensure
+    vm&.dispose!
+  end
 end
