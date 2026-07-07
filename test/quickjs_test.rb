@@ -1759,8 +1759,11 @@ describe "Quickjs::Blocking" do
   # wall-clock for the same total amount of work done serially in one thread
   # vs split across two threads. If the work releases the GVL during its hot
   # section, the 2-thread run finishes in ~half the wall clock; if it holds
-  # the GVL, both runs take roughly the same time. The 2/3 threshold cleanly
-  # distinguishes the two while leaving headroom for thread scheduling jitter.
+  # the GVL, both runs take roughly the same time (ratio ≈ 1.0 plus thread
+  # overhead). The 0.8 threshold cleanly distinguishes the two: GitHub's
+  # 3-core macOS runners have been observed topping out around 1.5x
+  # speedup (ratio ~0.67), so demanding better than 1.25x keeps margin on
+  # both sides without flapping.
   #
   # The block receives an iteration count and is expected to do that many
   # units of the operation under test (e.g. eval_code calls). Each thread
@@ -1791,8 +1794,8 @@ describe "Quickjs::Blocking" do
       }
     }.min
 
-    assert_operator parallel, :<=, single * 2.0 / 3,
-      "parallel wall clock #{(parallel * 1000).round(1)}ms not ≤ 2/3 × single #{(single * 1000).round(1)}ms — work may not be releasing the GVL"
+    assert_operator parallel, :<=, single * 0.8,
+      "parallel wall clock #{(parallel * 1000).round(1)}ms not ≤ 0.8 × single #{(single * 1000).round(1)}ms — work may not be releasing the GVL"
   end
 
   describe "ProcessBlocking" do
