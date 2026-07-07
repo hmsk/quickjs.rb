@@ -1428,6 +1428,40 @@ static void check_no_gvl_release_in_flight(VMData *data)
     rb_raise(rb_eThreadError, "cannot install a JS-to-Ruby bridge on a Quickjs::VM while it is evaluating with the GVL released");
 }
 
+// rb_ensure cleanup shared by every GVL-held entry point that keeps
+// evals_in_flight elevated (bridged eval_code, eval_bytecode, drain_jobs!,
+// vm_m_callGlobalFunction, vm_m_import): guarantees the decrement on every
+// raise exit — JS exceptions, type errors, conversion failures, and async
+// interrupts (Thread#raise / Timeout) delivered inside a bridge callback
+// such as setTimeout's rb_thread_wait_for. A stranded counter would make
+// dispose! refuse forever.
+static VALUE evals_in_flight_release(VALUE p)
+{
+  ((VMData *)p)->evals_in_flight--;
+  return Qnil;
+}
+
+static VALUE eval_code_job_run_body(VALUE p)
+{
+  eval_code_job_run((struct eval_code_job *)p);
+  return Qnil;
+}
+
+struct eval_function_job
+{
+  JSContext *ctx;
+  JSValue j_func;
+  JSValue j_awaited;
+};
+
+static VALUE eval_function_job_run_body(VALUE p)
+{
+  struct eval_function_job *job = (struct eval_function_job *)p;
+  JSValue j_codeResult = JS_EvalFunction(job->ctx, job->j_func); // frees j_func
+  job->j_awaited = js_std_await(job->ctx, j_codeResult);
+  return Qnil;
+}
+
 // Run the eval core without the GVL. Inputs are copied to malloc'd buffers
 // because RSTRING_PTR can be invalidated by GC compaction while we're
 // released — see feedback memory on RSTRING_PTR + GVL release.
@@ -1506,11 +1540,12 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
   // rb_thread_wait_for, on_log listeners) can yield the GVL mid-eval, so
   // dispose! must refuse here too — count this eval in flight. Argument
   // parsing above may have yielded since the entry check, so re-check
-  // disposed first.
+  // disposed first. rb_ensure, not a bare pair: an async interrupt raised
+  // inside setTimeout's rb_thread_wait_for longjmps out of the job and
+  // would strand the counter.
   check_disposed(data);
   data->evals_in_flight++;
-  eval_code_job_run(&job);
-  data->evals_in_flight--;
+  rb_ensure(eval_code_job_run_body, (VALUE)&job, evals_in_flight_release, (VALUE)data);
   return to_rb_return_value(data->context, job.result);
 }
 
@@ -1581,12 +1616,14 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
     return to_rb_value(data->context, j_func); // raises
   }
 
+  // rb_ensure, not a bare pair: user bytecode with FEATURE_TIMEOUT reaches
+  // setTimeout's rb_thread_wait_for, where an async interrupt longjmps out
+  // and would strand the counter.
+  struct eval_function_job job = {data->context, j_func, JS_UNDEFINED};
   data->evals_in_flight++;
-  JSValue j_codeResult = JS_EvalFunction(data->context, j_func); // frees j_func
-  JSValue j_awaitedResult = js_std_await(data->context, j_codeResult);
-  data->evals_in_flight--;
-  JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
-  JS_FreeValue(data->context, j_awaitedResult);
+  rb_ensure(eval_function_job_run_body, (VALUE)&job, evals_in_flight_release, (VALUE)data);
+  JSValue j_returnedValue = JS_GetPropertyStr(data->context, job.j_awaited, "value");
+  JS_FreeValue(data->context, job.j_awaited);
   return to_rb_return_value(data->context, j_returnedValue);
 }
 
@@ -1744,16 +1781,6 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   {
     rb_raise(rb_eTypeError, "function's name should be a Symbol or a String");
   }
-}
-
-// rb_ensure cleanup shared by the entry points that keep evals_in_flight
-// elevated across a whole call (vm_m_callGlobalFunction, vm_m_import):
-// guarantees the decrement on every raise exit (JS exceptions, type
-// errors, conversion failures).
-static VALUE evals_in_flight_release(VALUE p)
-{
-  ((VMData *)p)->evals_in_flight--;
-  return Qnil;
 }
 
 struct js_entry_call
@@ -2134,25 +2161,14 @@ static VALUE vm_m_runGC(VALUE r_self)
   return Qnil;
 }
 
-static VALUE vm_m_drainJobs(VALUE r_self)
+static VALUE drain_jobs_body(VALUE p)
 {
-  VMData *data;
-  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
-
-  check_oom_poisoned(data);
-
+  VMData *data = (VMData *)p;
   JSRuntime *runtime = JS_GetRuntime(data->context);
-  if (!JS_IsJobPending(runtime))
-    return INT2NUM(0);
-
-  arm_eval_timer(data);
-
   int executed = 0;
   for (;;)
   {
-    data->evals_in_flight++;
     int err = JS_ExecutePendingJob(runtime, NULL);
-    data->evals_in_flight--;
     if (err == 0)
       break;
     if (err < 0)
@@ -2160,6 +2176,25 @@ static VALUE vm_m_drainJobs(VALUE r_self)
     executed++;
   }
   return INT2NUM(executed);
+}
+
+static VALUE vm_m_drainJobs(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_oom_poisoned(data);
+
+  if (!JS_IsJobPending(JS_GetRuntime(data->context)))
+    return INT2NUM(0);
+
+  arm_eval_timer(data);
+
+  // rb_ensure, not a bare pair: a pending job can be setTimeout's
+  // js_delay_and_eval_job, whose rb_thread_wait_for lets an async
+  // interrupt longjmp out and would strand the counter.
+  data->evals_in_flight++;
+  return rb_ensure(drain_jobs_body, (VALUE)data, evals_in_flight_release, (VALUE)data);
 }
 
 static VALUE vm_m_memoryPoisoned(VALUE r_self)

@@ -474,6 +474,47 @@ describe Quickjs::VM do
       vm.dispose!
       _(vm.disposed?).must_equal true
     end
+
+    # An async interrupt (Timeout / Thread#raise) delivered inside setTimeout's
+    # rb_thread_wait_for longjmps out of the eval. evals_in_flight must unwind
+    # with it (rb_ensure, not a bare ++/-- pair), or the guard above would
+    # refuse dispose! forever on a VM that is no longer evaluating anything.
+    # One test per GVL-held entry point that elevates the counter around a
+    # region that can reach the bridge.
+    it "stays disposable after an async interrupt lands mid-eval" do
+      vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
+
+      _ {
+        Timeout.timeout(0.3) { vm.eval_code('await new Promise(resolve => setTimeout(resolve, 60000));') }
+      }.must_raise Timeout::Error
+
+      vm.dispose!
+      _(vm.disposed?).must_equal true
+    end
+
+    it "stays disposable after an async interrupt lands mid-bytecode-run" do
+      vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
+      runnable = vm.compile('await new Promise(resolve => setTimeout(resolve, 60000));')
+
+      _ {
+        Timeout.timeout(0.3) { runnable.run(on: vm) }
+      }.must_raise Timeout::Error
+
+      vm.dispose!
+      _(vm.disposed?).must_equal true
+    end
+
+    it "stays disposable after an async interrupt lands mid-drain_jobs!" do
+      vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
+      vm.eval_code('setTimeout(() => {}, 60000); void 0')
+
+      _ {
+        Timeout.timeout(0.3) { vm.drain_jobs! }
+      }.must_raise Timeout::Error
+
+      vm.dispose!
+      _(vm.disposed?).must_equal true
+    end
   end
 
   it "accepts some options to constrain its resource" do
