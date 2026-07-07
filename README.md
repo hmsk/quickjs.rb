@@ -358,7 +358,7 @@ vm.eval_code('1 + 1') # raises Quickjs::RuntimeError "VM has been disposed"
 Thread.new { vm.dispose! }
 ```
 
-Disposing a VM that is mid-evaluation on another thread would free the runtime out from under the running JS, so `dispose!` raises `ThreadError` while an eval is in flight — dispose after the eval returns.
+Disposing a VM that is mid-evaluation on another thread would free the runtime out from under the running JS, so `dispose!` raises `ThreadError` while JS is executing on the VM (`eval_code`, `call`, `import`, `drain_jobs!`, `Runnable#run`) — dispose after the call returns.
 
 #### `Quickjs::VM#drain_jobs!`: Run pending JS jobs to completion
 

@@ -28,7 +28,7 @@ TRIALS = 5
 
 def run(thread_count, iterations_per_thread)
   threads = Array.new(thread_count) {
-    Thread.new {
+    Thread.new do
       vm = Quickjs::VM.new
 
       begin
@@ -36,7 +36,7 @@ def run(thread_count, iterations_per_thread)
       ensure
         vm.dispose!
       end
-    }
+    end
   }
   threads.each(&:join)
 end
@@ -62,12 +62,12 @@ Benchmark.bm(label_width) do |x|
   THREAD_COUNTS.each do |n|
     label = "#{n} threads"
     trial_per_iter_ms = []
-    x.report(label) {
-      TRIALS.times {
+    x.report(label) do
+      TRIALS.times do
         elapsed = Benchmark.realtime { run(n, ITERATIONS_PER_THREAD) }
         trial_per_iter_ms << elapsed / (n * ITERATIONS_PER_THREAD) * 1000
-      }
-    }
+      end
+    end
     per_iter_ms_by_n[n] = median(trial_per_iter_ms)
   end
 end

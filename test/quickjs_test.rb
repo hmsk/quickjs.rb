@@ -452,6 +452,28 @@ describe Quickjs::VM do
       vm.dispose!
       _(vm.disposed?).must_equal true
     end
+
+    # The bridged (GVL-held) eval path must be guarded too: setTimeout's
+    # js_delay_and_eval_job yields the GVL via rb_thread_wait_for, so a
+    # concurrent dispose! can genuinely interleave with the eval even though
+    # the eval never released the GVL itself.
+    it "raises ThreadError while a bridged (GVL-held) eval is in flight" do
+      in_eval = Queue.new
+      vm = nil
+      evaluator = Thread.new do
+        vm = Quickjs::VM.new(timeout_msec: 5_000, features: [::Quickjs::FEATURE_TIMEOUT])
+        vm.on_log { |_log| in_eval << true }
+        vm.eval_code('console.log("in eval"); await new Promise(resolve => setTimeout(resolve, 1000)); "finished"')
+      end
+
+      in_eval.pop
+      err = _ { vm.dispose! }.must_raise ThreadError
+      _(err.message).must_match(/while it is evaluating/)
+
+      _(evaluator.value).must_equal 'finished'
+      vm.dispose!
+      _(vm.disposed?).must_equal true
+    end
   end
 
   it "accepts some options to constrain its resource" do
@@ -1641,6 +1663,25 @@ describe Quickjs::VM do
       _(@vm.eval_code('console.log("first"); console.log("second"); "done"')).must_equal 'done'
       _(received).must_equal ['first', 'second']
     end
+
+    # The listener runs with the GVL re-acquired, so JS re-entered from it
+    # through a GVL-held path (here: a bridged eval, since the listener just
+    # registered a function) must see the release flag cleared — otherwise
+    # its console.log would re-acquire an already-held GVL, which MRI
+    # aborts on.
+    it "routes console.log inline when the listener re-enters a GVL-held path" do
+      received = []
+      @vm.on_log do |log|
+        received << log.to_s
+        if received.size == 1
+          @vm.define_function('noop') { nil }
+          @vm.eval_code('console.log("nested")')
+        end
+      end
+
+      _(@vm.eval_code('console.log("outer"); "done"')).must_equal 'done'
+      _(received).must_equal ['outer', 'nested']
+    end
   end
 
   describe "StackTraces" do
@@ -1889,7 +1930,7 @@ describe "Quickjs::Blocking" do
     it "delivers console.log to on_log during a GVL-released eval" do
       vm       = Quickjs::VM.new
       received = []
-      vm.on_log {|log| received << log }
+      vm.on_log { |log| received << log }
 
       begin
         vm.eval_code('console.log("hello"); console.log(42, "world"); 1 + 1')

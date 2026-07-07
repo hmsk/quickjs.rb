@@ -81,12 +81,15 @@ typedef struct VMData
   // Saved/restored (not blindly cleared) so an eval nested through an
   // on_log listener doesn't clear the outer eval's flag.
   bool gvl_released_eval;
-  // Number of evals currently running on this VM with the GVL released.
-  // vm_m_dispose refuses (ThreadError) while nonzero — freeing the runtime
-  // under a live JS_Eval would be a use-after-free, and the release makes
-  // that overlap reachable (e.g. the README's `Thread.new { vm.dispose! }`
-  // pattern, or an on_log listener calling dispose! mid-eval). Only mutated
-  // while holding the GVL, so plain int accesses are race-free.
+  // Number of JS executions currently in flight on this VM — eval_code
+  // (both the GVL-released and GVL-held paths), call, bytecode runs,
+  // import, and job drains. vm_m_dispose refuses (ThreadError) while
+  // nonzero: freeing the runtime under live JS is a use-after-free, and
+  // both the GVL release and GVL-yielding bridge callbacks (setTimeout's
+  // rb_thread_wait_for, define_function procs, on_log listeners) make
+  // that overlap reachable — e.g. the README's `Thread.new { vm.dispose! }`
+  // pattern, or a listener calling dispose! mid-eval. Only mutated while
+  // holding the GVL, so plain int accesses are race-free.
   int evals_in_flight;
   // Latched by quickjsrb_new_ruby_bridge whenever a C function that calls
   // into Ruby synchronously (rb_funcall & friends) WITHOUT honoring
