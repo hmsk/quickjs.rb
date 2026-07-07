@@ -1062,12 +1062,18 @@ static JSValue js_console_error(JSContext *ctx, JSValueConst this, int argc, JSV
 // warmer thread can populate a VM pool in parallel with the main thread
 // on multi-core hosts.
 //
-// Releasing the GVL here is only safe because the bundled polyfills are
-// pure JS (file / encoding / url) and no Ruby-bridged callbacks have
-// been registered on globalThis yet at this point in vm_m_initialize.
-// If the order ever changes — e.g. moving define_function setup ahead of
-// the polyfill loads — the polyfill bytecode could re-enter Ruby without
-// the GVL held. Keep host callback registration after polyfill loading.
+// Two bridges can already be live when these loads run in
+// vm_m_initialize — setTimeout (FEATURE_TIMEOUT) and the File proxy
+// (POLYFILL_FILE registers it ahead of the encoding/url loads) — so
+// releasing the GVL is safe not because nothing is registered, but
+// because a load never runs bridge code: js_quickjsrb_set_timeout only
+// enqueues (pure C; the Ruby-calling js_delay_and_eval_job runs later,
+// under a GVL-held drain/await), a load never drains the job queue, and
+// the bundled polyfill top-levels (file / encoding / url, built from
+// polyfills/src in this repo) don't call the File proxy. That audit is
+// the invariant to preserve when rebuilding bundles or reordering
+// vm_m_initialize. Arbitrary user bytecode must not come through here —
+// vm_m_loadPolyfillBytecode keeps the GVL for that.
 struct polyfill_load_args
 {
   JSContext *ctx;
@@ -1180,10 +1186,11 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     quickjsrb_init_crypto(data->context, j_global);
   }
 
-  // Host callbacks (console, setTimeout, Ruby-bridged functions) are
-  // registered below this point — after all polyfill loading above.
-  // load_polyfill_bytecode releases the GVL; any code moved above this
-  // line that touches Ruby APIs must re-acquire it first.
+  // console and the remaining host callbacks are registered below this
+  // point. setTimeout and the File proxy above predate the GVL-released
+  // polyfill loads only under the audit described at
+  // load_polyfill_bytecode — re-read it before reordering this function
+  // or registering anything else above the loads.
   JSValue j_console = JS_NewObject(data->context);
   JS_SetPropertyStr(
       data->context, j_console, "log",
@@ -1428,17 +1435,31 @@ static void check_no_gvl_release_in_flight(VMData *data)
     rb_raise(rb_eThreadError, "cannot install a JS-to-Ruby bridge on a Quickjs::VM while it is evaluating with the GVL released");
 }
 
-// rb_ensure cleanup shared by every GVL-held entry point that keeps
-// evals_in_flight elevated (bridged eval_code, eval_bytecode, drain_jobs!,
-// vm_m_callGlobalFunction, vm_m_import): guarantees the decrement on every
-// raise exit — JS exceptions, type errors, conversion failures, and async
-// interrupts (Thread#raise / Timeout) delivered inside a bridge callback
-// such as setTimeout's rb_thread_wait_for. A stranded counter would make
-// dispose! refuse forever.
 static VALUE evals_in_flight_release(VALUE p)
 {
   ((VMData *)p)->evals_in_flight--;
   return Qnil;
+}
+
+// Counterpart of run_gvl_release_region for the GVL-held entry points:
+// bridge callbacks (define_function procs, setTimeout's rb_thread_wait_for,
+// on_log listeners) yield the GVL mid-execution, so every JS execution must
+// elevate evals_in_flight for dispose! to refuse — and the decrement must
+// survive every raise exit: JS exceptions, type errors, conversion
+// failures, and async interrupts (Thread#raise / Timeout) delivered inside
+// a bridge callback. A stranded counter would make dispose! refuse forever,
+// so the check + increment + rb_ensure discipline lives here structurally
+// rather than being repeated at each call site. Entry points may have run
+// argument parsing that yields the GVL since their own entry check, hence
+// the disposed re-check immediately before counting. (The interrupt longjmp
+// still rips through QuickJS frames — a pre-existing hazard; whether the
+// bridge should rb_protect and convert instead is a semantics decision
+// deferred in the #56 review.)
+static VALUE run_held_js_entry(VMData *data, VALUE (*body)(VALUE), VALUE arg)
+{
+  check_disposed(data);
+  data->evals_in_flight++;
+  return rb_ensure(body, arg, evals_in_flight_release, (VALUE)data);
 }
 
 static VALUE eval_code_job_run_body(VALUE p)
@@ -1536,16 +1557,7 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
       .async_mode = async_mode,
       .result = JS_UNDEFINED,
   };
-  // Bridge callbacks (define_function procs, setTimeout's
-  // rb_thread_wait_for, on_log listeners) can yield the GVL mid-eval, so
-  // dispose! must refuse here too — count this eval in flight. Argument
-  // parsing above may have yielded since the entry check, so re-check
-  // disposed first. rb_ensure, not a bare pair: an async interrupt raised
-  // inside setTimeout's rb_thread_wait_for longjmps out of the job and
-  // would strand the counter.
-  check_disposed(data);
-  data->evals_in_flight++;
-  rb_ensure(eval_code_job_run_body, (VALUE)&job, evals_in_flight_release, (VALUE)data);
+  run_held_js_entry(data, eval_code_job_run_body, (VALUE)&job);
   return to_rb_return_value(data->context, job.result);
 }
 
@@ -1591,6 +1603,7 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
+  check_oom_poisoned(data);
 
   if (!RB_TYPE_P(r_bytecode, T_STRING))
   {
@@ -1616,12 +1629,8 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
     return to_rb_value(data->context, j_func); // raises
   }
 
-  // rb_ensure, not a bare pair: user bytecode with FEATURE_TIMEOUT reaches
-  // setTimeout's rb_thread_wait_for, where an async interrupt longjmps out
-  // and would strand the counter.
   struct eval_function_job job = {data->context, j_func, JS_UNDEFINED};
-  data->evals_in_flight++;
-  rb_ensure(eval_function_job_run_body, (VALUE)&job, evals_in_flight_release, (VALUE)data);
+  run_held_js_entry(data, eval_function_job_run_body, (VALUE)&job);
   JSValue j_returnedValue = JS_GetPropertyStr(data->context, job.j_awaited, "value");
   JS_FreeValue(data->context, job.j_awaited);
   return to_rb_return_value(data->context, j_returnedValue);
@@ -1642,6 +1651,7 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
+  check_oom_poisoned(data);
   StringValue(r_bytecode);
 
   JSValue j_func = JS_ReadObject(data->context,
@@ -1941,8 +1951,7 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   // conversion), and a concurrent dispose! landing in such a gap would
   // free the runtime out from under them.
   struct js_entry_call call = {argc, argv, data};
-  data->evals_in_flight++;
-  return rb_ensure(call_global_function_body, (VALUE)&call, evals_in_flight_release, (VALUE)data);
+  return run_held_js_entry(data, call_global_function_body, (VALUE)&call);
 }
 
 static VALUE vm_m_set_module_loader(VALUE r_self, VALUE r_loader)
@@ -2086,6 +2095,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
+  check_oom_poisoned(data);
 
   // Like vm_m_callGlobalFunction: the body registers a module in the
   // context and then runs Ruby code (_build_import, StringValueCStr on
@@ -2093,8 +2103,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   // evals_in_flight elevated for the whole call so a concurrent dispose!
   // can't free the runtime in those gaps.
   struct js_entry_call call = {argc, argv, data};
-  data->evals_in_flight++;
-  return rb_ensure(import_body, (VALUE)&call, evals_in_flight_release, (VALUE)data);
+  return run_held_js_entry(data, import_body, (VALUE)&call);
 }
 
 RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
@@ -2183,6 +2192,7 @@ static VALUE vm_m_drainJobs(VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
+  check_disposed(data);
   check_oom_poisoned(data);
 
   if (!JS_IsJobPending(JS_GetRuntime(data->context)))
@@ -2190,11 +2200,7 @@ static VALUE vm_m_drainJobs(VALUE r_self)
 
   arm_eval_timer(data);
 
-  // rb_ensure, not a bare pair: a pending job can be setTimeout's
-  // js_delay_and_eval_job, whose rb_thread_wait_for lets an async
-  // interrupt longjmp out and would strand the counter.
-  data->evals_in_flight++;
-  return rb_ensure(drain_jobs_body, (VALUE)data, evals_in_flight_release, (VALUE)data);
+  return run_held_js_entry(data, drain_jobs_body, (VALUE)data);
 }
 
 static VALUE vm_m_memoryPoisoned(VALUE r_self)

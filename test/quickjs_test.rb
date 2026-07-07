@@ -405,6 +405,7 @@ describe Quickjs::VM do
       call:            ->(vm) { vm.call('foo') },
       define_function: ->(vm) { vm.define_function('foo') { 1 } },
       import:          ->(vm) { vm.import('x', from: 'export default 1') },
+      drain_jobs!:     ->(vm) { vm.drain_jobs! },
       memory_usage:    ->(vm) { vm.memory_usage },
       gc!:             ->(vm) { vm.gc! }
     }.each do |method, invoke|
@@ -485,7 +486,7 @@ describe Quickjs::VM do
       vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
 
       _ {
-        Timeout.timeout(0.3) { vm.eval_code('await new Promise(resolve => setTimeout(resolve, 60000));') }
+        Timeout.timeout(0.1) { vm.eval_code('await new Promise(resolve => setTimeout(resolve, 60000));') }
       }.must_raise Timeout::Error
 
       vm.dispose!
@@ -497,7 +498,7 @@ describe Quickjs::VM do
       runnable = vm.compile('await new Promise(resolve => setTimeout(resolve, 60000));')
 
       _ {
-        Timeout.timeout(0.3) { runnable.run(on: vm) }
+        Timeout.timeout(0.1) { runnable.run(on: vm) }
       }.must_raise Timeout::Error
 
       vm.dispose!
@@ -509,7 +510,7 @@ describe Quickjs::VM do
       vm.eval_code('setTimeout(() => {}, 60000); void 0')
 
       _ {
-        Timeout.timeout(0.3) { vm.drain_jobs! }
+        Timeout.timeout(0.1) { vm.drain_jobs! }
       }.must_raise Timeout::Error
 
       vm.dispose!
@@ -1486,6 +1487,15 @@ describe Quickjs::VM do
       runnable = @vm.compile('while (true) {}')
       vm = Quickjs::VM.new(timeout_msec: 50)
       _ { runnable.run(on: vm) }.must_raise Quickjs::InterruptedError
+    end
+
+    it "run(on: vm) raises Quickjs::RuntimeError after the VM is OOM-poisoned" do
+      runnable = @vm.compile('1 + 1')
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      _ { vm.eval_code('new Array(2_000_000).fill(0); void 0') }.must_raise Quickjs::RuntimeError
+
+      err = _ { runnable.run(on: vm) }.must_raise Quickjs::RuntimeError
+      _(err.message).must_match(/poisoned/)
     end
 
     it "run with no on: disposes the temporary VM after execution" do
