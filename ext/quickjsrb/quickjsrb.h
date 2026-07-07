@@ -78,14 +78,42 @@ typedef struct VMData
   // Set while eval is running with the GVL released so JS→Ruby bridges
   // (currently js_quickjsrb_log) can re-acquire the GVL before touching
   // Ruby APIs. Reset before to_rb_return_value runs under the GVL.
+  // Saved/restored (not blindly cleared) so an eval nested through an
+  // on_log listener doesn't clear the outer eval's flag.
   bool gvl_released_eval;
-  // Set when POLYFILL_FILE or POLYFILL_CRYPTO is enabled — those install
-  // C functions that call rb_funcall synchronously (e.g. crypto.subtle.*,
-  // File proxy). Until those bridges learn to re-acquire the GVL through
-  // gvl_released_eval, vm_m_evalCode must keep the GVL held when this flag
-  // is true.
+  // Number of evals currently running on this VM with the GVL released.
+  // vm_m_dispose refuses (ThreadError) while nonzero — freeing the runtime
+  // under a live JS_Eval would be a use-after-free, and the release makes
+  // that overlap reachable (e.g. the README's `Thread.new { vm.dispose! }`
+  // pattern, or an on_log listener calling dispose! mid-eval). Only mutated
+  // while holding the GVL, so plain int accesses are race-free.
+  int evals_in_flight;
+  // Latched by quickjsrb_new_ruby_bridge whenever a C function that calls
+  // into Ruby synchronously (rb_funcall & friends) WITHOUT honoring
+  // gvl_released_eval is installed into this context. While true,
+  // can_eval_gvl_free fails and eval keeps the GVL held. Register every
+  // such function through that helper — a bridge registered with plain
+  // JS_NewCFunction would run against Ruby under a released GVL and
+  // silently corrupt the interpreter.
   bool has_native_ruby_bridge;
 } VMData;
+
+// Drop-in replacement for JS_NewCFunction for C functions that call into
+// Ruby synchronously without honoring gvl_released_eval (crypto.*, File
+// proxy helpers, setTimeout's job). Latching has_native_ruby_bridge here
+// makes the "keep the GVL held" contract structural instead of relying on
+// each feature-init site to remember a flag assignment. Requires
+// JS_SetContextOpaque(ctx, data) to have run (vm_m_initialize does this
+// before any feature setup). console.log intentionally does NOT go through
+// this: js_quickjsrb_log re-acquires the GVL itself, and Proc-backed
+// bridges (define_function / module_loader / on_unhandled_rejection) are
+// excluded structurally by can_eval_gvl_free's own checks.
+static inline JSValue quickjsrb_new_ruby_bridge(JSContext *ctx, JSCFunction *func, const char *name, int length)
+{
+  VMData *data = JS_GetContextOpaque(ctx);
+  data->has_native_ruby_bridge = true;
+  return JS_NewCFunction(ctx, func, name, length);
+}
 
 static void vm_teardown_context(JSContext *ctx)
 {
@@ -179,6 +207,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->oom_poisoned = false;
   data->disposed = false;
   data->gvl_released_eval = false;
+  data->evals_in_flight = 0;
   data->has_native_ruby_bridge = false;
 
   EvalTime *eval_time = malloc(sizeof(EvalTime));

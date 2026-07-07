@@ -427,6 +427,31 @@ describe Quickjs::VM do
       GC.start
       pass
     end
+
+    # eval_code releases the GVL on the pure path, so a dispose! from another
+    # thread can genuinely overlap a running JS_Eval — freeing the runtime
+    # under it would be a use-after-free. The in-flight guard turns that into
+    # a loud contract violation instead.
+    it "raises ThreadError while another thread is evaluating" do
+      in_eval = Queue.new
+      vm = nil
+      evaluator = Thread.new do
+        # Created inside the thread: QuickJS records the creator's stack
+        # bounds, and evaluating from a thread whose stack sits below them
+        # trips a false stack-overflow error.
+        vm = Quickjs::VM.new(timeout_msec: 5_000, features: [::Quickjs::MODULE_OS])
+        vm.on_log { |_log| in_eval << true }
+        vm.eval_code('console.log("in eval"); os.sleep(1000); "finished"')
+      end
+
+      in_eval.pop # the eval is now provably in flight (and stays so for ~1s)
+      err = _ { vm.dispose! }.must_raise ThreadError
+      _(err.message).must_match(/while it is evaluating/)
+
+      _(evaluator.value).must_equal 'finished'
+      vm.dispose!
+      _(vm.disposed?).must_equal true
+    end
   end
 
   it "accepts some options to constrain its resource" do
@@ -1575,6 +1600,46 @@ describe Quickjs::VM do
       _ {
         @vm.eval_code('a + b;')
       }.must_raise Quickjs::ReferenceError
+    end
+
+    # A Promise nested inside a container falls through console.log's
+    # top-level Promise special case into to_rb_value, which raises. On the
+    # pure path that raise fires inside the GVL re-acquired log dispatcher —
+    # it must surface as a JS throw, not longjmp across the
+    # rb_thread_call_without_gvl region.
+    it "surfaces a row-building failure as a catchable JS error" do
+      @vm.on_log { |_log| }
+
+      result = @vm.eval_code('try { console.log([Promise.resolve(1)]); "not thrown"; } catch(e) { "caught: " + e.message; }')
+      _(result).must_match(/\Acaught: /)
+    end
+
+    it "keeps the VM usable after a row-building failure during a GVL-released eval" do
+      received = []
+      @vm.on_log { |log| received << log }
+
+      err = _ { @vm.eval_code('console.log([Promise.resolve(1)])') }.must_raise Quickjs::RuntimeError
+      _(err.message).must_match(/cannot translate a Promise/)
+
+      # gvl_released_eval must not be left stuck by the failure: register a
+      # bridge so the next eval keeps the GVL — a leaked flag would make
+      # console.log re-acquire the GVL while already holding it, aborting MRI.
+      @vm.define_function('noop') { nil }
+      _(@vm.eval_code('console.log("after"); "still alive"')).must_equal 'still alive'
+      _(received.last.to_s).must_equal 'after'
+    end
+
+    it "keeps the release flag balanced when the listener re-enters eval_code" do
+      received = []
+      @vm.on_log do |log|
+        received << log.to_s
+        @vm.eval_code('1 + 1')
+      end
+
+      # The nested eval must restore (not clear) the outer eval's released
+      # flag; otherwise the second console.log touches Ruby without the GVL.
+      _(@vm.eval_code('console.log("first"); console.log("second"); "done"')).must_equal 'done'
+      _(received).must_equal ['first', 'second']
     end
   end
 
