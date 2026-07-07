@@ -1729,18 +1729,30 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   }
 }
 
-static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
+// rb_ensure cleanup shared by the entry points that keep evals_in_flight
+// elevated across a whole call (vm_m_callGlobalFunction, vm_m_import):
+// guarantees the decrement on every raise exit (JS exceptions, type
+// errors, conversion failures).
+static VALUE evals_in_flight_release(VALUE p)
 {
-  if (argc < 1)
-    rb_raise(rb_eArgError, "wrong number of arguments (given 0, expected 1+)");
+  ((VMData *)p)->evals_in_flight--;
+  return Qnil;
+}
 
-  VALUE r_name = argv[0];
-
+struct js_entry_call
+{
+  int argc;
+  VALUE *argv;
   VMData *data;
-  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+};
 
-  check_disposed(data);
-  check_oom_poisoned(data);
+static VALUE call_global_function_body(VALUE p)
+{
+  struct js_entry_call *call = (struct js_entry_call *)p;
+  int argc = call->argc;
+  VALUE *argv = call->argv;
+  VMData *data = call->data;
+  VALUE r_name = argv[0];
 
   JSValue j_this = JS_UNDEFINED;
   JSValue j_func;
@@ -1800,9 +1812,7 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
     const char *first_seg = StringValueCStr(r_first_str);
 
     // JS_Eval accesses both global object properties and lexical (const/let) bindings
-    data->evals_in_flight++;
     JSValue j_cur = JS_Eval(data->context, first_seg, strlen(first_seg), vmInternalFilename, JS_EVAL_TYPE_GLOBAL);
-    data->evals_in_flight--;
     if (JS_IsException(j_cur))
       return to_rb_value(data->context, j_cur); // raises
 
@@ -1855,7 +1865,6 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
   JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
 
-  data->evals_in_flight++;
   JSValue j_result = JS_Call(data->context, j_func, j_this, nargs, (JSValueConst *)j_args);
 
   JS_FreeValue(data->context, j_func);
@@ -1868,9 +1877,28 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   }
 
   // js_std_await handles both async (promise) and sync results; frees j_result
-  JSValue j_awaited = js_std_await(data->context, j_result);
-  data->evals_in_flight--;
-  return to_rb_return_value(data->context, j_awaited);
+  return to_rb_return_value(data->context, js_std_await(data->context, j_result));
+}
+
+static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
+{
+  if (argc < 1)
+    rb_raise(rb_eArgError, "wrong number of arguments (given 0, expected 1+)");
+
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_disposed(data);
+  check_oom_poisoned(data);
+
+  // evals_in_flight stays elevated for the whole call, not just the
+  // JS_Eval / JS_Call moments: the body holds live JSValues across Ruby
+  // calls that can yield the GVL (path-segment to_s, argument
+  // conversion), and a concurrent dispose! landing in such a gap would
+  // free the runtime out from under them.
+  struct js_entry_call call = {argc, argv, data};
+  data->evals_in_flight++;
+  return rb_ensure(call_global_function_body, (VALUE)&call, evals_in_flight_release, (VALUE)data);
 }
 
 static VALUE vm_m_set_module_loader(VALUE r_self, VALUE r_loader)
@@ -1908,8 +1936,13 @@ static VALUE vm_m_on_unhandled_rejection(VALUE r_self)
   return Qnil;
 }
 
-static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
+static VALUE import_body(VALUE p)
 {
+  struct js_entry_call *call = (struct js_entry_call *)p;
+  int argc = call->argc;
+  VALUE *argv = call->argv;
+  VMData *data = call->data;
+
   VALUE r_import_string, r_opts;
   rb_scan_args(argc, argv, "10:", &r_import_string, &r_opts);
   if (NIL_P(r_opts))
@@ -1926,11 +1959,6 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
     rb_raise(rb_eArgError, "pass either from: (inline source) or filename: (loader-resolved), not both");
   VALUE r_custom_exposure = rb_hash_aref(r_opts, ID2SYM(rb_intern("code_to_expose")));
 
-  VMData *data;
-  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
-
-  check_disposed(data);
-
   char *filename;
   VALUE r_seeded_key = Qnil;
   if (!NIL_P(r_filename))
@@ -1941,9 +1969,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   {
     filename = random_string();
     char *source = StringValueCStr(r_from);
-    data->evals_in_flight++;
     JSValue module = JS_Eval(data->context, source, strlen(source), filename, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-    data->evals_in_flight--;
     if (JS_IsException(module))
     {
       JS_FreeValue(data->context, module);
@@ -1989,9 +2015,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   char *result = (char *)malloc(length + 1);
   snprintf(result, length + 1, importAndGlobalizeModule, import_name, filename, globalize);
 
-  data->evals_in_flight++;
   JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), vmInternalFilename, JS_EVAL_TYPE_MODULE);
-  data->evals_in_flight--;
   free(result);
   if (JS_IsException(j_codeResult))
     return to_rb_value(data->context, j_codeResult);
@@ -1999,9 +2023,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   // Module eval returns a Promise. Awaiting it surfaces top-level throws,
   // rejected dynamic imports, and rejected top-level awaits as Ruby
   // exceptions instead of silently dropping them.
-  data->evals_in_flight++;
   JSValue j_awaited = js_std_await(data->context, j_codeResult);
-  data->evals_in_flight--;
   if (JS_IsException(j_awaited))
     return to_rb_value(data->context, j_awaited);
   JS_FreeValue(data->context, j_awaited);
@@ -2010,6 +2032,23 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
     rb_hash_delete(data->module_resolution_cache, r_seeded_key);
 
   return Qtrue;
+}
+
+static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_disposed(data);
+
+  // Like vm_m_callGlobalFunction: the body registers a module in the
+  // context and then runs Ruby code (_build_import, StringValueCStr on
+  // user values) that can yield the GVL before the bridge eval — keep
+  // evals_in_flight elevated for the whole call so a concurrent dispose!
+  // can't free the runtime in those gaps.
+  struct js_entry_call call = {argc, argv, data};
+  data->evals_in_flight++;
+  return rb_ensure(import_body, (VALUE)&call, evals_in_flight_release, (VALUE)data);
 }
 
 RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
