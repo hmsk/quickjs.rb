@@ -1369,6 +1369,7 @@ static VALUE gvl_release_region_cleanup(VALUE p)
   VMData *data = region->data;
   data->gvl_released_eval = region->prev_gvl_released;
   data->evals_in_flight--;
+  data->gvl_release_regions--;
   free(region->owned_bufs[0]);
   free(region->owned_bufs[1]);
   // Frees the result when the interrupt landed after the job ran but
@@ -1408,8 +1409,23 @@ static void run_gvl_release_region(VMData *data, void *(*job_run)(void *), void 
   };
 
   data->evals_in_flight++;
+  data->gvl_release_regions++;
   data->gvl_released_eval = true;
   rb_ensure(gvl_release_region_run, (VALUE)&region, gvl_release_region_cleanup, (VALUE)&region);
+}
+
+// Installing a JS→Ruby bridge (define_function, module_loader=,
+// on_unhandled_rejection) invalidates the can_eval_gvl_free decision an
+// in-flight GVL-released eval was started under: after e.g. an on_log
+// listener returns, the still-running JS could reach the new bridge and
+// call Ruby APIs without holding the GVL. Refuse loudly — register
+// bridges before evaluating. Registration during GVL-held evals stays
+// allowed, as it always was: gvl_release_regions only counts released
+// regions.
+static void check_no_gvl_release_in_flight(VMData *data)
+{
+  if (data->gvl_release_regions > 0)
+    rb_raise(rb_eThreadError, "cannot install a JS-to-Ruby bridge on a Quickjs::VM while it is evaluating with the GVL released");
 }
 
 // Run the eval core without the GVL. Inputs are copied to malloc'd buffers
@@ -1618,6 +1634,7 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
+  check_no_gvl_release_in_flight(data);
 
   if (RB_TYPE_P(r_name, T_ARRAY))
   {
@@ -1909,6 +1926,7 @@ static VALUE vm_m_set_module_loader(VALUE r_self, VALUE r_loader)
   if (!NIL_P(r_loader) && !rb_obj_is_kind_of(r_loader, rb_cProc))
     rb_raise(rb_eTypeError, "module_loader must be a Proc or nil");
 
+  check_no_gvl_release_in_flight(data);
   data->module_loader = r_loader;
   // Stale entries from the previous loader's policy would survive the
   // swap and silently shadow the new behavior.
@@ -1932,6 +1950,7 @@ static VALUE vm_m_on_unhandled_rejection(VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
+  check_no_gvl_release_in_flight(data);
   data->on_unhandled_rejection = rb_block_proc();
   return Qnil;
 }

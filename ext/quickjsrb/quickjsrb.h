@@ -91,6 +91,15 @@ typedef struct VMData
   // pattern, or a listener calling dispose! mid-eval. Only mutated while
   // holding the GVL, so plain int accesses are race-free.
   int evals_in_flight;
+  // Number of GVL-release regions currently open on this VM (a subset of
+  // evals_in_flight). Bridge-registration APIs (define_function,
+  // module_loader=, on_unhandled_rejection) refuse (ThreadError) while
+  // nonzero: the running JS was allowed to release the GVL because
+  // can_eval_gvl_free held at eval start, and installing a bridge
+  // mid-flight — e.g. from an on_log listener, whose callback runs with
+  // the GVL re-acquired — would hand the still-released JS a path into
+  // Ruby APIs without the GVL. Only mutated while holding the GVL.
+  int gvl_release_regions;
   // Latched by quickjsrb_new_ruby_bridge whenever a C function that calls
   // into Ruby synchronously (rb_funcall & friends) WITHOUT honoring
   // gvl_released_eval is installed into this context. While true,
@@ -211,6 +220,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->disposed = false;
   data->gvl_released_eval = false;
   data->evals_in_flight = 0;
+  data->gvl_release_regions = 0;
   data->has_native_ruby_bridge = false;
 
   EvalTime *eval_time = malloc(sizeof(EvalTime));

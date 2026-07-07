@@ -1665,22 +1665,38 @@ describe Quickjs::VM do
     end
 
     # The listener runs with the GVL re-acquired, so JS re-entered from it
-    # through a GVL-held path (here: a bridged eval, since the listener just
-    # registered a function) must see the release flag cleared — otherwise
-    # its console.log would re-acquire an already-held GVL, which MRI
-    # aborts on.
+    # through a GVL-held path (here: VM#call, which always holds the GVL)
+    # must see the release flag cleared — otherwise its console.log would
+    # re-acquire an already-held GVL, which MRI aborts on.
     it "routes console.log inline when the listener re-enters a GVL-held path" do
       received = []
+      @vm.eval_code('globalThis.nested = () => { console.log("nested"); return 1; }')
       @vm.on_log do |log|
         received << log.to_s
-        if received.size == 1
-          @vm.define_function('noop') { nil }
-          @vm.eval_code('console.log("nested")')
-        end
+        @vm.call('nested') if received.size == 1
       end
 
       _(@vm.eval_code('console.log("outer"); "done"')).must_equal 'done'
       _(received).must_equal ['outer', 'nested']
+    end
+
+    # Registering a bridge mid-eval would invalidate the can_eval_gvl_free
+    # decision the running (GVL-released) eval was started under — the JS
+    # continuing after the listener could reach the new bridge and call
+    # Ruby without holding the GVL. The registration APIs refuse instead.
+    it "refuses to install a bridge from a listener during a GVL-released eval" do
+      errors = []
+      @vm.on_log do |_log|
+        begin
+          @vm.define_function('sneaky') { 1 }
+        rescue ThreadError => e
+          errors << e
+        end
+      end
+
+      _(@vm.eval_code('console.log("x"); "done"')).must_equal 'done'
+      _(errors.size).must_equal 1
+      _(errors.first.message).must_match(/bridge/)
     end
   end
 

@@ -384,6 +384,7 @@ The rules for sharing VMs across threads:
 
 - **One VM, one thread at a time.** A `Quickjs::VM` is not safe for concurrent use from multiple threads — QuickJS contexts have no internal locking. Handing a VM off between threads (e.g. constructing it on a warmer thread and using it on another) is fine as long as only one thread touches it at a time.
 - **Create the VM on the thread that evaluates with it** when possible: QuickJS records the creating thread's stack bounds, and evaluating from a thread whose stack sits below them can trip a false stack-overflow error.
+- **Register bridges before evaluating.** `define_function`, `module_loader=`, and `on_unhandled_rejection` raise `ThreadError` while a GVL-released eval is in flight (e.g. from inside an `on_log` listener) — the running JS was allowed to release the GVL precisely because no bridge existed when it started.
 - **`MODULE_OS` caveat:** `os.signal` and `os.ttySetRaw` mutate process-wide state inside quickjs-libc, so don't call those two from VMs running concurrently on different threads. The common APIs (`os.sleep`, `os.setTimeout`, file I/O) only touch per-runtime state and are safe.
 
 ### Value Conversion
