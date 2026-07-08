@@ -871,7 +871,10 @@ static JSValue js_quickjsrb_set_timeout(JSContext *ctx, JSValueConst _this, int 
   return JS_UNDEFINED;
 }
 
-static VALUE r_try_call_listener(VALUE r_args)
+// The single way the on_log listener is invoked. Called under rb_protect by
+// dispatch_log (uncaught-error headline rows) and unprotected — the caller's
+// outer rb_protect covers it — by r_build_and_dispatch_log (console rows).
+static VALUE r_call_log_listener(VALUE r_args)
 {
   VALUE r_listener = RARRAY_AREF(r_args, 0);
   VALUE r_log = RARRAY_AREF(r_args, 1);
@@ -886,7 +889,7 @@ static int dispatch_log(VMData *data, const char *severity, VALUE r_row)
   VALUE r_log = r_log_new(severity, r_row);
   VALUE r_args = rb_ary_new3(2, data->log_listener, r_log);
   int error;
-  rb_protect(r_try_call_listener, r_args, &error);
+  rb_protect(r_call_log_listener, r_args, &error);
   return error;
 }
 
@@ -902,13 +905,30 @@ static VALUE vm_m_on_log(VALUE r_self)
   return Qnil;
 }
 
-static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, const char *severity)
+struct quickjsrb_log_call
 {
+  JSContext *ctx;
+  int argc;
+  JSValueConst *argv;
+  const char *severity;
+  JSValue result;
+};
+
+// Runs under rb_protect (see js_quickjsrb_log_inner) so no Ruby raise —
+// to_rb_value on an unconvertible argument (e.g. a Promise nested inside an
+// array), allocation failure, or the user's on_log listener — can longjmp
+// through QuickJS's interpreter frames, or, on the pure path (where this
+// runs inside rb_thread_call_with_gvl), across the rb_thread_call_without_gvl
+// region — which would leak its buffers and leave gvl_released_eval stuck.
+static VALUE r_build_and_dispatch_log(VALUE r_call)
+{
+  struct quickjsrb_log_call *call = (struct quickjsrb_log_call *)r_call;
+  JSContext *ctx = call->ctx;
   VMData *data = JS_GetContextOpaque(ctx);
   VALUE r_row = rb_ary_new();
-  for (int i = 0; i < argc; i++)
+  for (int i = 0; i < call->argc; i++)
   {
-    JSValue j_logged = JS_DupValue(ctx, argv[i]);
+    JSValueConst j_logged = call->argv[i];
     VALUE r_raw;
     if (JS_VALUE_GET_NORM_TAG(j_logged) == JS_TAG_OBJECT && JS_PromiseState(ctx, j_logged) != -1)
     {
@@ -946,12 +966,22 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JS
     const char *body = JS_ToCString(ctx, j_logged);
     VALUE r_c = rb_str_new2(body);
     JS_FreeCString(ctx, body);
-    JS_FreeValue(ctx, j_logged);
 
     rb_ary_push(r_row, r_log_body_new(r_raw, r_c));
   }
 
-  int error = dispatch_log(data, severity, r_row);
+  r_call_log_listener(rb_ary_new3(2, data->log_listener, r_log_new(call->severity, r_row)));
+  return Qnil;
+}
+
+// Requires the GVL. A caught Ruby exception (from row building or the
+// listener) becomes a JS throw, so it unwinds through QuickJS as a regular
+// JS exception instead of a cross-boundary longjmp.
+static JSValue js_quickjsrb_log_inner(JSContext *ctx, int argc, JSValueConst *argv, const char *severity)
+{
+  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED};
+  int error;
+  rb_protect(r_build_and_dispatch_log, (VALUE)&call, &error);
   if (error)
   {
     VALUE r_error = rb_errinfo();
@@ -962,36 +992,88 @@ static JSValue js_quickjsrb_log(JSContext *ctx, JSValueConst _this, int argc, JS
   return JS_UNDEFINED;
 }
 
+static void *quickjsrb_log_with_gvl(void *p)
+{
+  struct quickjsrb_log_call *c = p;
+  VMData *data = JS_GetContextOpaque(c->ctx);
+  // The GVL is held for the duration of this callback. Clear the flag so
+  // JS re-entered from the on_log listener (a bridged eval_code, call,
+  // eval_bytecode, ...) routes its console.log inline — with the flag
+  // still true it would call rb_thread_call_with_gvl while already holding
+  // the GVL, which MRI aborts on. A plain save/restore pair suffices: the
+  // listener can't longjmp out (js_quickjsrb_log_inner rb_protects
+  // everything it runs).
+  bool prev = data->gvl_released_eval;
+  data->gvl_released_eval = false;
+  c->result = js_quickjsrb_log_inner(c->ctx, c->argc, c->argv, c->severity);
+  data->gvl_released_eval = prev;
+  return NULL;
+}
+
+// Dispatcher: when the caller released the GVL around JS_Eval (see
+// vm_m_evalCode pure-path), Ruby APIs can't be touched directly. Re-acquire
+// the GVL via rb_thread_call_with_gvl before running the row-building body.
+// When the GVL is already held, call the body inline to avoid the re-acquire
+// overhead.
+static JSValue js_quickjsrb_log(JSContext *ctx, int argc, JSValueConst *argv, const char *severity)
+{
+  VMData *data = JS_GetContextOpaque(ctx);
+  // With no listener registered the built row would be discarded, so skip
+  // the whole pipeline — most importantly the GVL re-acquire below, which
+  // would otherwise turn every console.log of a log-heavy pure-path script
+  // into a full GVL round-trip for nothing. This deliberately also skips
+  // argument stringification (getters / toString / to_rb_value) and its
+  // side effects or failures: console.log with no listener is a true
+  // no-op. Reading a VALUE field for a Qnil comparison is a plain aligned
+  // pointer-sized read, safe without the GVL; a racing on_log registration
+  // (which itself requires the GVL) at worst drops this one row.
+  if (NIL_P(data->log_listener))
+    return JS_UNDEFINED;
+  if (data->gvl_released_eval)
+  {
+    struct quickjsrb_log_call c = {ctx, argc, argv, severity, JS_UNDEFINED};
+    rb_thread_call_with_gvl(quickjsrb_log_with_gvl, &c);
+    return c.result;
+  }
+  return js_quickjsrb_log_inner(ctx, argc, argv, severity);
+}
+
 static JSValue js_console_info(JSContext *ctx, JSValueConst this, int argc, JSValueConst *argv)
 {
-  return js_quickjsrb_log(ctx, this, argc, argv, "info");
+  return js_quickjsrb_log(ctx, argc, argv, "info");
 }
 
 static JSValue js_console_verbose(JSContext *ctx, JSValueConst this, int argc, JSValueConst *argv)
 {
-  return js_quickjsrb_log(ctx, this, argc, argv, "verbose");
+  return js_quickjsrb_log(ctx, argc, argv, "verbose");
 }
 
 static JSValue js_console_warn(JSContext *ctx, JSValueConst this, int argc, JSValueConst *argv)
 {
-  return js_quickjsrb_log(ctx, this, argc, argv, "warning");
+  return js_quickjsrb_log(ctx, argc, argv, "warning");
 }
 
 static JSValue js_console_error(JSContext *ctx, JSValueConst this, int argc, JSValueConst *argv)
 {
-  return js_quickjsrb_log(ctx, this, argc, argv, "error");
+  return js_quickjsrb_log(ctx, argc, argv, "error");
 }
 
 // Run polyfill bytecode load + eval without the GVL so a background
 // warmer thread can populate a VM pool in parallel with the main thread
 // on multi-core hosts.
 //
-// Releasing the GVL here is only safe because the bundled polyfills are
-// pure JS (file / encoding / url) and no Ruby-bridged callbacks have
-// been registered on globalThis yet at this point in vm_m_initialize.
-// If the order ever changes — e.g. moving define_function setup ahead of
-// the polyfill loads — the polyfill bytecode could re-enter Ruby without
-// the GVL held. Keep host callback registration after polyfill loading.
+// Two bridges can already be live when these loads run in
+// vm_m_initialize — setTimeout (FEATURE_TIMEOUT) and the File proxy
+// (POLYFILL_FILE registers it ahead of the encoding/url loads) — so
+// releasing the GVL is safe not because nothing is registered, but
+// because a load never runs bridge code: js_quickjsrb_set_timeout only
+// enqueues (pure C; the Ruby-calling js_delay_and_eval_job runs later,
+// under a GVL-held drain/await), a load never drains the job queue, and
+// the bundled polyfill top-levels (file / encoding / url, built from
+// polyfills/src in this repo) don't call the File proxy. That audit is
+// the invariant to preserve when rebuilding bundles or reordering
+// vm_m_initialize. Arbitrary user bytecode must not come through here —
+// vm_m_loadPolyfillBytecode keeps the GVL for that.
 struct polyfill_load_args
 {
   JSContext *ctx;
@@ -1070,9 +1152,13 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   }
   else if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featureTimeoutId))))
   {
+    // setTimeout itself only enqueues, but js_delay_and_eval_job (the
+    // enqueued callback) calls rb_funcall and rb_thread_wait_for
+    // synchronously while js_std_await drains the queue — so this counts
+    // as a Ruby bridge and eval must keep the GVL.
     JS_SetPropertyStr(
         data->context, j_global, "setTimeout",
-        JS_NewCFunction(data->context, js_quickjsrb_set_timeout, "setTimeout", 2));
+        quickjsrb_new_ruby_bridge(data->context, js_quickjsrb_set_timeout, "setTimeout", 2));
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
@@ -1100,10 +1186,11 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
     quickjsrb_init_crypto(data->context, j_global);
   }
 
-  // Host callbacks (console, setTimeout, Ruby-bridged functions) are
-  // registered below this point — after all polyfill loading above.
-  // load_polyfill_bytecode releases the GVL; any code moved above this
-  // line that touches Ruby APIs must re-acquire it first.
+  // console and the remaining host callbacks are registered below this
+  // point. setTimeout and the File proxy above predate the GVL-released
+  // polyfill loads only under the audit described at
+  // load_polyfill_bytecode — re-read it before reordering this function
+  // or registering anything else above the loads.
   JSValue j_console = JS_NewObject(data->context);
   JS_SetPropertyStr(
       data->context, j_console, "log",
@@ -1194,6 +1281,243 @@ static void arm_eval_timer(VMData *data)
   JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
 }
 
+// Pure-path predicate: true when no JS→Ruby bridge can fire during eval
+// other than console.log (which is handled by js_quickjsrb_log's
+// gvl_released_eval re-acquire). When true, eval can safely run with the
+// GVL released so other Ruby threads make progress on different cores.
+// C-function bridges registered via quickjsrb_new_ruby_bridge (crypto.*,
+// File proxy, setTimeout) call rb_funcall directly — those would need to
+// learn the gvl_released_eval pattern before they can run under a released
+// GVL, so we hold the GVL when any of them is installed.
+//
+// :feature_std / :feature_os intentionally pass: quickjs-libc never calls
+// into Ruby, and its state is almost entirely per-runtime (JSThreadState).
+// The exceptions are two file-scope globals reachable from niche APIs —
+// `oldtty` (os.ttySetRaw) and `os_pending_signals` (os.signal) — which can
+// race when multiple VMs run those APIs concurrently. Gating the whole
+// feature would re-serialize os.sleep / os.setTimeout across threads, so
+// the constraint is documented in the README instead.
+static bool can_eval_gvl_free(VMData *data)
+{
+  return RHASH_SIZE(data->defined_functions) == 0
+      && NIL_P(data->module_loader)
+      && NIL_P(data->on_unhandled_rejection)
+      && !data->has_native_ruby_bridge;
+}
+
+struct eval_code_job
+{
+  JSContext *ctx;
+  const char *code;
+  size_t code_len;
+  const char *filename;
+  bool async_mode;
+  JSValue result;
+};
+
+// Shared eval core: JS_Eval (+ js_std_await and the {value, done} unwrap for
+// async). Pure C over JSValues — MUST NOT touch the Ruby VM, because the
+// pure path runs it with the GVL released (see js_quickjsrb_log's dispatcher
+// for how console.log re-acquires). The bridged path calls it directly with
+// the GVL held; both paths share this body so a future fix to the eval
+// sequence can't silently diverge between them.
+static void *eval_code_job_run(void *p)
+{
+  struct eval_code_job *job = p;
+  int eval_flags = job->async_mode ? (JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC) : JS_EVAL_TYPE_GLOBAL;
+  JSValue j_codeResult = JS_Eval(job->ctx, job->code, job->code_len, job->filename, eval_flags);
+  if (job->async_mode)
+  {
+    JSValue j_awaitedResult = js_std_await(job->ctx, j_codeResult); // frees j_codeResult
+    job->result = JS_GetPropertyStr(job->ctx, j_awaitedResult, "value");
+    JS_FreeValue(job->ctx, j_awaitedResult);
+  }
+  else
+  {
+    job->result = j_codeResult;
+  }
+  return NULL;
+}
+
+// A GVL-release region — the one place that owns the handshake required to
+// run a pure-C QuickJS job with the GVL released: the save/restore of
+// gvl_released_eval (restore, not clear, so a region nested through an
+// on_log listener doesn't flip the outer region's console.log back to the
+// inline path), the evals_in_flight increment that makes dispose! refuse,
+// the stale-dispose re-check, and an rb_ensure cleanup that keeps all of
+// it balanced when an async interrupt (Thread#raise / Thread#kill /
+// Timeout) fires in rb_thread_call_without_gvl's GVL-re-acquire epilogue.
+struct gvl_release_region
+{
+  VMData *data;
+  void *(*job_run)(void *); // pure C over JSValues — must not touch Ruby
+  void *job;
+  // Where the job stores its JSValue result; the cleanup frees it when an
+  // interrupt lands inside the region (no-op for JS_UNDEFINED).
+  JSValue *j_result;
+  // malloc'd inputs owned by the region so they survive an interrupt
+  // unwinding past the caller's own frees; NULL slots are fine.
+  void *owned_bufs[2];
+  bool prev_gvl_released;
+  bool completed;
+};
+
+static VALUE gvl_release_region_run(VALUE p)
+{
+  struct gvl_release_region *region = (struct gvl_release_region *)p;
+  rb_thread_call_without_gvl(region->job_run, region->job, NULL, NULL);
+  region->completed = true;
+  return Qnil;
+}
+
+static VALUE gvl_release_region_cleanup(VALUE p)
+{
+  struct gvl_release_region *region = (struct gvl_release_region *)p;
+  VMData *data = region->data;
+  data->gvl_released_eval = region->prev_gvl_released;
+  data->evals_in_flight--;
+  data->gvl_release_regions--;
+  free(region->owned_bufs[0]);
+  free(region->owned_bufs[1]);
+  // Frees the result when the interrupt landed after the job ran but
+  // before the run function marked completion. An interrupt during the
+  // caller's subsequent Ruby conversion can still leak the result — the
+  // same (accepted) exposure every GVL-held path has always had.
+  if (!region->completed)
+    JS_FreeValue(data->context, *region->j_result);
+  return Qnil;
+}
+
+// Run job_run(job) with the GVL released. owned_buf0/1 are malloc'd
+// buffers backing the job's inputs; ownership transfers to the region,
+// which frees them on every exit path — including the disposed bail-out
+// below and async-interrupt unwinds. The caller's check_disposed may be
+// stale by now (argument parsing can yield the GVL to a concurrent
+// dispose!), so re-check here: nothing between this check and the release
+// yields, and dispose! refuses while evals_in_flight > 0, so the two
+// sides can't miss each other.
+static void run_gvl_release_region(VMData *data, void *(*job_run)(void *), void *job, JSValue *j_result, void *owned_buf0, void *owned_buf1)
+{
+  if (data->disposed)
+  {
+    free(owned_buf0);
+    free(owned_buf1);
+    check_disposed(data); // raises
+  }
+
+  struct gvl_release_region region = {
+      .data = data,
+      .job_run = job_run,
+      .job = job,
+      .j_result = j_result,
+      .owned_bufs = {owned_buf0, owned_buf1},
+      .prev_gvl_released = data->gvl_released_eval,
+      .completed = false,
+  };
+
+  data->evals_in_flight++;
+  data->gvl_release_regions++;
+  data->gvl_released_eval = true;
+  rb_ensure(gvl_release_region_run, (VALUE)&region, gvl_release_region_cleanup, (VALUE)&region);
+}
+
+// Installing a JS→Ruby bridge (define_function, module_loader=,
+// on_unhandled_rejection) invalidates the can_eval_gvl_free decision an
+// in-flight GVL-released eval was started under: after e.g. an on_log
+// listener returns, the still-running JS could reach the new bridge and
+// call Ruby APIs without holding the GVL. Refuse loudly — register
+// bridges before evaluating. Registration during GVL-held evals stays
+// allowed, as it always was: gvl_release_regions only counts released
+// regions.
+static void check_no_gvl_release_in_flight(VMData *data)
+{
+  if (data->gvl_release_regions > 0)
+    rb_raise(rb_eThreadError, "cannot install a JS-to-Ruby bridge on a Quickjs::VM while it is evaluating with the GVL released");
+}
+
+static VALUE evals_in_flight_release(VALUE p)
+{
+  ((VMData *)p)->evals_in_flight--;
+  return Qnil;
+}
+
+// Counterpart of run_gvl_release_region for the GVL-held entry points:
+// bridge callbacks (define_function procs, setTimeout's rb_thread_wait_for,
+// on_log listeners) yield the GVL mid-execution, so every JS execution must
+// elevate evals_in_flight for dispose! to refuse — and the decrement must
+// survive every raise exit: JS exceptions, type errors, conversion
+// failures, and async interrupts (Thread#raise / Timeout) delivered inside
+// a bridge callback. A stranded counter would make dispose! refuse forever,
+// so the check + increment + rb_ensure discipline lives here structurally
+// rather than being repeated at each call site. Entry points may have run
+// argument parsing that yields the GVL since their own entry check, hence
+// the disposed re-check immediately before counting. (The interrupt longjmp
+// still rips through QuickJS frames — a pre-existing hazard; whether the
+// bridge should rb_protect and convert instead is a semantics decision
+// deferred in the #56 review.)
+static VALUE run_held_js_entry(VMData *data, VALUE (*body)(VALUE), VALUE arg)
+{
+  check_disposed(data);
+  data->evals_in_flight++;
+  return rb_ensure(body, arg, evals_in_flight_release, (VALUE)data);
+}
+
+static VALUE eval_code_job_run_body(VALUE p)
+{
+  eval_code_job_run((struct eval_code_job *)p);
+  return Qnil;
+}
+
+struct eval_function_job
+{
+  JSContext *ctx;
+  JSValue j_func;
+  JSValue j_awaited;
+};
+
+static VALUE eval_function_job_run_body(VALUE p)
+{
+  struct eval_function_job *job = (struct eval_function_job *)p;
+  JSValue j_codeResult = JS_EvalFunction(job->ctx, job->j_func); // frees j_func
+  job->j_awaited = js_std_await(job->ctx, j_codeResult);
+  return Qnil;
+}
+
+// Run the eval core without the GVL. Inputs are copied to malloc'd buffers
+// because RSTRING_PTR can be invalidated by GC compaction while we're
+// released — see feedback memory on RSTRING_PTR + GVL release.
+static VALUE eval_code_release_gvl(VMData *data, VALUE r_code, const char *filename, bool async_mode)
+{
+  size_t code_len = (size_t)RSTRING_LEN(r_code);
+  // QuickJS's parser reads code_len bytes plus a sentinel NUL; Ruby strings
+  // are always NUL-terminated past RSTRING_LEN, so the original GVL-held path
+  // works by accident. Our malloc'd copy must preserve that invariant.
+  char *code_buf = malloc(code_len + 1);
+  if (code_buf == NULL)
+    rb_raise(rb_eNoMemError, "failed to allocate eval code buffer");
+  memcpy(code_buf, RSTRING_PTR(r_code), code_len);
+  code_buf[code_len] = '\0';
+
+  char *filename_buf = strdup(filename);
+  if (filename_buf == NULL)
+  {
+    free(code_buf);
+    rb_raise(rb_eNoMemError, "failed to allocate eval filename buffer");
+  }
+
+  struct eval_code_job job = {
+      .ctx = data->context,
+      .code = code_buf,
+      .code_len = code_len,
+      .filename = filename_buf,
+      .async_mode = async_mode,
+      .result = JS_UNDEFINED,
+  };
+  run_gvl_release_region(data, eval_code_job_run, &job, &job.result, code_buf, filename_buf);
+
+  return to_rb_return_value(data->context, job.result);
+}
+
 static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
 {
   VMData *data;
@@ -1218,19 +1542,23 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
 
   StringValue(r_code);
 
-  if (!async_mode)
-  {
-    JSValue j_codeResult = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), filename, JS_EVAL_TYPE_GLOBAL);
-    return to_rb_return_value(data->context, j_codeResult);
-  }
+  if (can_eval_gvl_free(data))
+    return eval_code_release_gvl(data, r_code, filename, async_mode);
 
-  JSValue j_codeResult = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), filename, JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC);
-  JSValue j_awaitedResult = js_std_await(data->context, j_codeResult); // This frees j_codeResult
-  // JS_EVAL_FLAG_ASYNC wraps the result in {value, done} — extract the actual value
-  // Free j_awaitedResult before to_rb_return_value because it may raise (longjmp), which would skip cleanup
-  JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
-  JS_FreeValue(data->context, j_awaitedResult);
-  return to_rb_return_value(data->context, j_returnedValue);
+  // Bridged path: a JS→Ruby bridge (define_function / module loader /
+  // setTimeout / File / crypto) may fire mid-eval, so keep the GVL held and
+  // run the shared eval core directly. With the GVL held there's no
+  // compaction risk, so RSTRING_PTR is usable without a malloc'd copy.
+  struct eval_code_job job = {
+      .ctx = data->context,
+      .code = RSTRING_PTR(r_code),
+      .code_len = (size_t)RSTRING_LEN(r_code),
+      .filename = filename,
+      .async_mode = async_mode,
+      .result = JS_UNDEFINED,
+  };
+  run_held_js_entry(data, eval_code_job_run_body, (VALUE)&job);
+  return to_rb_return_value(data->context, job.result);
 }
 
 static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
@@ -1275,6 +1603,7 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
+  check_oom_poisoned(data);
 
   if (!RB_TYPE_P(r_bytecode, T_STRING))
   {
@@ -1286,9 +1615,11 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
 
   arm_eval_timer(data);
 
-  // GVL intentionally held here: user bytecode may invoke Ruby-bridged
-  // callbacks registered via define_function, which call Ruby APIs.
-  // Unlike polyfill_load_no_gvl, this path cannot release the GVL safely.
+  // GVL held: user bytecode may invoke Ruby-bridged callbacks registered
+  // via define_function, which call Ruby APIs. A pure VM could release
+  // here with the same can_eval_gvl_free gate + buffer copy eval_code
+  // uses — left GVL-held deliberately until bytecode eval shows up as a
+  // parallelism bottleneck.
   JSValue j_func = JS_ReadObject(data->context,
                                  (const uint8_t *)RSTRING_PTR(r_bytecode),
                                  (size_t)RSTRING_LEN(r_bytecode),
@@ -1298,10 +1629,10 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
     return to_rb_value(data->context, j_func); // raises
   }
 
-  JSValue j_codeResult = JS_EvalFunction(data->context, j_func); // frees j_func
-  JSValue j_awaitedResult = js_std_await(data->context, j_codeResult);
-  JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_awaitedResult, "value");
-  JS_FreeValue(data->context, j_awaitedResult);
+  struct eval_function_job job = {data->context, j_func, JS_UNDEFINED};
+  run_held_js_entry(data, eval_function_job_run_body, (VALUE)&job);
+  JSValue j_returnedValue = JS_GetPropertyStr(data->context, job.j_awaited, "value");
+  JS_FreeValue(data->context, job.j_awaited);
   return to_rb_return_value(data->context, j_returnedValue);
 }
 
@@ -1320,6 +1651,7 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
+  check_oom_poisoned(data);
   StringValue(r_bytecode);
 
   JSValue j_func = JS_ReadObject(data->context,
@@ -1349,6 +1681,7 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
+  check_no_gvl_release_in_flight(data);
 
   if (RB_TYPE_P(r_name, T_ARRAY))
   {
@@ -1460,18 +1793,20 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   }
 }
 
-static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
+struct js_entry_call
 {
-  if (argc < 1)
-    rb_raise(rb_eArgError, "wrong number of arguments (given 0, expected 1+)");
-
-  VALUE r_name = argv[0];
-
+  int argc;
+  VALUE *argv;
   VMData *data;
-  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+};
 
-  check_disposed(data);
-  check_oom_poisoned(data);
+static VALUE call_global_function_body(VALUE p)
+{
+  struct js_entry_call *call = (struct js_entry_call *)p;
+  int argc = call->argc;
+  VALUE *argv = call->argv;
+  VMData *data = call->data;
+  VALUE r_name = argv[0];
 
   JSValue j_this = JS_UNDEFINED;
   JSValue j_func;
@@ -1599,6 +1934,26 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   return to_rb_return_value(data->context, js_std_await(data->context, j_result));
 }
 
+static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
+{
+  if (argc < 1)
+    rb_raise(rb_eArgError, "wrong number of arguments (given 0, expected 1+)");
+
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_disposed(data);
+  check_oom_poisoned(data);
+
+  // evals_in_flight stays elevated for the whole call, not just the
+  // JS_Eval / JS_Call moments: the body holds live JSValues across Ruby
+  // calls that can yield the GVL (path-segment to_s, argument
+  // conversion), and a concurrent dispose! landing in such a gap would
+  // free the runtime out from under them.
+  struct js_entry_call call = {argc, argv, data};
+  return run_held_js_entry(data, call_global_function_body, (VALUE)&call);
+}
+
 static VALUE vm_m_set_module_loader(VALUE r_self, VALUE r_loader)
 {
   VMData *data;
@@ -1607,6 +1962,7 @@ static VALUE vm_m_set_module_loader(VALUE r_self, VALUE r_loader)
   if (!NIL_P(r_loader) && !rb_obj_is_kind_of(r_loader, rb_cProc))
     rb_raise(rb_eTypeError, "module_loader must be a Proc or nil");
 
+  check_no_gvl_release_in_flight(data);
   data->module_loader = r_loader;
   // Stale entries from the previous loader's policy would survive the
   // swap and silently shadow the new behavior.
@@ -1630,12 +1986,18 @@ static VALUE vm_m_on_unhandled_rejection(VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
+  check_no_gvl_release_in_flight(data);
   data->on_unhandled_rejection = rb_block_proc();
   return Qnil;
 }
 
-static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
+static VALUE import_body(VALUE p)
 {
+  struct js_entry_call *call = (struct js_entry_call *)p;
+  int argc = call->argc;
+  VALUE *argv = call->argv;
+  VMData *data = call->data;
+
   VALUE r_import_string, r_opts;
   rb_scan_args(argc, argv, "10:", &r_import_string, &r_opts);
   if (NIL_P(r_opts))
@@ -1651,11 +2013,6 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   if (!NIL_P(r_from) && !NIL_P(r_filename))
     rb_raise(rb_eArgError, "pass either from: (inline source) or filename: (loader-resolved), not both");
   VALUE r_custom_exposure = rb_hash_aref(r_opts, ID2SYM(rb_intern("code_to_expose")));
-
-  VMData *data;
-  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
-
-  check_disposed(data);
 
   char *filename;
   VALUE r_seeded_key = Qnil;
@@ -1732,6 +2089,23 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   return Qtrue;
 }
 
+static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_disposed(data);
+  check_oom_poisoned(data);
+
+  // Like vm_m_callGlobalFunction: the body registers a module in the
+  // context and then runs Ruby code (_build_import, StringValueCStr on
+  // user values) that can yield the GVL before the bridge eval — keep
+  // evals_in_flight elevated for the whole call so a concurrent dispose!
+  // can't free the runtime in those gaps.
+  struct js_entry_call call = {argc, argv, data};
+  return run_held_js_entry(data, import_body, (VALUE)&call);
+}
+
 RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
 {
   rb_require("json");
@@ -1796,19 +2170,10 @@ static VALUE vm_m_runGC(VALUE r_self)
   return Qnil;
 }
 
-static VALUE vm_m_drainJobs(VALUE r_self)
+static VALUE drain_jobs_body(VALUE p)
 {
-  VMData *data;
-  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
-
-  check_oom_poisoned(data);
-
+  VMData *data = (VMData *)p;
   JSRuntime *runtime = JS_GetRuntime(data->context);
-  if (!JS_IsJobPending(runtime))
-    return INT2NUM(0);
-
-  arm_eval_timer(data);
-
   int executed = 0;
   for (;;)
   {
@@ -1820,6 +2185,22 @@ static VALUE vm_m_drainJobs(VALUE r_self)
     executed++;
   }
   return INT2NUM(executed);
+}
+
+static VALUE vm_m_drainJobs(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_disposed(data);
+  check_oom_poisoned(data);
+
+  if (!JS_IsJobPending(JS_GetRuntime(data->context)))
+    return INT2NUM(0);
+
+  arm_eval_timer(data);
+
+  return run_held_js_entry(data, drain_jobs_body, (VALUE)data);
 }
 
 static VALUE vm_m_memoryPoisoned(VALUE r_self)
@@ -1848,6 +2229,15 @@ static VALUE vm_m_dispose(VALUE r_self)
 
   if (data->disposed)
     return Qnil;
+
+  // Freeing the runtime under live JS is a use-after-free. The overlap is
+  // reachable both through the GVL release (pure-path evals) and through
+  // GVL-yielding bridge callbacks (setTimeout's rb_thread_wait_for,
+  // define_function procs, on_log listeners) — including the README's
+  // `Thread.new { vm.dispose! }` pattern and a listener calling dispose!
+  // mid-eval. Fail loudly instead of corrupting the heap.
+  if (data->evals_in_flight > 0)
+    rb_raise(rb_eThreadError, "cannot dispose a Quickjs::VM while it is evaluating");
 
   if (!JS_IsUndefined(data->j_file_proxy_creator))
   {

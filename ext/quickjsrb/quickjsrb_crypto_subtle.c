@@ -974,28 +974,28 @@ void quickjsrb_init_crypto_subtle(JSContext *ctx, JSValueConst j_crypto)
 {
   JSValue j_subtle = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, j_subtle, "digest",
-                    JS_NewCFunction(ctx, js_subtle_digest, "digest", 2));
+                    quickjsrb_new_ruby_bridge(ctx, js_subtle_digest, "digest", 2));
   JS_SetPropertyStr(ctx, j_subtle, "generateKey",
-                    JS_NewCFunction(ctx, js_subtle_generate_key, "generateKey", 3));
+                    quickjsrb_new_ruby_bridge(ctx, js_subtle_generate_key, "generateKey", 3));
   JS_SetPropertyStr(ctx, j_subtle, "importKey",
-                    JS_NewCFunction(ctx, js_subtle_import_key, "importKey", 5));
+                    quickjsrb_new_ruby_bridge(ctx, js_subtle_import_key, "importKey", 5));
   JS_SetPropertyStr(ctx, j_subtle, "exportKey",
-                    JS_NewCFunction(ctx, js_subtle_export_key, "exportKey", 2));
+                    quickjsrb_new_ruby_bridge(ctx, js_subtle_export_key, "exportKey", 2));
   JS_SetPropertyStr(ctx, j_subtle, "encrypt",
-                    JS_NewCFunction(ctx, js_subtle_encrypt, "encrypt", 3));
+                    quickjsrb_new_ruby_bridge(ctx, js_subtle_encrypt, "encrypt", 3));
   JS_SetPropertyStr(ctx, j_subtle, "decrypt",
-                    JS_NewCFunction(ctx, js_subtle_decrypt, "decrypt", 3));
+                    quickjsrb_new_ruby_bridge(ctx, js_subtle_decrypt, "decrypt", 3));
   JS_SetPropertyStr(ctx, j_subtle, "sign",
-                    JS_NewCFunction(ctx, js_subtle_sign, "sign", 3));
+                    quickjsrb_new_ruby_bridge(ctx, js_subtle_sign, "sign", 3));
   JS_SetPropertyStr(ctx, j_subtle, "verify",
-                    JS_NewCFunction(ctx, js_subtle_verify, "verify", 4));
+                    quickjsrb_new_ruby_bridge(ctx, js_subtle_verify, "verify", 4));
   JS_SetPropertyStr(ctx, j_subtle, "deriveBits",
-                    JS_NewCFunction(ctx, js_subtle_derive_bits, "deriveBits", 3));
+                    quickjsrb_new_ruby_bridge(ctx, js_subtle_derive_bits, "deriveBits", 3));
   JS_SetPropertyStr(ctx, j_subtle, "deriveKey",
-                    JS_NewCFunction(ctx, js_subtle_derive_key, "deriveKey", 5));
+                    quickjsrb_new_ruby_bridge(ctx, js_subtle_derive_key, "deriveKey", 5));
   JS_SetPropertyStr(ctx, j_subtle, "wrapKey",
-                    JS_NewCFunction(ctx, js_subtle_wrap_key, "wrapKey", 4));
+                    quickjsrb_new_ruby_bridge(ctx, js_subtle_wrap_key, "wrapKey", 4));
   JS_SetPropertyStr(ctx, j_subtle, "unwrapKey",
-                    JS_NewCFunction(ctx, js_subtle_unwrap_key, "unwrapKey", 7));
+                    quickjsrb_new_ruby_bridge(ctx, js_subtle_unwrap_key, "unwrapKey", 7));
   JS_SetPropertyStr(ctx, j_crypto, "subtle", j_subtle);
 }

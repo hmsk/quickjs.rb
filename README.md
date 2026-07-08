@@ -358,6 +358,8 @@ vm.eval_code('1 + 1') # raises Quickjs::RuntimeError "VM has been disposed"
 Thread.new { vm.dispose! }
 ```
 
+Disposing a VM that is mid-evaluation on another thread would free the runtime out from under the running JS, so `dispose!` raises `ThreadError` while JS is executing on the VM (`eval_code`, `call`, `import`, `drain_jobs!`, `Runnable#run`) — dispose after the call returns.
+
 #### `Quickjs::VM#drain_jobs!`: Run pending JS jobs to completion
 
 QuickJS does not automatically drain the job queue at the end of a synchronous `eval_code` / `call`. Continuations scheduled via `Promise.resolve().then(...)` or `JS_EnqueueJob` stay pending until something explicitly runs them — `await` inside JS does, but a sync return path does not.
@@ -373,6 +375,17 @@ vm.eval_code('x')   #=> 1
 `drain_jobs!` keeps running until the queue empties, so jobs that schedule further jobs all run in a single call. The drain is bounded by the VM's `timeout_msec`; exceeding it raises `Quickjs::InterruptedError`.
 
 Useful when porting JS that assumed V8's implicit-drain semantics — V8 (and therefore [mini_racer](https://github.com/rubyjs/mini_racer)) flushes pending jobs at every eval boundary, so `eval_code` already sees `.then()` continuations run by the time it returns. QuickJS doesn't. Patterns like `Promise.resolve().then(() => { ... })` and Stimulus/Hotwire callbacks that assume "the next microtask tick" silently fall through unless you call `drain_jobs!` explicitly.
+
+#### Threads and parallelism
+
+`eval_code` releases Ruby's GVL while JS runs, as long as no JS→Ruby bridge is registered on the VM (no `define_function`, `module_loader`, `on_unhandled_rejection`, and none of `FEATURE_TIMEOUT` / `POLYFILL_FILE` / `POLYFILL_CRYPTO` — `console.log` is fine). Separate VMs on separate Ruby threads then evaluate genuinely in parallel on multi-core hosts; when a bridge is registered, the GVL stays held for that VM's evals and they serialize as usual.
+
+The rules for sharing VMs across threads:
+
+- **One VM, one thread at a time.** A `Quickjs::VM` is not safe for concurrent use from multiple threads — QuickJS contexts have no internal locking. Handing a VM off between threads (e.g. constructing it on a warmer thread and using it on another) is fine as long as only one thread touches it at a time.
+- **Create the VM on the thread that evaluates with it** when possible: QuickJS records the creating thread's stack bounds, and evaluating from a thread whose stack sits below them can trip a false stack-overflow error.
+- **Register bridges before evaluating.** `define_function`, `module_loader=`, and `on_unhandled_rejection` raise `ThreadError` while a GVL-released eval is in flight (e.g. from inside an `on_log` listener) — the running JS was allowed to release the GVL precisely because no bridge existed when it started.
+- **`MODULE_OS` caveat:** `os.signal` and `os.ttySetRaw` mutate process-wide state inside quickjs-libc, so don't call those two from VMs running concurrently on different threads. The common APIs (`os.sleep`, `os.setTimeout`, file I/O) only touch per-runtime state and are safe.
 
 ### Value Conversion
 

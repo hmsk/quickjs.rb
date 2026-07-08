@@ -203,13 +203,13 @@ void quickjsrb_init_file_proxy(VMData *data)
   JSValue j_factory_fn = JS_Eval(data->context, factory_src, strlen(factory_src), "<file-proxy>", JS_EVAL_TYPE_GLOBAL);
 
   JSValue j_helpers[7];
-  j_helpers[0] = JS_NewCFunction(data->context, js_ruby_file_name, "__rb_file_name", 1);
-  j_helpers[1] = JS_NewCFunction(data->context, js_ruby_file_size, "__rb_file_size", 1);
-  j_helpers[2] = JS_NewCFunction(data->context, js_ruby_file_type, "__rb_file_type", 1);
-  j_helpers[3] = JS_NewCFunction(data->context, js_ruby_file_last_modified, "__rb_file_last_modified", 1);
-  j_helpers[4] = JS_NewCFunction(data->context, js_ruby_file_text, "__rb_file_text", 1);
-  j_helpers[5] = JS_NewCFunction(data->context, js_ruby_file_array_buffer, "__rb_file_array_buffer", 1);
-  j_helpers[6] = JS_NewCFunction(data->context, js_ruby_file_slice, "__rb_file_slice", 4);
+  j_helpers[0] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_name, "__rb_file_name", 1);
+  j_helpers[1] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_size, "__rb_file_size", 1);
+  j_helpers[2] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_type, "__rb_file_type", 1);
+  j_helpers[3] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_last_modified, "__rb_file_last_modified", 1);
+  j_helpers[4] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_text, "__rb_file_text", 1);
+  j_helpers[5] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_array_buffer, "__rb_file_array_buffer", 1);
+  j_helpers[6] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_slice, "__rb_file_slice", 4);
 
   data->j_file_proxy_creator = JS_Call(data->context, j_factory_fn, JS_UNDEFINED, 7, j_helpers);
 

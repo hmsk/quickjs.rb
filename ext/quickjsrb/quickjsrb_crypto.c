@@ -63,9 +63,9 @@ void quickjsrb_init_crypto(JSContext *ctx, JSValue j_global)
 {
   JSValue j_crypto = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, j_crypto, "getRandomValues",
-                    JS_NewCFunction(ctx, js_crypto_get_random_values, "getRandomValues", 1));
+                    quickjsrb_new_ruby_bridge(ctx, js_crypto_get_random_values, "getRandomValues", 1));
   JS_SetPropertyStr(ctx, j_crypto, "randomUUID",
-                    JS_NewCFunction(ctx, js_crypto_random_uuid, "randomUUID", 0));
+                    quickjsrb_new_ruby_bridge(ctx, js_crypto_random_uuid, "randomUUID", 0));
   quickjsrb_init_crypto_subtle(ctx, j_crypto);
   JS_SetPropertyStr(ctx, j_global, "crypto", j_crypto);
 }

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
+require 'etc'
 
 describe Quickjs do
   it "VERSION" do
@@ -404,6 +405,7 @@ describe Quickjs::VM do
       call:            ->(vm) { vm.call('foo') },
       define_function: ->(vm) { vm.define_function('foo') { 1 } },
       import:          ->(vm) { vm.import('x', from: 'export default 1') },
+      drain_jobs!:     ->(vm) { vm.drain_jobs! },
       memory_usage:    ->(vm) { vm.memory_usage },
       gc!:             ->(vm) { vm.gc! }
     }.each do |method, invoke|
@@ -425,6 +427,94 @@ describe Quickjs::VM do
       10.times { Quickjs::VM.new.dispose! }
       GC.start
       pass
+    end
+
+    # eval_code releases the GVL on the pure path, so a dispose! from another
+    # thread can genuinely overlap a running JS_Eval — freeing the runtime
+    # under it would be a use-after-free. The in-flight guard turns that into
+    # a loud contract violation instead.
+    it "raises ThreadError while another thread is evaluating" do
+      in_eval = Queue.new
+      vm = nil
+      evaluator = Thread.new do
+        # Created inside the thread: QuickJS records the creator's stack
+        # bounds, and evaluating from a thread whose stack sits below them
+        # trips a false stack-overflow error.
+        vm = Quickjs::VM.new(timeout_msec: 5_000, features: [::Quickjs::MODULE_OS])
+        vm.on_log { |_log| in_eval << true }
+        vm.eval_code('console.log("in eval"); os.sleep(1000); "finished"')
+      end
+
+      in_eval.pop # the eval is now provably in flight (and stays so for ~1s)
+      err = _ { vm.dispose! }.must_raise ThreadError
+      _(err.message).must_match(/while it is evaluating/)
+
+      _(evaluator.value).must_equal 'finished'
+      vm.dispose!
+      _(vm.disposed?).must_equal true
+    end
+
+    # The bridged (GVL-held) eval path must be guarded too: setTimeout's
+    # js_delay_and_eval_job yields the GVL via rb_thread_wait_for, so a
+    # concurrent dispose! can genuinely interleave with the eval even though
+    # the eval never released the GVL itself.
+    it "raises ThreadError while a bridged (GVL-held) eval is in flight" do
+      in_eval = Queue.new
+      vm = nil
+      evaluator = Thread.new do
+        vm = Quickjs::VM.new(timeout_msec: 5_000, features: [::Quickjs::FEATURE_TIMEOUT])
+        vm.on_log { |_log| in_eval << true }
+        vm.eval_code('console.log("in eval"); await new Promise(resolve => setTimeout(resolve, 1000)); "finished"')
+      end
+
+      in_eval.pop
+      err = _ { vm.dispose! }.must_raise ThreadError
+      _(err.message).must_match(/while it is evaluating/)
+
+      _(evaluator.value).must_equal 'finished'
+      vm.dispose!
+      _(vm.disposed?).must_equal true
+    end
+
+    # An async interrupt (Timeout / Thread#raise) delivered inside setTimeout's
+    # rb_thread_wait_for longjmps out of the eval. evals_in_flight must unwind
+    # with it (rb_ensure, not a bare ++/-- pair), or the guard above would
+    # refuse dispose! forever on a VM that is no longer evaluating anything.
+    # One test per GVL-held entry point that elevates the counter around a
+    # region that can reach the bridge.
+    it "stays disposable after an async interrupt lands mid-eval" do
+      vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
+
+      _ {
+        Timeout.timeout(0.1) { vm.eval_code('await new Promise(resolve => setTimeout(resolve, 60000));') }
+      }.must_raise Timeout::Error
+
+      vm.dispose!
+      _(vm.disposed?).must_equal true
+    end
+
+    it "stays disposable after an async interrupt lands mid-bytecode-run" do
+      vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
+      runnable = vm.compile('await new Promise(resolve => setTimeout(resolve, 60000));')
+
+      _ {
+        Timeout.timeout(0.1) { runnable.run(on: vm) }
+      }.must_raise Timeout::Error
+
+      vm.dispose!
+      _(vm.disposed?).must_equal true
+    end
+
+    it "stays disposable after an async interrupt lands mid-drain_jobs!" do
+      vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
+      vm.eval_code('setTimeout(() => {}, 60000); void 0')
+
+      _ {
+        Timeout.timeout(0.1) { vm.drain_jobs! }
+      }.must_raise Timeout::Error
+
+      vm.dispose!
+      _(vm.disposed?).must_equal true
     end
   end
 
@@ -1399,6 +1489,15 @@ describe Quickjs::VM do
       _ { runnable.run(on: vm) }.must_raise Quickjs::InterruptedError
     end
 
+    it "run(on: vm) raises Quickjs::RuntimeError after the VM is OOM-poisoned" do
+      runnable = @vm.compile('1 + 1')
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      _ { vm.eval_code('new Array(2_000_000).fill(0); void 0') }.must_raise Quickjs::RuntimeError
+
+      err = _ { runnable.run(on: vm) }.must_raise Quickjs::RuntimeError
+      _(err.message).must_match(/poisoned/)
+    end
+
     it "run with no on: disposes the temporary VM after execution" do
       runnable = @vm.compile('40 + 2')
       _(runnable.run).must_equal 42
@@ -1575,6 +1674,81 @@ describe Quickjs::VM do
         @vm.eval_code('a + b;')
       }.must_raise Quickjs::ReferenceError
     end
+
+    # A Promise nested inside a container falls through console.log's
+    # top-level Promise special case into to_rb_value, which raises. On the
+    # pure path that raise fires inside the GVL re-acquired log dispatcher —
+    # it must surface as a JS throw, not longjmp across the
+    # rb_thread_call_without_gvl region.
+    it "surfaces a row-building failure as a catchable JS error" do
+      @vm.on_log { |_log| }
+
+      result = @vm.eval_code('try { console.log([Promise.resolve(1)]); "not thrown"; } catch(e) { "caught: " + e.message; }')
+      _(result).must_match(/\Acaught: /)
+    end
+
+    it "keeps the VM usable after a row-building failure during a GVL-released eval" do
+      received = []
+      @vm.on_log { |log| received << log }
+
+      err = _ { @vm.eval_code('console.log([Promise.resolve(1)])') }.must_raise Quickjs::RuntimeError
+      _(err.message).must_match(/cannot translate a Promise/)
+
+      # gvl_released_eval must not be left stuck by the failure: register a
+      # bridge so the next eval keeps the GVL — a leaked flag would make
+      # console.log re-acquire the GVL while already holding it, aborting MRI.
+      @vm.define_function('noop') { nil }
+      _(@vm.eval_code('console.log("after"); "still alive"')).must_equal 'still alive'
+      _(received.last.to_s).must_equal 'after'
+    end
+
+    it "keeps the release flag balanced when the listener re-enters eval_code" do
+      received = []
+      @vm.on_log do |log|
+        received << log.to_s
+        @vm.eval_code('1 + 1')
+      end
+
+      # The nested eval must restore (not clear) the outer eval's released
+      # flag; otherwise the second console.log touches Ruby without the GVL.
+      _(@vm.eval_code('console.log("first"); console.log("second"); "done"')).must_equal 'done'
+      _(received).must_equal ['first', 'second']
+    end
+
+    # The listener runs with the GVL re-acquired, so JS re-entered from it
+    # through a GVL-held path (here: VM#call, which always holds the GVL)
+    # must see the release flag cleared — otherwise its console.log would
+    # re-acquire an already-held GVL, which MRI aborts on.
+    it "routes console.log inline when the listener re-enters a GVL-held path" do
+      received = []
+      @vm.eval_code('globalThis.nested = () => { console.log("nested"); return 1; }')
+      @vm.on_log do |log|
+        received << log.to_s
+        @vm.call('nested') if received.size == 1
+      end
+
+      _(@vm.eval_code('console.log("outer"); "done"')).must_equal 'done'
+      _(received).must_equal ['outer', 'nested']
+    end
+
+    # Registering a bridge mid-eval would invalidate the can_eval_gvl_free
+    # decision the running (GVL-released) eval was started under — the JS
+    # continuing after the listener could reach the new bridge and call
+    # Ruby without holding the GVL. The registration APIs refuse instead.
+    it "refuses to install a bridge from a listener during a GVL-released eval" do
+      errors = []
+      @vm.on_log do |_log|
+        begin
+          @vm.define_function('sneaky') { 1 }
+        rescue ThreadError => e
+          errors << e
+        end
+      end
+
+      _(@vm.eval_code('console.log("x"); "done"')).must_equal 'done'
+      _(errors.size).must_equal 1
+      _(errors.first.message).must_match(/bridge/)
+    end
   end
 
   describe "StackTraces" do
@@ -1644,12 +1818,51 @@ describe "Quickjs::Blocking" do
     _(run_threads(&block)).must_equal %w(t1 t1 t1 t2)
   end
 
-  def refute_sleep_a_sec_within_thread(&block)
-    _(run_threads(&block)).wont_equal %w(t1 t1 t1 t2)
-  end
-
   def pend_on_ubuntu
     skip('unresolved stack overflow on Ubuntu of GitHub Actions') unless RUBY_PLATFORM.match(/darwin/)
+  end
+
+  # Asserts the block runs in parallel across Ruby threads, by comparing
+  # wall-clock for the same total amount of work done serially in one thread
+  # vs split across two threads. If the work releases the GVL during its hot
+  # section, the 2-thread run finishes in ~half the wall clock; if it holds
+  # the GVL, both runs take roughly the same time (ratio ≈ 1.0 plus thread
+  # overhead). The 0.8 threshold cleanly distinguishes the two: GitHub's
+  # 3-core macOS runners have been observed topping out around 1.5x
+  # speedup (ratio ~0.67), so demanding better than 1.25x keeps margin on
+  # both sides without flapping.
+  #
+  # The block receives an iteration count and is expected to do that many
+  # units of the operation under test (e.g. eval_code calls). Each thread
+  # creates its own VM internally, because QuickJS records the runtime's
+  # stack base at construction time — using a VM from a thread other than
+  # its creator trips a (false) stack-overflow guard.
+  def assert_run_in_parallel(trials: 5, total_evals: 8, &workload)
+    skip 'requires 2+ cores' if Etc.nprocessors < 2
+
+    measure = ->(&block) {
+      start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      block.call
+      Process.clock_gettime(Process::CLOCK_MONOTONIC) - start
+    }
+
+    workload.call(1) # warmup: load JIT / page in caches before timing
+
+    single = trials.times.map {
+      measure.call { workload.call(total_evals) }
+    }.min
+
+    parallel = trials.times.map {
+      measure.call {
+        threads = Array.new(2) {
+          Thread.new { workload.call(total_evals / 2) }
+        }
+        threads.each(&:join)
+      }
+    }.min
+
+    assert_operator parallel, :<=, single * 0.8,
+      "parallel wall clock #{(parallel * 1000).round(1)}ms not ≤ 0.8 × single #{(single * 1000).round(1)}ms — work may not be releasing the GVL"
   end
 
   describe "ProcessBlocking" do
@@ -1678,30 +1891,33 @@ describe "Quickjs::Blocking" do
       end
     end
 
-    it "os sleep messes" do
+    # The GVL is released during VM#eval_code on the pure path, so these
+    # blocking-looking calls (os.sleep, os.setTimeout, os.sleepAsync) no
+    # longer hold up sibling Ruby threads.
+    it "os.sleep does not block other threads" do
       pend_on_ubuntu
-      refute_sleep_a_sec_within_thread do
+      assert_sleep_a_sec_within_thread do
         @vm.eval_code('os.sleep(200);')
       end
     end
 
-    it "awaiting os.setTimeout messes" do
+    it "awaiting os.setTimeout does not block other threads" do
       pend_on_ubuntu
-      refute_sleep_a_sec_within_thread do
+      assert_sleep_a_sec_within_thread do
         @vm.eval_code('await new Promise(resolve => os.setTimeout(resolve, 200));')
       end
     end
 
-    it "awaiting async function which wraps os.setTimeout messes" do
+    it "awaiting async function which wraps os.setTimeout does not block other threads" do
       pend_on_ubuntu
-      refute_sleep_a_sec_within_thread do
+      assert_sleep_a_sec_within_thread do
         @vm.eval_code('async function top () { await new Promise(resolve => os.setTimeout(resolve, 200)); } await top();')
       end
     end
 
-    it "awaiting os.sleepAsync messes" do
+    it "awaiting os.sleepAsync does not block other threads" do
       pend_on_ubuntu
-      refute_sleep_a_sec_within_thread do
+      assert_sleep_a_sec_within_thread do
         @vm.eval_code('async function top () { await os.sleepAsync(200); } await top();')
       end
     end
@@ -1716,6 +1932,99 @@ describe "Quickjs::Blocking" do
       pend_on_ubuntu
       assert_sleep_a_sec_within_thread do
         @vm.eval_code('await new Promise(resolve => setTimeout(resolve, 200));')
+      end
+    end
+  end
+
+  describe "ParallelEval" do
+    # Smoke test for VM#eval_code releasing the GVL: N threads each running
+    # a CPU-bound JS workload on their own VM should all complete with the
+    # expected result. Regressions in the pure-eval fast path (lost work,
+    # corrupted state, missing GVL re-acquire) surface as crashes or wrong
+    # return values here, even without measuring wall-clock scaling.
+    def cpu_workload
+      <<~JS
+        (() => {
+          let acc = 0;
+          for (let i = 0; i < 5000; i++) {
+            acc = (acc + i) % 1e9;
+          }
+          return acc;
+        })();
+      JS
+    end
+
+    it "runs eval_code in parallel across multiple VMs without crashing" do
+      expected = (0...5000).sum % 1_000_000_000
+      threads  = Array.new(4) {
+        Thread.new {
+          vm = Quickjs::VM.new
+
+          begin
+            5.times.map { vm.eval_code(cpu_workload) }
+          ensure
+            vm.dispose!
+          end
+        }
+      }
+      results = threads.map(&:value)
+      _(results.flatten.uniq).must_equal [expected]
+    end
+
+    it "evaluates pure JS concurrently with measurable speedup" do
+      timing_workload = <<~JS
+        (() => {
+          let acc = 0;
+          for (let i = 0; i < 200000; i++) {
+            acc = (acc + Math.sqrt(i) * Math.sin(i)) % 1e9;
+          }
+          return acc;
+        })();
+      JS
+
+      assert_run_in_parallel do |iterations|
+        vm = Quickjs::VM.new
+        begin
+          iterations.times { vm.eval_code(timing_workload) }
+        ensure
+          vm.dispose!
+        end
+      end
+    end
+
+    # The pure-eval fast path releases the GVL, so console.log inside that
+    # eval reaches js_quickjsrb_log without holding it. The dispatcher must
+    # re-acquire the GVL via rb_thread_call_with_gvl before invoking the
+    # on_log block — otherwise touching Ruby APIs from the released thread
+    # crashes the interpreter. This test exercises that re-acquire path.
+    it "delivers console.log to on_log during a GVL-released eval" do
+      vm       = Quickjs::VM.new
+      received = []
+      vm.on_log { |log| received << log }
+
+      begin
+        vm.eval_code('console.log("hello"); console.log(42, "world"); 1 + 1')
+
+        _(received.size).must_equal 2
+        _(received[0].to_s).must_equal 'hello'
+        _(received[1].to_s).must_equal '42 world'
+      ensure
+        vm.dispose!
+      end
+    end
+
+    # Regression test: setTimeout enqueues js_delay_and_eval_job which calls
+    # rb_funcall and rb_thread_wait_for synchronously. The pure-eval fast
+    # path must keep the GVL held when FEATURE_TIMEOUT is enabled, otherwise
+    # those Ruby APIs run without the GVL and crash.
+    it "tolerates setTimeout in JS without crashing the interpreter" do
+      pend_on_ubuntu
+      vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
+
+      begin
+        _(vm.eval_code('await new Promise(resolve => setTimeout(() => resolve(42), 10));')).must_equal 42
+      ensure
+        vm.dispose!
       end
     end
   end
