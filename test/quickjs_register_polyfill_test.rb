@@ -94,6 +94,42 @@ describe "Quickjs.register_polyfill" do
     _(vm.eval_code('installed', async: false)).must_equal true
   end
 
+  # Skipping arm_eval_timer isn't enough to keep loads unbudgeted: the
+  # interrupt handler a previous eval armed stays installed with that
+  # eval's deadline, so a load after the budget lapsed used to be
+  # interrupted at its first check — and because compiled polyfills are
+  # async-wrapped, the interruption surfaced as a rejected promise nobody
+  # checked: the load "succeeded" with the polyfill silently missing.
+  # _load_polyfill_bytecode now disarms the handler for the load.
+  it 'loads fully even when a prior eval left a lapsed timer armed' do
+    Quickjs.register_polyfill(@feature, source: cpu_workload_js)
+    Quickjs::VM.new(features: [@feature]).dispose! # populate the bytecode cache
+    bytecode = Quickjs._polyfill_for(@feature)[:bytecode]
+
+    vm = Quickjs::VM.new(timeout_msec: 50)
+    vm.eval_code('1 + 1') # arms the interrupt timer with this eval's deadline
+    sleep 0.1 # let the budget lapse so a stale handler would fire mid-load
+    vm.send(:_load_polyfill_bytecode, bytecode)
+
+    _(vm.eval_code('typeof workloadAcc', async: false)).must_equal 'number'
+
+    # Disarming for the load must not disable the user's budget — the
+    # next eval re-arms it.
+    _ { vm.eval_code('while (true) {}') }.must_raise Quickjs::InterruptedError
+  ensure
+    vm&.dispose!
+  end
+
+  # Same root cause, second symptom: a top-level throw in the polyfill
+  # also comes back as a rejected promise rather than JS_EXCEPTION, so
+  # VM.new used to succeed with a half-applied polyfill.
+  it "raises when the polyfill's top level throws" do
+    Quickjs.register_polyfill(@feature, source: 'throw new TypeError("polyfill exploded");')
+
+    err = _ { Quickjs::VM.new(features: [@feature]) }.must_raise Quickjs::TypeError
+    _(err.message).must_match(/polyfill exploded/)
+  end
+
   # Mirrors the GVL-release pattern from VM#eval_code: _load_polyfill_bytecode
   # copies the Ruby String to a malloc'd buffer and releases the GVL during
   # JS_ReadObject + JS_EvalFunction. Without that, csim-style warmer-thread VM

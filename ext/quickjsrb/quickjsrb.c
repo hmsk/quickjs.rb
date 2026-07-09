@@ -1696,6 +1696,15 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   check_oom_poisoned(data);
   StringValue(r_bytecode);
 
+  // "Unbudgeted" needs enforcing, not just skipping arm_eval_timer: the
+  // interrupt handler installed by a previous eval stays armed with that
+  // eval's started_at, so a load after the budget lapsed would be
+  // interrupted on its first check — and because the bytecode is
+  // async-wrapped, the interruption surfaces as a rejected promise the
+  // old code never looked at: the load "succeeded" with the polyfill
+  // silently missing. Disarm for the load; the next eval re-arms.
+  JS_SetInterruptHandler(JS_GetRuntime(data->context), NULL, NULL);
+
   size_t buf_len = (size_t)RSTRING_LEN(r_bytecode);
   JSValue j_result;
   if (can_eval_gvl_free(data))
@@ -1729,6 +1738,20 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
 
   if (JS_IsException(j_result))
     return to_rb_value(data->context, j_result); // raises
+
+  // The compiled bytecode is async-wrapped (JS_EVAL_FLAG_ASYNC), so a
+  // top-level throw doesn't come back as JS_EXCEPTION — it comes back as
+  // a rejected promise. Surface it instead of silently shipping a VM
+  // whose polyfill half-ran.
+  if (JS_PromiseState(data->context, j_result) == JS_PROMISE_REJECTED)
+  {
+    JSValue j_reason = JS_PromiseResult(data->context, j_result);
+    JS_FreeValue(data->context, j_result);
+    VALUE r_error = r_exception_from_js_reason(data->context, j_reason);
+    JS_FreeValue(data->context, j_reason);
+    rb_exc_raise(r_error);
+  }
+
   JS_FreeValue(data->context, j_result);
   return Qnil;
 }
