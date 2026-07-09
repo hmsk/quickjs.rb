@@ -170,6 +170,21 @@ describe "Quickjs.register_polyfill" do
     vm&.dispose!
   end
 
+  # Same assertion on the GVL-held path (crypto latches a Ruby bridge, so
+  # can_eval_gvl_free bails): the short-circuit lives in the shared core,
+  # but only a test on each branch keeps it that way.
+  it "preserves the JS_ReadObject error for corrupt bytecode on the GVL-held path" do
+    vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_CRYPTO])
+
+    err = _ {
+      vm.send(:_load_polyfill_bytecode, 'this is not valid bytecode')
+    }.must_raise Quickjs::SyntaxError
+
+    _(err.message).wont_match(/bytecode function expected/)
+  ensure
+    vm&.dispose!
+  end
+
   # vm_m_loadPolyfillBytecode gates on can_eval_gvl_free: when POLYFILL_CRYPTO
   # is enabled, the polyfill's top-level code can reach crypto.getRandomValues
   # (a C bridge that calls rb_funcall directly without honoring gvl_released_js).

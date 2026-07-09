@@ -1116,12 +1116,13 @@ static void *bytecode_load_job_run(void *p)
   return NULL;
 }
 
-// owned_buf: pass the malloc'd storage backing buf (ownership transfers to
-// the release region), or NULL when buf points at static bytecode.
-static JSValue load_polyfill_bytecode(VMData *data, const uint8_t *buf, size_t buf_len, uint8_t *owned_buf)
+// take_ownership: true when buf is malloc'd storage that the release region
+// should free on every exit path (including async-interrupt unwinds); false
+// when buf points at static bytecode.
+static JSValue load_polyfill_bytecode(VMData *data, const uint8_t *buf, size_t buf_len, bool take_ownership)
 {
   struct bytecode_load_job job = {data->context, buf, buf_len, JS_UNDEFINED};
-  run_gvl_release_region(data, bytecode_load_job_run, &job, &job.result, owned_buf, NULL);
+  run_gvl_release_region(data, bytecode_load_job_run, &job, &job.result, take_ownership ? (uint8_t *)buf : NULL, NULL);
   return job.result;
 }
 
@@ -1191,7 +1192,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
   {
-    JSValue j_polyfillFileResult = load_polyfill_bytecode(data, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, NULL);
+    JSValue j_polyfillFileResult = load_polyfill_bytecode(data, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, false);
     JS_FreeValue(data->context, j_polyfillFileResult);
 
     quickjsrb_init_file_proxy(data);
@@ -1199,13 +1200,13 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillEncodingId))))
   {
-    JSValue j_polyfillEncodingResult = load_polyfill_bytecode(data, &qjsc_polyfill_encoding_min, qjsc_polyfill_encoding_min_size, NULL);
+    JSValue j_polyfillEncodingResult = load_polyfill_bytecode(data, &qjsc_polyfill_encoding_min, qjsc_polyfill_encoding_min_size, false);
     JS_FreeValue(data->context, j_polyfillEncodingResult);
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillUrlId))))
   {
-    JSValue j_polyfillUrlResult = load_polyfill_bytecode(data, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size, NULL);
+    JSValue j_polyfillUrlResult = load_polyfill_bytecode(data, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size, false);
     JS_FreeValue(data->context, j_polyfillUrlResult);
   }
 
@@ -1518,20 +1519,36 @@ static VALUE bytecode_eval_await_body(VALUE p)
   return Qnil;
 }
 
+// Copy a Ruby String to a malloc'd buffer that outlives a GVL release —
+// RSTRING_PTR is GC-movable, so a released region must not read the
+// String's own storage. Ownership passes to the caller (the release
+// regions free it on every exit path). nul_terminate preserves the
+// sentinel NUL QuickJS's parser reads past the length: Ruby strings carry
+// one past RSTRING_LEN, so GVL-held paths get it for free, and a copy
+// must add it back. Allocates at least one byte either way — malloc(0)
+// may return NULL on success, and an empty String (e.g. empty bytecode)
+// must still reach the JS-level diagnostic instead of a spurious
+// NoMemError.
+static char *copy_rstring_to_owned_buffer(VALUE r_str, size_t *out_len, bool nul_terminate)
+{
+  size_t len = (size_t)RSTRING_LEN(r_str);
+  char *buf = malloc(nul_terminate ? len + 1 : (len > 0 ? len : 1));
+  if (buf == NULL)
+    rb_raise(rb_eNoMemError, "failed to allocate a GVL-release copy of a Ruby String");
+  memcpy(buf, RSTRING_PTR(r_str), len);
+  if (nul_terminate)
+    buf[len] = '\0';
+  *out_len = len;
+  return buf;
+}
+
 // Run the eval core without the GVL. Inputs are copied to malloc'd buffers
 // because RSTRING_PTR can be invalidated by GC compaction while we're
-// released — see feedback memory on RSTRING_PTR + GVL release.
+// released.
 static VALUE eval_code_release_gvl(VMData *data, VALUE r_code, const char *filename, bool async_mode)
 {
-  size_t code_len = (size_t)RSTRING_LEN(r_code);
-  // QuickJS's parser reads code_len bytes plus a sentinel NUL; Ruby strings
-  // are always NUL-terminated past RSTRING_LEN, so the original GVL-held path
-  // works by accident. Our malloc'd copy must preserve that invariant.
-  char *code_buf = malloc(code_len + 1);
-  if (code_buf == NULL)
-    rb_raise(rb_eNoMemError, "failed to allocate eval code buffer");
-  memcpy(code_buf, RSTRING_PTR(r_code), code_len);
-  code_buf[code_len] = '\0';
+  size_t code_len;
+  char *code_buf = copy_rstring_to_owned_buffer(r_code, &code_len, true);
 
   char *filename_buf = strdup(filename);
   if (filename_buf == NULL)
@@ -1709,17 +1726,8 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   JSValue j_result;
   if (can_eval_gvl_free(data))
   {
-    // malloc(0) may return NULL on success; ask for one byte so an empty
-    // bytecode String still reaches JS_ReadObject's own diagnostic instead
-    // of a spurious NoMemError.
-    uint8_t *buf = malloc(buf_len > 0 ? buf_len : 1);
-    if (buf == NULL)
-      rb_raise(rb_eNoMemError, "failed to allocate polyfill bytecode buffer");
-    memcpy(buf, RSTRING_PTR(r_bytecode), buf_len);
-
-    // buf ownership transfers to the release region, which frees it even
-    // if an async interrupt unwinds past this frame.
-    j_result = load_polyfill_bytecode(data, buf, buf_len, buf);
+    uint8_t *buf = (uint8_t *)copy_rstring_to_owned_buffer(r_bytecode, &buf_len, false);
+    j_result = load_polyfill_bytecode(data, buf, buf_len, true);
   }
   else
   {

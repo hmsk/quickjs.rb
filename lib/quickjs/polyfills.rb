@@ -8,13 +8,20 @@ module Quickjs
   # `source:` accepts either a `String` (eager) or a `Proc` returning one
   # (lazy). The lazy form lets a companion gem call `register_polyfill`
   # at require time without paying the file-read cost unless a VM
-  # actually opts into the feature.
+  # actually opts into the feature. The Proc must not itself construct a
+  # VM with the same feature: compilation is locked per entry, so that
+  # recursion raises ThreadError instead of deadlocking silently.
   def self.register_polyfill(name, source:, init: nil)
     raise ::TypeError, "name must be a Symbol, got #{name.class}" unless name.is_a?(Symbol)
     raise ::TypeError, "source: must be a String or Proc, got #{source.class}" unless source.is_a?(String) || source.is_a?(Proc)
     raise ::TypeError, "init: must be a String or nil, got #{init.class}" unless init.nil? || init.is_a?(String)
 
-    @_polyfills[name] = {source: source, init: init&.freeze, bytecode: nil, mutex: Mutex.new}
+    # Re-registration keeps the entry's Mutex: a thread mid-compile under
+    # the old entry and a thread arriving via the new one must serialize
+    # on the same lock, or the two would compile concurrently and break
+    # the exactly-once guarantee below.
+    mutex = @_polyfills[name]&.fetch(:mutex) || Mutex.new
+    @_polyfills[name] = {source: source, init: init&.freeze, bytecode: nil, mutex: mutex}
     nil
   end
 
@@ -36,8 +43,10 @@ module Quickjs
       # inside `Quickjs.compile`), and a losing thread could otherwise
       # double-compile or read entry[:source] after the winner cleared it.
       # A compile failure leaves bytecode nil and source intact, so a later
-      # attempt can retry.
-      bytecode = entry[:mutex].synchronize {
+      # attempt can retry. The unlocked first read keeps the post-compile
+      # hot path (warmer pools constructing VMs concurrently) off the lock;
+      # a stale nil just falls into the synchronize.
+      bytecode = entry[:bytecode] || entry[:mutex].synchronize {
         entry[:bytecode] ||= begin
           compiled = _precompile_polyfill(entry, feature)
           # The Proc / String source isn't needed again once the bytecode
