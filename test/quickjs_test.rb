@@ -1941,7 +1941,11 @@ describe "Quickjs::Blocking" do
       timing_workload = cpu_workload_js
 
       assert_run_in_parallel do |iterations|
-        vm = Quickjs::VM.new
+        # The eval budget is wall-clock, so a scheduling stall on a busy CI
+        # runner can push one ~10ms eval past the 100ms default and error
+        # the test with InterruptedError. Parallelism is what's asserted
+        # here, not the budget — make the timeout a non-factor.
+        vm = Quickjs::VM.new(timeout_msec: 10_000)
         begin
           iterations.times { vm.eval_code(timing_workload) }
         ensure
