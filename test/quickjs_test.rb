@@ -1135,6 +1135,16 @@ describe Quickjs::VM do
       _(err.message).must_match(/top-level boom/)
     end
 
+    it "applies timeout_msec to module top-level code" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+
+      _ {
+        vm.import('* as x', from: 'while (true) {}; export const x = 1;')
+      }.must_raise Quickjs::InterruptedError
+    ensure
+      vm&.dispose!
+    end
+
     it "raises when the loader-resolved module throws synchronously" do
       @vm.module_loader = ->(name) {
         "export const x = 1; throw new RangeError('loader-throw');" if name == 'bad'

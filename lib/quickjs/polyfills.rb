@@ -11,17 +11,18 @@ module Quickjs
   # actually opts into the feature. The Proc must not itself construct a
   # VM with the same feature: compilation is locked per entry, so that
   # recursion raises ThreadError instead of deadlocking silently.
+  #
+  # Re-registering a name replaces the entry wholesale, lock included: a
+  # VM construction already compiling under the old entry finishes
+  # against it (and loads the old bytecode) while the first construction
+  # under the new entry compiles the new source independently. Each
+  # registration compiles at most once; the two compiles can overlap.
   def self.register_polyfill(name, source:, init: nil)
     raise ::TypeError, "name must be a Symbol, got #{name.class}" unless name.is_a?(Symbol)
     raise ::TypeError, "source: must be a String or Proc, got #{source.class}" unless source.is_a?(String) || source.is_a?(Proc)
     raise ::TypeError, "init: must be a String or nil, got #{init.class}" unless init.nil? || init.is_a?(String)
 
-    # Re-registration keeps the entry's Mutex: a thread mid-compile under
-    # the old entry and a thread arriving via the new one must serialize
-    # on the same lock, or the two would compile concurrently and break
-    # the exactly-once guarantee below.
-    mutex = @_polyfills[name]&.fetch(:mutex) || Mutex.new
-    @_polyfills[name] = {source: source, init: init&.freeze, bytecode: nil, mutex: mutex}
+    @_polyfills[name] = {source: source, init: init&.freeze, bytecode: nil, mutex: Mutex.new}
     nil
   end
 

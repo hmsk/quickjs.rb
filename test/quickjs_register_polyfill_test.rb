@@ -102,9 +102,7 @@ describe "Quickjs.register_polyfill" do
   # checked: the load "succeeded" with the polyfill silently missing.
   # _load_polyfill_bytecode now disarms the handler for the load.
   it 'loads fully even when a prior eval left a lapsed timer armed' do
-    Quickjs.register_polyfill(@feature, source: cpu_workload_js)
-    Quickjs::VM.new(features: [@feature]).dispose! # populate the bytecode cache
-    bytecode = Quickjs._polyfill_for(@feature)[:bytecode]
+    bytecode = Quickjs.compile(cpu_workload_js).to_s
 
     vm = Quickjs::VM.new(timeout_msec: 50)
     vm.eval_code('1 + 1') # arms the interrupt timer with this eval's deadline

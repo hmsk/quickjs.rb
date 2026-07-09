@@ -1709,9 +1709,13 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
+  // StringValue can invoke a non-String argument's to_str, which may
+  // yield the GVL — run it before the disposed check so nothing below
+  // touches a context freed by a concurrent dispose! in that window.
+  StringValue(r_bytecode);
+
   check_disposed(data);
   check_oom_poisoned(data);
-  StringValue(r_bytecode);
 
   // "Unbudgeted" needs enforcing, not just skipping arm_eval_timer: the
   // interrupt handler installed by a previous eval stays armed with that
@@ -1719,8 +1723,12 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   // interrupted on its first check — and because the bytecode is
   // async-wrapped, the interruption surfaces as a rejected promise the
   // old code never looked at: the load "succeeded" with the polyfill
-  // silently missing. Disarm for the load; the next eval re-arms.
-  JS_SetInterruptHandler(JS_GetRuntime(data->context), NULL, NULL);
+  // silently missing. Disarm for the load; the next eval re-arms. Only
+  // when this load is the outermost JS activity, though: a load issued
+  // from inside a bridge callback (e.g. an on_log listener) must stay
+  // under the in-flight eval's budget, not erase it.
+  if (data->evals_in_flight == 0)
+    JS_SetInterruptHandler(JS_GetRuntime(data->context), NULL, NULL);
 
   size_t buf_len = (size_t)RSTRING_LEN(r_bytecode);
   JSValue j_result;
@@ -1750,14 +1758,16 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   // The compiled bytecode is async-wrapped (JS_EVAL_FLAG_ASYNC), so a
   // top-level throw doesn't come back as JS_EXCEPTION — it comes back as
   // a rejected promise. Surface it instead of silently shipping a VM
-  // whose polyfill half-ran.
+  // whose polyfill half-ran. Re-throwing the reason routes it through
+  // to_rb_value's standard exception path, so interrupted/OOM mapping,
+  // oom_poisoned latching, and the on_log error dispatch all behave
+  // exactly as for a synchronous throw.
   if (JS_PromiseState(data->context, j_result) == JS_PROMISE_REJECTED)
   {
     JSValue j_reason = JS_PromiseResult(data->context, j_result);
     JS_FreeValue(data->context, j_result);
-    VALUE r_error = r_exception_from_js_reason(data->context, j_reason);
-    JS_FreeValue(data->context, j_reason);
-    rb_exc_raise(r_error);
+    JS_Throw(data->context, j_reason); // consumes j_reason
+    return to_rb_value(data->context, JS_EXCEPTION); // raises
   }
 
   JS_FreeValue(data->context, j_result);
@@ -1822,6 +1832,10 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
     {
       VALUE r_first_str = rb_funcall(RARRAY_AREF(r_name, 0), rb_intern("to_s"), 0);
       const char *first_seg = StringValueCStr(r_first_str);
+      // This lookup eval runs under whatever interrupt handler the
+      // previous eval left armed; refresh the clock so a lapsed budget
+      // can't misfire here and masquerade as "'%s' is not an object".
+      arm_eval_timer(data);
       j_parent = JS_Eval(data->context, first_seg, strlen(first_seg), vmInternalFilename, JS_EVAL_TYPE_GLOBAL);
 
       if (JS_IsException(j_parent) || !JS_IsObject(j_parent))
@@ -2192,6 +2206,12 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
 
   check_disposed(data);
   check_oom_poisoned(data);
+
+  // Module top-level code is user JS like any eval — budget it. Without
+  // this, import ran under whatever handler the previous entry point
+  // left behind: a lapsed armed one (spurious interrupt) or none at all
+  // after a polyfill load's disarm (unbounded).
+  arm_eval_timer(data);
 
   // Like vm_m_callGlobalFunction: the body registers a module in the
   // context and then runs Ruby code (_build_import, StringValueCStr on
