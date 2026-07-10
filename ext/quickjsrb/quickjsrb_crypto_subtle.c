@@ -65,6 +65,7 @@ static VALUE js_usages_to_ruby_array(JSContext *ctx, JSValueConst j_usages)
 static void js_reject_with_ruby_error(JSContext *ctx, JSValueConst *resolving_funcs)
 {
   VALUE r_error = rb_errinfo();
+  rb_set_errinfo(Qnil);
   VALUE r_message = rb_funcall(r_error, rb_intern("message"), 0);
   JSValue j_err = JS_NewError(ctx);
   JS_SetPropertyStr(ctx, j_err, "message", JS_NewString(ctx, StringValueCStr(r_message)));
