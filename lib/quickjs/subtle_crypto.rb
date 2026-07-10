@@ -367,6 +367,9 @@ module Quickjs
       additional_data = params[:additional_data]
 
       tag_bytes = tag_length / 8
+      if data.bytesize < tag_bytes
+        raise ArgumentError, "SubtleCrypto: AES-GCM data is shorter than the #{tag_bytes}-byte authentication tag"
+      end
       ciphertext = data[0, data.bytesize - tag_bytes]
       tag = data[-tag_bytes, tag_bytes]
 

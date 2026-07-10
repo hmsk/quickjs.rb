@@ -95,6 +95,20 @@ describe "crypto.subtle AES-GCM encrypt/decrypt" do
     _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::RuntimeError
   end
 
+  it "rejects data shorter than the authentication tag" do
+    code = <<~JS
+      const rawKey = new Uint8Array(32);
+      const key = await crypto.subtle.importKey("raw", rawKey, {name: "AES-GCM"}, false, ["decrypt"]);
+      try {
+        await crypto.subtle.decrypt({name: "AES-GCM", iv: new Uint8Array(12)}, key, new Uint8Array(5));
+        "no error"
+      } catch (e) {
+        e.message
+      }
+    JS
+    _(::Quickjs.eval_code(code, @options)).must_match(/shorter than the 16-byte authentication tag/)
+  end
+
   it "rejects unsupported algorithm" do
     code = <<~JS
       const rawKey = new Uint8Array(32);
