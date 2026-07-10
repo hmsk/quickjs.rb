@@ -71,6 +71,18 @@ describe "crypto.subtle AES-GCM encrypt/decrypt" do
     _(::Quickjs.eval_code(code, @options)).must_equal "10,20,30"
   end
 
+  it "supports non-default IV lengths (e.g. 16 bytes)" do
+    code = <<~JS
+      const key = await crypto.subtle.generateKey({name: "AES-GCM", length: 256}, false, ["encrypt", "decrypt"]);
+      const iv = crypto.getRandomValues(new Uint8Array(16));
+      const plaintext = new TextEncoder().encode("hello world");
+      const ciphertext = await crypto.subtle.encrypt({name: "AES-GCM", iv}, key, plaintext);
+      const decrypted = await crypto.subtle.decrypt({name: "AES-GCM", iv}, key, ciphertext);
+      new TextDecoder().decode(decrypted)
+    JS
+    _(::Quickjs.eval_code(code, { features: [::Quickjs::POLYFILL_CRYPTO, ::Quickjs::POLYFILL_ENCODING] })).must_equal "hello world"
+  end
+
   it "fails to decrypt with wrong iv" do
     code = <<~JS
       const rawKey = new Uint8Array(32);
