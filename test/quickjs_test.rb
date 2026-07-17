@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
-require 'etc'
 
 describe Quickjs do
   it "VERSION" do
@@ -1136,6 +1135,16 @@ describe Quickjs::VM do
       _(err.message).must_match(/top-level boom/)
     end
 
+    it "applies timeout_msec to module top-level code" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+
+      _ {
+        vm.import('* as x', from: 'while (true) {}; export const x = 1;')
+      }.must_raise Quickjs::InterruptedError
+    ensure
+      vm&.dispose!
+    end
+
     it "raises when the loader-resolved module throws synchronously" do
       @vm.module_loader = ->(name) {
         "export const x = 1; throw new RangeError('loader-throw');" if name == 'bad'
@@ -1822,49 +1831,6 @@ describe "Quickjs::Blocking" do
     skip('unresolved stack overflow on Ubuntu of GitHub Actions') unless RUBY_PLATFORM.match(/darwin/)
   end
 
-  # Asserts the block runs in parallel across Ruby threads, by comparing
-  # wall-clock for the same total amount of work done serially in one thread
-  # vs split across two threads. If the work releases the GVL during its hot
-  # section, the 2-thread run finishes in ~half the wall clock; if it holds
-  # the GVL, both runs take roughly the same time (ratio ≈ 1.0 plus thread
-  # overhead). The 0.8 threshold cleanly distinguishes the two: GitHub's
-  # 3-core macOS runners have been observed topping out around 1.5x
-  # speedup (ratio ~0.67), so demanding better than 1.25x keeps margin on
-  # both sides without flapping.
-  #
-  # The block receives an iteration count and is expected to do that many
-  # units of the operation under test (e.g. eval_code calls). Each thread
-  # creates its own VM internally, because QuickJS records the runtime's
-  # stack base at construction time — using a VM from a thread other than
-  # its creator trips a (false) stack-overflow guard.
-  def assert_run_in_parallel(trials: 5, total_evals: 8, &workload)
-    skip 'requires 2+ cores' if Etc.nprocessors < 2
-
-    measure = ->(&block) {
-      start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      block.call
-      Process.clock_gettime(Process::CLOCK_MONOTONIC) - start
-    }
-
-    workload.call(1) # warmup: load JIT / page in caches before timing
-
-    single = trials.times.map {
-      measure.call { workload.call(total_evals) }
-    }.min
-
-    parallel = trials.times.map {
-      measure.call {
-        threads = Array.new(2) {
-          Thread.new { workload.call(total_evals / 2) }
-        }
-        threads.each(&:join)
-      }
-    }.min
-
-    assert_operator parallel, :<=, single * 0.8,
-      "parallel wall clock #{(parallel * 1000).round(1)}ms not ≤ 0.8 × single #{(single * 1000).round(1)}ms — work may not be releasing the GVL"
-  end
-
   describe "ProcessBlocking" do
     before do
       @vm = Quickjs::VM.new(timeout_msec: 500, features: [::Quickjs::MODULE_OS])
@@ -1972,18 +1938,14 @@ describe "Quickjs::Blocking" do
     end
 
     it "evaluates pure JS concurrently with measurable speedup" do
-      timing_workload = <<~JS
-        (() => {
-          let acc = 0;
-          for (let i = 0; i < 200000; i++) {
-            acc = (acc + Math.sqrt(i) * Math.sin(i)) % 1e9;
-          }
-          return acc;
-        })();
-      JS
+      timing_workload = cpu_workload_js
 
       assert_run_in_parallel do |iterations|
-        vm = Quickjs::VM.new
+        # The eval budget is wall-clock, so a scheduling stall on a busy CI
+        # runner can push one ~10ms eval past the 100ms default and error
+        # the test with InterruptedError. Parallelism is what's asserted
+        # here, not the budget — make the timeout a non-factor.
+        vm = Quickjs::VM.new(timeout_msec: 10_000)
         begin
           iterations.times { vm.eval_code(timing_workload) }
         ensure

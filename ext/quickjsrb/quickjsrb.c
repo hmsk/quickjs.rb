@@ -25,6 +25,8 @@ const char *native_errors[] = {
 const int num_native_errors = sizeof(native_errors) / sizeof(native_errors[0]);
 
 static int dispatch_log(VMData *data, const char *severity, VALUE r_row);
+static void check_disposed(VMData *data);
+static void run_gvl_release_region(VMData *data, void *(*job_run)(void *), void *job, JSValue *j_result, void *owned_buf0, void *owned_buf1);
 
 JSValue to_js_value(JSContext *ctx, VALUE r_value);
 VALUE to_rb_value(JSContext *ctx, JSValue j_val);
@@ -919,7 +921,7 @@ struct quickjsrb_log_call
 // array), allocation failure, or the user's on_log listener — can longjmp
 // through QuickJS's interpreter frames, or, on the pure path (where this
 // runs inside rb_thread_call_with_gvl), across the rb_thread_call_without_gvl
-// region — which would leak its buffers and leave gvl_released_eval stuck.
+// region — which would leak its buffers and leave gvl_released_js stuck.
 static VALUE r_build_and_dispatch_log(VALUE r_call)
 {
   struct quickjsrb_log_call *call = (struct quickjsrb_log_call *)r_call;
@@ -1003,10 +1005,10 @@ static void *quickjsrb_log_with_gvl(void *p)
   // the GVL, which MRI aborts on. A plain save/restore pair suffices: the
   // listener can't longjmp out (js_quickjsrb_log_inner rb_protects
   // everything it runs).
-  bool prev = data->gvl_released_eval;
-  data->gvl_released_eval = false;
+  bool prev = data->gvl_released_js;
+  data->gvl_released_js = false;
   c->result = js_quickjsrb_log_inner(c->ctx, c->argc, c->argv, c->severity);
-  data->gvl_released_eval = prev;
+  data->gvl_released_js = prev;
   return NULL;
 }
 
@@ -1029,7 +1031,7 @@ static JSValue js_quickjsrb_log(JSContext *ctx, int argc, JSValueConst *argv, co
   // (which itself requires the GVL) at worst drops this one row.
   if (NIL_P(data->log_listener))
     return JS_UNDEFINED;
-  if (data->gvl_released_eval)
+  if (data->gvl_released_js)
   {
     struct quickjsrb_log_call c = {ctx, argc, argv, severity, JS_UNDEFINED};
     rb_thread_call_with_gvl(quickjsrb_log_with_gvl, &c);
@@ -1062,19 +1064,32 @@ static JSValue js_console_error(JSContext *ctx, JSValueConst this, int argc, JSV
 // warmer thread can populate a VM pool in parallel with the main thread
 // on multi-core hosts.
 //
-// Two bridges can already be live when these loads run in
-// vm_m_initialize — setTimeout (FEATURE_TIMEOUT) and the File proxy
-// (POLYFILL_FILE registers it ahead of the encoding/url loads) — so
-// releasing the GVL is safe not because nothing is registered, but
-// because a load never runs bridge code: js_quickjsrb_set_timeout only
-// enqueues (pure C; the Ruby-calling js_delay_and_eval_job runs later,
-// under a GVL-held drain/await), a load never drains the job queue, and
-// the bundled polyfill top-levels (file / encoding / url, built from
-// polyfills/src in this repo) don't call the File proxy. That audit is
-// the invariant to preserve when rebuilding bundles or reordering
-// vm_m_initialize. Arbitrary user bytecode must not come through here —
-// vm_m_loadPolyfillBytecode keeps the GVL for that.
-struct polyfill_load_args
+// Two call sites use this helper:
+//
+//   1. vm_m_initialize — pre-built bytecode (file / encoding / url) embedded
+//      as static C constants. setTimeout (FEATURE_TIMEOUT) and the File
+//      proxy (POLYFILL_FILE, registered ahead of the encoding/url loads)
+//      can already be live here, so the release is safe not because
+//      nothing is registered, but because a load never runs bridge code:
+//      js_quickjsrb_set_timeout only enqueues (pure C; the Ruby-calling
+//      js_delay_and_eval_job runs later, under a GVL-held drain/await), a
+//      load never drains the job queue, and the bundled polyfill
+//      top-levels (built from polyfills/src in this repo) don't call the
+//      File proxy. That audit is the invariant to preserve when rebuilding
+//      bundles or reordering vm_m_initialize.
+//
+//   2. vm_m_loadPolyfillBytecode — bytecode from a Ruby String, copied to a
+//      malloc'd buffer first so the buffer survives a GC compact. This
+//      bytecode is arbitrary (registered by companion gems), so no audit
+//      applies: the caller gates the release on can_eval_gvl_free() to
+//      bail whenever a direct-rb_funcall bridge (File proxy, crypto, …)
+//      is installed; console.log is covered by js_quickjsrb_log's
+//      gvl_released_js re-acquire either way.
+//
+// load_polyfill_bytecode delegates to the shared GVL-release region (see
+// run_gvl_release_region) so every caller inherits the re-acquire safety,
+// the dispose! handshake, and interrupt-proof cleanup automatically.
+struct bytecode_load_job
 {
   JSContext *ctx;
   const uint8_t *buf;
@@ -1082,19 +1097,33 @@ struct polyfill_load_args
   JSValue result;
 };
 
-static void *polyfill_load_no_gvl(void *p)
+// Shared bytecode read + eval core — pure C over JSValues, MUST NOT touch
+// the Ruby VM (the polyfill release path runs it without the GVL; the
+// GVL-held call sites invoke it directly).
+static void *bytecode_load_job_run(void *p)
 {
-  struct polyfill_load_args *args = p;
-  JSValue obj = JS_ReadObject(args->ctx, args->buf, args->buf_len, JS_READ_OBJ_BYTECODE);
-  args->result = JS_EvalFunction(args->ctx, obj); // frees obj
+  struct bytecode_load_job *job = p;
+  JSValue obj = JS_ReadObject(job->ctx, job->buf, job->buf_len, JS_READ_OBJ_BYTECODE);
+  // JS_EvalFunction on a JS_EXCEPTION input replaces the pending exception
+  // with a generic "bytecode function expected" TypeError, losing the actual
+  // deserialization diagnostic from JS_ReadObject. Short-circuit instead.
+  if (JS_IsException(obj))
+  {
+    job->result = obj;
+    return NULL;
+  }
+  job->result = JS_EvalFunction(job->ctx, obj); // frees obj
   return NULL;
 }
 
-static JSValue load_polyfill_bytecode(JSContext *ctx, const uint8_t *buf, size_t buf_len)
+// take_ownership: true when buf is malloc'd storage that the release region
+// should free on every exit path (including async-interrupt unwinds); false
+// when buf points at static bytecode.
+static JSValue load_polyfill_bytecode(VMData *data, const uint8_t *buf, size_t buf_len, bool take_ownership)
 {
-  struct polyfill_load_args args = {ctx, buf, buf_len, JS_UNDEFINED};
-  rb_thread_call_without_gvl(polyfill_load_no_gvl, &args, NULL, NULL);
-  return args.result;
+  struct bytecode_load_job job = {data->context, buf, buf_len, JS_UNDEFINED};
+  run_gvl_release_region(data, bytecode_load_job_run, &job, &job.result, take_ownership ? (uint8_t *)buf : NULL, NULL);
+  return job.result;
 }
 
 static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
@@ -1163,7 +1192,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
   {
-    JSValue j_polyfillFileResult = load_polyfill_bytecode(data->context, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size);
+    JSValue j_polyfillFileResult = load_polyfill_bytecode(data, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, false);
     JS_FreeValue(data->context, j_polyfillFileResult);
 
     quickjsrb_init_file_proxy(data);
@@ -1171,13 +1200,13 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillEncodingId))))
   {
-    JSValue j_polyfillEncodingResult = load_polyfill_bytecode(data->context, &qjsc_polyfill_encoding_min, qjsc_polyfill_encoding_min_size);
+    JSValue j_polyfillEncodingResult = load_polyfill_bytecode(data, &qjsc_polyfill_encoding_min, qjsc_polyfill_encoding_min_size, false);
     JS_FreeValue(data->context, j_polyfillEncodingResult);
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillUrlId))))
   {
-    JSValue j_polyfillUrlResult = load_polyfill_bytecode(data->context, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size);
+    JSValue j_polyfillUrlResult = load_polyfill_bytecode(data, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size, false);
     JS_FreeValue(data->context, j_polyfillUrlResult);
   }
 
@@ -1283,11 +1312,11 @@ static void arm_eval_timer(VMData *data)
 
 // Pure-path predicate: true when no JS→Ruby bridge can fire during eval
 // other than console.log (which is handled by js_quickjsrb_log's
-// gvl_released_eval re-acquire). When true, eval can safely run with the
+// gvl_released_js re-acquire). When true, eval can safely run with the
 // GVL released so other Ruby threads make progress on different cores.
 // C-function bridges registered via quickjsrb_new_ruby_bridge (crypto.*,
 // File proxy, setTimeout) call rb_funcall directly — those would need to
-// learn the gvl_released_eval pattern before they can run under a released
+// learn the gvl_released_js pattern before they can run under a released
 // GVL, so we hold the GVL when any of them is installed.
 //
 // :feature_std / :feature_os intentionally pass: quickjs-libc never calls
@@ -1341,7 +1370,7 @@ static void *eval_code_job_run(void *p)
 
 // A GVL-release region — the one place that owns the handshake required to
 // run a pure-C QuickJS job with the GVL released: the save/restore of
-// gvl_released_eval (restore, not clear, so a region nested through an
+// gvl_released_js (restore, not clear, so a region nested through an
 // on_log listener doesn't flip the outer region's console.log back to the
 // inline path), the evals_in_flight increment that makes dispose! refuse,
 // the stale-dispose re-check, and an rb_ensure cleanup that keeps all of
@@ -1374,7 +1403,7 @@ static VALUE gvl_release_region_cleanup(VALUE p)
 {
   struct gvl_release_region *region = (struct gvl_release_region *)p;
   VMData *data = region->data;
-  data->gvl_released_eval = region->prev_gvl_released;
+  data->gvl_released_js = region->prev_gvl_released;
   data->evals_in_flight--;
   data->gvl_release_regions--;
   free(region->owned_bufs[0]);
@@ -1411,13 +1440,13 @@ static void run_gvl_release_region(VMData *data, void *(*job_run)(void *), void 
       .job = job,
       .j_result = j_result,
       .owned_bufs = {owned_buf0, owned_buf1},
-      .prev_gvl_released = data->gvl_released_eval,
+      .prev_gvl_released = data->gvl_released_js,
       .completed = false,
   };
 
   data->evals_in_flight++;
   data->gvl_release_regions++;
-  data->gvl_released_eval = true;
+  data->gvl_released_js = true;
   rb_ensure(gvl_release_region_run, (VALUE)&region, gvl_release_region_cleanup, (VALUE)&region);
 }
 
@@ -1468,35 +1497,58 @@ static VALUE eval_code_job_run_body(VALUE p)
   return Qnil;
 }
 
-struct eval_function_job
+// rb_ensure bodies over the shared bytecode core, for the GVL-held call
+// sites: vm_m_loadPolyfillBytecode's held fallback loads without awaiting
+// (matching its release path), vm_m_evalBytecode awaits the result. These
+// can take RSTRING_PTR without a copy: JS_ReadObject consumes the buffer
+// before any bridge can fire, so the GVL is provably held (no compaction)
+// for as long as the pointer is read.
+static VALUE bytecode_load_body(VALUE p)
 {
-  JSContext *ctx;
-  JSValue j_func;
-  JSValue j_awaited;
-};
-
-static VALUE eval_function_job_run_body(VALUE p)
-{
-  struct eval_function_job *job = (struct eval_function_job *)p;
-  JSValue j_codeResult = JS_EvalFunction(job->ctx, job->j_func); // frees j_func
-  job->j_awaited = js_std_await(job->ctx, j_codeResult);
+  bytecode_load_job_run((struct bytecode_load_job *)p);
   return Qnil;
+}
+
+static VALUE bytecode_eval_await_body(VALUE p)
+{
+  struct bytecode_load_job *job = (struct bytecode_load_job *)p;
+  bytecode_load_job_run(job);
+  // js_std_await passes a non-promise — including an exception preserved by
+  // the JS_ReadObject short-circuit — through untouched.
+  job->result = js_std_await(job->ctx, job->result);
+  return Qnil;
+}
+
+// Copy a Ruby String to a malloc'd buffer that outlives a GVL release —
+// RSTRING_PTR is GC-movable, so a released region must not read the
+// String's own storage. Ownership passes to the caller (the release
+// regions free it on every exit path). nul_terminate preserves the
+// sentinel NUL QuickJS's parser reads past the length: Ruby strings carry
+// one past RSTRING_LEN, so GVL-held paths get it for free, and a copy
+// must add it back. Allocates at least one byte either way — malloc(0)
+// may return NULL on success, and an empty String (e.g. empty bytecode)
+// must still reach the JS-level diagnostic instead of a spurious
+// NoMemError.
+static char *copy_rstring_to_owned_buffer(VALUE r_str, size_t *out_len, bool nul_terminate)
+{
+  size_t len = (size_t)RSTRING_LEN(r_str);
+  char *buf = malloc(nul_terminate ? len + 1 : (len > 0 ? len : 1));
+  if (buf == NULL)
+    rb_raise(rb_eNoMemError, "failed to allocate a GVL-release copy of a Ruby String");
+  memcpy(buf, RSTRING_PTR(r_str), len);
+  if (nul_terminate)
+    buf[len] = '\0';
+  *out_len = len;
+  return buf;
 }
 
 // Run the eval core without the GVL. Inputs are copied to malloc'd buffers
 // because RSTRING_PTR can be invalidated by GC compaction while we're
-// released — see feedback memory on RSTRING_PTR + GVL release.
+// released.
 static VALUE eval_code_release_gvl(VMData *data, VALUE r_code, const char *filename, bool async_mode)
 {
-  size_t code_len = (size_t)RSTRING_LEN(r_code);
-  // QuickJS's parser reads code_len bytes plus a sentinel NUL; Ruby strings
-  // are always NUL-terminated past RSTRING_LEN, so the original GVL-held path
-  // works by accident. Our malloc'd copy must preserve that invariant.
-  char *code_buf = malloc(code_len + 1);
-  if (code_buf == NULL)
-    rb_raise(rb_eNoMemError, "failed to allocate eval code buffer");
-  memcpy(code_buf, RSTRING_PTR(r_code), code_len);
-  code_buf[code_len] = '\0';
+  size_t code_len;
+  char *code_buf = copy_rstring_to_owned_buffer(r_code, &code_len, true);
 
   char *filename_buf = strdup(filename);
   if (filename_buf == NULL)
@@ -1620,19 +1672,16 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
   // here with the same can_eval_gvl_free gate + buffer copy eval_code
   // uses — left GVL-held deliberately until bytecode eval shows up as a
   // parallelism bottleneck.
-  JSValue j_func = JS_ReadObject(data->context,
-                                 (const uint8_t *)RSTRING_PTR(r_bytecode),
-                                 (size_t)RSTRING_LEN(r_bytecode),
-                                 JS_READ_OBJ_BYTECODE);
-  if (JS_IsException(j_func))
-  {
-    return to_rb_value(data->context, j_func); // raises
-  }
+  struct bytecode_load_job job = {data->context,
+                                  (const uint8_t *)RSTRING_PTR(r_bytecode),
+                                  (size_t)RSTRING_LEN(r_bytecode),
+                                  JS_UNDEFINED};
+  run_held_js_entry(data, bytecode_eval_await_body, (VALUE)&job);
+  if (JS_IsException(job.result))
+    return to_rb_value(data->context, job.result); // raises
 
-  struct eval_function_job job = {data->context, j_func, JS_UNDEFINED};
-  run_held_js_entry(data, eval_function_job_run_body, (VALUE)&job);
-  JSValue j_returnedValue = JS_GetPropertyStr(data->context, job.j_awaited, "value");
-  JS_FreeValue(data->context, job.j_awaited);
+  JSValue j_returnedValue = JS_GetPropertyStr(data->context, job.result, "value");
+  JS_FreeValue(data->context, job.result);
   return to_rb_return_value(data->context, j_returnedValue);
 }
 
@@ -1640,30 +1689,87 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
 // The user's `timeout_msec` is a budget for *their* code; running a
 // multi-MB polyfill bundle (e.g. the companion `quickjs-polyfill-intl`
 // gem registered via Quickjs.register_polyfill) under that budget would
-// interrupt the load on tight defaults. Unlike load_polyfill_bytecode
-// above we hold the GVL through JS_ReadObject + JS_EvalFunction: the
-// bytecode buffer is a Ruby String, so releasing would let GC compact
-// the backing storage out from under us. The static-symbol path can
-// release safely; this path cannot.
+// interrupt the load on tight defaults.
+//
+// Picks the GVL-released or GVL-held path based on can_eval_gvl_free
+// (same gate vm_m_evalCode uses): if POLYFILL_FILE / POLYFILL_CRYPTO is
+// enabled, the polyfill's top-level code could reach a Ruby-bridged C
+// function that calls rb_funcall directly — those bridges don't honor
+// gvl_released_js, so we must keep the GVL. Otherwise, csim and similar
+// warmer-thread VM pools recover multi-core scaling: without the release
+// every warmer's polyfill load serializes through the GVL, collapsing
+// 4-way warmer parallelism to 1.
+//
+// The GVL-released path copies the Ruby String to a malloc'd buffer
+// because RSTRING_PTR can be invalidated by GC compaction while the GVL
+// is released. The memcpy cost is microseconds vs hundreds of ms of
+// bytecode eval, so it's negligible.
 static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
 {
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
-  check_disposed(data);
-  check_oom_poisoned(data);
+  // StringValue can invoke a non-String argument's to_str, which may
+  // yield the GVL — run it before the disposed check so nothing below
+  // touches a context freed by a concurrent dispose! in that window.
   StringValue(r_bytecode);
 
-  JSValue j_func = JS_ReadObject(data->context,
-                                 (const uint8_t *)RSTRING_PTR(r_bytecode),
-                                 (size_t)RSTRING_LEN(r_bytecode),
-                                 JS_READ_OBJ_BYTECODE);
-  if (JS_IsException(j_func))
-    return to_rb_value(data->context, j_func); // raises
+  check_disposed(data);
+  check_oom_poisoned(data);
 
-  JSValue j_result = JS_EvalFunction(data->context, j_func); // frees j_func
+  // "Unbudgeted" needs enforcing, not just skipping arm_eval_timer: the
+  // interrupt handler installed by a previous eval stays armed with that
+  // eval's started_at, so a load after the budget lapsed would be
+  // interrupted on its first check — and because the bytecode is
+  // async-wrapped, the interruption surfaces as a rejected promise the
+  // old code never looked at: the load "succeeded" with the polyfill
+  // silently missing. Disarm for the load; the next eval re-arms. Only
+  // when this load is the outermost JS activity, though: a load issued
+  // from inside a bridge callback (e.g. an on_log listener) must stay
+  // under the in-flight eval's budget, not erase it.
+  if (data->evals_in_flight == 0)
+    JS_SetInterruptHandler(JS_GetRuntime(data->context), NULL, NULL);
+
+  size_t buf_len = (size_t)RSTRING_LEN(r_bytecode);
+  JSValue j_result;
+  if (can_eval_gvl_free(data))
+  {
+    uint8_t *buf = (uint8_t *)copy_rstring_to_owned_buffer(r_bytecode, &buf_len, false);
+    j_result = load_polyfill_bytecode(data, buf, buf_len, true);
+  }
+  else
+  {
+    // This branch runs exactly when a Ruby bridge (crypto, File, …) is
+    // installed, and every rb_funcall inside one is an interrupt
+    // checkpoint — run_held_js_entry keeps the counter unwind (and the
+    // stale-dispose re-check the released branch gets from its region)
+    // on this path too.
+    struct bytecode_load_job job = {data->context,
+                                    (const uint8_t *)RSTRING_PTR(r_bytecode),
+                                    buf_len,
+                                    JS_UNDEFINED};
+    run_held_js_entry(data, bytecode_load_body, (VALUE)&job);
+    j_result = job.result;
+  }
+
   if (JS_IsException(j_result))
     return to_rb_value(data->context, j_result); // raises
+
+  // The compiled bytecode is async-wrapped (JS_EVAL_FLAG_ASYNC), so a
+  // top-level throw doesn't come back as JS_EXCEPTION — it comes back as
+  // a rejected promise. Surface it instead of silently shipping a VM
+  // whose polyfill half-ran. Re-throwing the reason routes it through
+  // to_rb_value's standard exception path, so interrupted/OOM mapping,
+  // oom_poisoned latching, and the on_log error dispatch all behave
+  // exactly as for a synchronous throw.
+  if (JS_PromiseState(data->context, j_result) == JS_PROMISE_REJECTED)
+  {
+    JSValue j_reason = JS_PromiseResult(data->context, j_result);
+    JS_FreeValue(data->context, j_result);
+    JS_Throw(data->context, j_reason); // consumes j_reason
+    return to_rb_value(data->context, JS_EXCEPTION); // raises
+  }
+
   JS_FreeValue(data->context, j_result);
   return Qnil;
 }
@@ -1726,6 +1832,10 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
     {
       VALUE r_first_str = rb_funcall(RARRAY_AREF(r_name, 0), rb_intern("to_s"), 0);
       const char *first_seg = StringValueCStr(r_first_str);
+      // This lookup eval runs under whatever interrupt handler the
+      // previous eval left armed; refresh the clock so a lapsed budget
+      // can't misfire here and masquerade as "'%s' is not an object".
+      arm_eval_timer(data);
       j_parent = JS_Eval(data->context, first_seg, strlen(first_seg), vmInternalFilename, JS_EVAL_TYPE_GLOBAL);
 
       if (JS_IsException(j_parent) || !JS_IsObject(j_parent))
@@ -2096,6 +2206,12 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
 
   check_disposed(data);
   check_oom_poisoned(data);
+
+  // Module top-level code is user JS like any eval — budget it. Without
+  // this, import ran under whatever handler the previous entry point
+  // left behind: a lapsed armed one (spurious interrupt) or none at all
+  // after a polyfill load's disarm (unbounded).
+  arm_eval_timer(data);
 
   // Like vm_m_callGlobalFunction: the body registers a module in the
   // context and then runs Ruby code (_build_import, StringValueCStr on

@@ -9,18 +9,12 @@ end
 
 require 'etc'
 require_relative '../lib/quickjs'
+require_relative '../test/support/cpu_workload'
 
-# CPU-bound JS workload: a tight loop with non-trivial arithmetic.
-# Large enough that any GVL contention dominates over fixed overheads.
-WORKLOAD = <<~JS
-  (() => {
-    let acc = 0;
-    for (let i = 0; i < 200000; i++) {
-      acc = (acc + Math.sqrt(i) * Math.sin(i)) % 1e9;
-    }
-    return acc;
-  })();
-JS
+# CPU-bound JS workload: a tight loop with non-trivial arithmetic, shared
+# with the parallelism tests so this benchmark measures the exact
+# workload `assert_run_in_parallel` asserts on.
+WORKLOAD = QuickjsCpuWorkload.cpu_workload_js
 
 THREAD_COUNTS = [1, 2, 4, 8]
 ITERATIONS_PER_THREAD = 20
