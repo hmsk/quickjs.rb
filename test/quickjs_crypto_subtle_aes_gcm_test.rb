@@ -71,6 +71,18 @@ describe "crypto.subtle AES-GCM encrypt/decrypt" do
     _(::Quickjs.eval_code(code, @options)).must_equal "10,20,30"
   end
 
+  it "supports non-default IV lengths (e.g. 16 bytes)" do
+    code = <<~JS
+      const key = await crypto.subtle.generateKey({name: "AES-GCM", length: 256}, false, ["encrypt", "decrypt"]);
+      const iv = crypto.getRandomValues(new Uint8Array(16));
+      const plaintext = new TextEncoder().encode("hello world");
+      const ciphertext = await crypto.subtle.encrypt({name: "AES-GCM", iv}, key, plaintext);
+      const decrypted = await crypto.subtle.decrypt({name: "AES-GCM", iv}, key, ciphertext);
+      new TextDecoder().decode(decrypted)
+    JS
+    _(::Quickjs.eval_code(code, { features: [::Quickjs::POLYFILL_CRYPTO, ::Quickjs::POLYFILL_ENCODING] })).must_equal "hello world"
+  end
+
   it "fails to decrypt with wrong iv" do
     code = <<~JS
       const rawKey = new Uint8Array(32);
@@ -81,6 +93,20 @@ describe "crypto.subtle AES-GCM encrypt/decrypt" do
       await crypto.subtle.decrypt({name: "AES-GCM", iv: iv2}, key, ct)
     JS
     _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::RuntimeError
+  end
+
+  it "rejects data shorter than the authentication tag" do
+    code = <<~JS
+      const rawKey = new Uint8Array(32);
+      const key = await crypto.subtle.importKey("raw", rawKey, {name: "AES-GCM"}, false, ["decrypt"]);
+      try {
+        await crypto.subtle.decrypt({name: "AES-GCM", iv: new Uint8Array(12)}, key, new Uint8Array(5));
+        "no error"
+      } catch (e) {
+        e.message
+      }
+    JS
+    _(::Quickjs.eval_code(code, @options)).must_match(/shorter than the 16-byte authentication tag/)
   end
 
   it "rejects unsupported algorithm" do

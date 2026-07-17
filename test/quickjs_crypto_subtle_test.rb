@@ -11,6 +11,17 @@ describe "crypto.subtle" do
     _ { ::Quickjs.eval_code("crypto.subtle.digest('SHA-256', new Uint8Array([1,2,3]))") }.must_raise Quickjs::ReferenceError
   end
 
+  it "does not leave the Ruby exception in $! after a rejection caught in JS" do
+    code = <<~JS
+      try {
+        await crypto.subtle.digest('SHA-999', new Uint8Array([1]));
+      } catch (e) {}
+      "done"
+    JS
+    _(::Quickjs.eval_code(code, @options)).must_equal "done"
+    _($!).must_be_nil
+  end
+
   describe "digest" do
     it "returns an ArrayBuffer" do
       code = "const buf = await crypto.subtle.digest('SHA-256', new Uint8Array([1,2,3])); buf.byteLength"

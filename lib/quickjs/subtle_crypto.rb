@@ -351,6 +351,8 @@ module Quickjs
       cipher = OpenSSL::Cipher.new("aes-#{key.algorithm["length"]}-gcm")
       cipher.encrypt
       cipher.key = key.key_data
+      # WebCrypto allows any nonzero IV length for AES-GCM; OpenSSL defaults to 12 bytes
+      cipher.iv_len = iv.bytesize
       cipher.iv = iv
       cipher.auth_data = additional_data || ""
       ciphertext = cipher.update(data) + cipher.final
@@ -365,12 +367,16 @@ module Quickjs
       additional_data = params[:additional_data]
 
       tag_bytes = tag_length / 8
+      if data.bytesize < tag_bytes
+        raise ArgumentError, "SubtleCrypto: AES-GCM data is shorter than the #{tag_bytes}-byte authentication tag"
+      end
       ciphertext = data[0, data.bytesize - tag_bytes]
       tag = data[-tag_bytes, tag_bytes]
 
       decipher = OpenSSL::Cipher.new("aes-#{key.algorithm["length"]}-gcm")
       decipher.decrypt
       decipher.key = key.key_data
+      decipher.iv_len = iv.bytesize
       decipher.iv = iv
       decipher.auth_tag = tag
       decipher.auth_data = additional_data || ""
