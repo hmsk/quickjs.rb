@@ -1519,6 +1519,34 @@ describe Quickjs::VM do
       _(other_vm.disposed?).must_equal false
       other_vm.dispose!
     end
+
+    # A define_function bridge disqualifies can_eval_gvl_free, so this run
+    # takes the GVL-held branch — bridge callbacks call Ruby APIs and must
+    # hold the GVL. Locks the branch split in vm_m_evalBytecode.
+    it "run(on: vm) reaches Ruby-bridged functions on the GVL-held path" do
+      vm = Quickjs::VM.new
+      vm.define_function('fromRuby') { 'bridged' }
+      runnable = vm.compile('fromRuby()')
+
+      _(runnable.run(on: vm)).must_equal 'bridged'
+    ensure
+      vm&.dispose!
+    end
+
+    # A bare VM takes the GVL-released branch; console.log inside the run
+    # reaches js_quickjsrb_log off-GVL, which must re-acquire before
+    # invoking the on_log block — same re-acquire path eval_code exercises.
+    it "delivers console.log to on_log during a GVL-released run" do
+      runnable = @vm.compile('console.log("from bytecode"); 1 + 1')
+      vm       = Quickjs::VM.new
+      received = []
+      vm.on_log { |log| received << log }
+
+      _(runnable.run(on: vm)).must_equal 2
+      _(received.map(&:to_s)).must_equal ['from bytecode']
+    ensure
+      vm&.dispose!
+    end
   end
 
   describe "ConsoleLoggers" do
@@ -1948,6 +1976,22 @@ describe "Quickjs::Blocking" do
         vm = Quickjs::VM.new(timeout_msec: 10_000)
         begin
           iterations.times { vm.eval_code(timing_workload) }
+        ensure
+          vm.dispose!
+        end
+      end
+    end
+
+    # Runnable#run is the warmer-pool hot path: compile a bundle once, run
+    # it on per-thread VMs. Before the release, the bytecode eval held the
+    # GVL and N threads fully serialized.
+    it "runs compiled bytecode concurrently with measurable speedup" do
+      runnable = Quickjs.compile(cpu_workload_js)
+
+      assert_run_in_parallel do |iterations|
+        vm = Quickjs::VM.new(timeout_msec: 10_000)
+        begin
+          iterations.times { runnable.run(on: vm) }
         ensure
           vm.dispose!
         end

@@ -378,7 +378,7 @@ Useful when porting JS that assumed V8's implicit-drain semantics — V8 (and th
 
 #### Threads and parallelism
 
-`eval_code` releases Ruby's GVL while JS runs, as long as no JS→Ruby bridge is registered on the VM (no `define_function`, `module_loader`, `on_unhandled_rejection`, and none of `FEATURE_TIMEOUT` / `POLYFILL_FILE` / `POLYFILL_CRYPTO` — `console.log` is fine). Separate VMs on separate Ruby threads then evaluate genuinely in parallel on multi-core hosts; when a bridge is registered, the GVL stays held for that VM's evals and they serialize as usual.
+`eval_code` and `Runnable#run` release Ruby's GVL while JS runs, as long as no JS→Ruby bridge is registered on the VM (no `define_function`, `module_loader`, `on_unhandled_rejection`, and none of `FEATURE_TIMEOUT` / `POLYFILL_FILE` / `POLYFILL_CRYPTO` — `console.log` is fine). Separate VMs on separate Ruby threads then evaluate genuinely in parallel on multi-core hosts — including the compile-once-run-everywhere pattern, where per-thread VMs execute the same `Runnable` concurrently. When a bridge is registered, the GVL stays held for that VM's evals and they serialize as usual.
 
 The rules for sharing VMs across threads:
 
