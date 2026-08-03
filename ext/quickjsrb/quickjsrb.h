@@ -64,6 +64,12 @@ typedef struct VMData
   // JS_Eval that follows. Keyed by canonical; populated when the user's
   // loader returns either a raw source String or `{ code:, as: }`.
   VALUE module_source_cache;
+  // Set (name → Qtrue) of modules read into this context by
+  // _preload_module_bytecode. QuickJS calls normalize *before* it looks in
+  // ctx->loaded_modules, so without this the normalize hook would ask the
+  // user's loader for a module that is already loaded — and raise
+  // ReferenceError when the loader doesn't know the name.
+  VALUE preloaded_module_names;
   JSValue j_file_proxy_creator;
   // Once the runtime has hit JS-level "out of memory", the QuickJS heap is in
   // a fragile state where further evaluation can trigger a use-after-free in
@@ -169,6 +175,7 @@ static void vm_mark(void *ptr)
   rb_gc_mark_movable(data->on_unhandled_rejection);
   rb_gc_mark_movable(data->module_resolution_cache);
   rb_gc_mark_movable(data->module_source_cache);
+  rb_gc_mark_movable(data->preloaded_module_names);
 }
 
 static void vm_compact(void *ptr)
@@ -181,6 +188,7 @@ static void vm_compact(void *ptr)
   data->on_unhandled_rejection = rb_gc_location(data->on_unhandled_rejection);
   data->module_resolution_cache = rb_gc_location(data->module_resolution_cache);
   data->module_source_cache = rb_gc_location(data->module_source_cache);
+  data->preloaded_module_names = rb_gc_location(data->preloaded_module_names);
 }
 
 static const rb_data_type_t vm_type = {
@@ -217,6 +225,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->on_unhandled_rejection = Qnil;
   data->module_resolution_cache = rb_hash_new();
   data->module_source_cache = rb_hash_new();
+  data->preloaded_module_names = rb_hash_new();
   data->j_file_proxy_creator = JS_UNDEFINED;
   data->oom_poisoned = false;
   data->disposed = false;

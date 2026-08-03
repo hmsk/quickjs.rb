@@ -584,6 +584,14 @@ static char *quickjsrb_module_normalize(JSContext *ctx, const char *base_name, c
   if (!NIL_P(r_cached_canonical))
     return js_strdup(ctx, StringValueCStr(r_cached_canonical));
 
+  // A preloaded name is already in ctx->loaded_modules, so js_find_loaded_module
+  // will hand back that module the moment we return the name. Resolving it here
+  // keeps the user's loader out of it entirely: it is never asked for a module
+  // the VM was constructed with, the way a browser's module map short-circuits
+  // a fetch.
+  if (RTEST(rb_hash_aref(data->preloaded_module_names, r_specifier)))
+    return js_strdup(ctx, StringValueCStr(r_specifier));
+
   struct module_loader_call_args args = {data->module_loader, r_specifier, r_importer};
   int state;
   VALUE r_return = rb_protect(r_module_loader_call, (VALUE)&args, &state);
@@ -630,7 +638,13 @@ static char *quickjsrb_module_normalize(JSContext *ctx, const char *base_name, c
     return NULL;
   }
 
-  rb_hash_aset(data->module_source_cache, r_canonical, r_source);
+  // The loader can also land on a preloaded module the long way round: an
+  // importmap-style scope maps a bare specifier to a canonical that was
+  // preloaded. QuickJS finds it in ctx->loaded_modules and never calls the
+  // load hook, so stashing the source it just handed us would leave an entry
+  // nothing ever clears.
+  if (!RTEST(rb_hash_aref(data->preloaded_module_names, r_canonical)))
+    rb_hash_aset(data->module_source_cache, r_canonical, r_source);
   rb_hash_aset(data->module_resolution_cache, r_key, r_canonical);
 
   return js_strdup(ctx, StringValueCStr(r_canonical));
@@ -1721,6 +1735,118 @@ static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
   return rb_obj_freeze(r_bytecode);
 }
 
+// Stands in for the real loader while compiling a module to bytecode.
+//
+// __JS_EvalInternal runs js_resolve_module before it honors
+// JS_EVAL_FLAG_COMPILE_ONLY, so compiling `import { x } from 'dep'` tries to
+// load 'dep' — which would make a module impossible to compile without its
+// whole dependency graph on hand. Nothing about that resolution survives:
+// JS_WriteModule stores req_module_entries as the specifier written in the
+// source, never the module it resolved to, and export names aren't checked
+// until js_link_module at evaluation time. So an empty stub satisfies the
+// compile and leaves no trace in the blob; the importing VM resolves the real
+// dependency through its own loader.
+//
+// The stubs do land in the compiling context's module map, so this must only
+// ever run on a throwaway VM — otherwise a later real import of 'dep' on that
+// VM would find the empty stub.
+static JSModuleDef *quickjsrb_stub_module_loader(JSContext *ctx, const char *module_name, void *opaque, JSValueConst attributes)
+{
+  static const char *empty_module = "export {};";
+  JSValue j_stub = JS_Eval(ctx, empty_module, strlen(empty_module), module_name,
+                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  if (JS_IsException(j_stub))
+    return NULL;
+
+  JSModuleDef *m = JS_VALUE_GET_PTR(j_stub);
+  JS_FreeValue(ctx, j_stub);
+  return m;
+}
+
+// Compiles source as an ES module and serializes it. Unlike vm_m_compile,
+// `name` is not a debug label: js_read_module rebuilds the JSModuleDef under
+// the name baked in here, so it is the module's identity in every VM that
+// later reads this blob. Quickjs.register_module keys the registry by that
+// same string, which is what keeps the two from drifting apart.
+static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_disposed(data);
+  Check_Type(r_code, T_STRING);
+  Check_Type(r_name, T_STRING);
+
+  arm_eval_timer(data);
+
+  JS_SetModuleLoaderFunc2(JS_GetRuntime(data->context), NULL, quickjsrb_stub_module_loader,
+                          js_module_check_attributes, NULL);
+  JSValue j_mod = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code),
+                          StringValueCStr(r_name),
+                          JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  register_module_loader_funcs(data);
+  if (JS_IsException(j_mod))
+    return to_rb_value(data->context, j_mod); // raises
+
+  size_t out_len;
+  uint8_t *out_buf = JS_WriteObject(data->context, &out_len, j_mod, JS_WRITE_OBJ_BYTECODE);
+  JS_FreeValue(data->context, j_mod);
+  if (out_buf == NULL)
+  {
+    VALUE r_msg = rb_str_new2("failed to serialize compiled module bytecode");
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
+  }
+
+  VALUE r_bytecode = rb_str_new((const char *)out_buf, (long)out_len);
+  rb_enc_associate(r_bytecode, rb_ascii8bit_encoding());
+  js_free(data->context, out_buf);
+  return rb_obj_freeze(r_bytecode);
+}
+
+// Reads module bytecode into this context. The read registers the JSModuleDef
+// in ctx->loaded_modules but does not evaluate it: evaluation still happens on
+// first import, and js_resolve_module recurses into it from the importer, so
+// no loader hook is involved for a preloaded name.
+//
+// The baked-in name is recorded in preloaded_module_names for the normalize
+// hook's short-circuit, and returned so the Ruby layer can assert it matches
+// the registry key.
+static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  StringValue(r_bytecode);
+  check_disposed(data);
+  check_oom_poisoned(data);
+
+  JSValue j_mod = JS_ReadObject(data->context, (const uint8_t *)RSTRING_PTR(r_bytecode),
+                                (size_t)RSTRING_LEN(r_bytecode), JS_READ_OBJ_BYTECODE);
+  if (JS_IsException(j_mod))
+    return to_rb_value(data->context, j_mod); // raises
+
+  if (JS_VALUE_GET_TAG(j_mod) != JS_TAG_MODULE)
+  {
+    JS_FreeValue(data->context, j_mod);
+    rb_raise(rb_eTypeError, "bytecode is not an ES module (compile it with type: :module)");
+  }
+
+  js_module_set_import_meta(data->context, j_mod, FALSE, FALSE);
+
+  JSAtom j_name = JS_GetModuleName(data->context, JS_VALUE_GET_PTR(j_mod));
+  const char *name = JS_AtomToCString(data->context, j_name);
+  VALUE r_name = rb_str_new_cstr(name ? name : "");
+  if (name)
+    JS_FreeCString(data->context, name);
+  JS_FreeAtom(data->context, j_name);
+  rb_hash_aset(data->preloaded_module_names, rb_str_freeze(r_name), Qtrue);
+
+  // The module def is owned by ctx->loaded_modules (js_new_module_def leaves
+  // it there with ref_count 1); JS_NewModuleValue dup'd it for us.
+  JS_FreeValue(data->context, j_mod);
+  return r_name;
+}
+
 static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
 {
   VMData *data;
@@ -2307,6 +2433,8 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "initialize", vm_m_initialize, -1);
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, -1);
   rb_define_private_method(r_class_vm, "_compile_to_bytecode", vm_m_compile, -1);
+  rb_define_private_method(r_class_vm, "_compile_module_to_bytecode", vm_m_compileModule, 2);
+  rb_define_private_method(r_class_vm, "_preload_module_bytecode", vm_m_preloadModuleBytecode, 1);
   rb_define_private_method(r_class_vm, "_run_bytecode", vm_m_evalBytecode, 1);
   rb_define_private_method(r_class_vm, "_load_polyfill_bytecode", vm_m_loadPolyfillBytecode, 1);
   rb_define_method(r_class_vm, "call", vm_m_callGlobalFunction, -1);
