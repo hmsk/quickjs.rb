@@ -1227,6 +1227,15 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
         quickjsrb_new_ruby_bridge(data->context, js_quickjsrb_set_timeout, "setTimeout", 2));
   }
 
+  // finish_polyfill_load raises (Ruby longjmp) on a load that fails or
+  // doesn't settle, so nothing holding a JSValue may stay live across the
+  // loads: the free at the bottom of this function would be skipped and
+  // the leaked reference pins its whole object graph past JS_FreeRuntime
+  // (the teardown GC only reclaims what's internally referenced, and the
+  // gc_obj_list assert is compiled out by -DNDEBUG). Drop the global here
+  // and re-acquire it below.
+  JS_FreeValue(data->context, j_global);
+
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
   {
     finish_polyfill_load(data, load_polyfill_bytecode(data, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, false));
@@ -1243,6 +1252,8 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   {
     finish_polyfill_load(data, load_polyfill_bytecode(data, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size, false));
   }
+
+  j_global = JS_GetGlobalObject(data->context);
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillCryptoId))))
   {
