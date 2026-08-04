@@ -32,6 +32,12 @@ module Quickjs
     def define_function: (String | Symbol name, *Symbol flags) { (*untyped) -> untyped } -> Symbol
                        | (Array[String | Symbol] path, *Symbol flags) { (*untyped) -> untyped } -> Array[Symbol]
 
+    def define_const: (String | Symbol name, untyped value) -> Symbol
+
+    def define_let: (String | Symbol name, untyped value) -> Symbol
+
+    def define_var: (String | Symbol name, untyped value) -> Symbol
+
     def import: (String | Array[String] | Hash[Symbol, String] imported, from: String, ?code_to_expose: String?) -> true
               | (String | Array[String] | Hash[Symbol, String] imported, filename: String, ?code_to_expose: String?) -> true
 
