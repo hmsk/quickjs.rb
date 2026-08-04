@@ -12,6 +12,12 @@ module Quickjs
   # VM with the same feature: compilation is locked per entry, so that
   # recursion raises ThreadError instead of deadlocking silently.
   #
+  # The polyfill's top level must settle synchronously — no top-level
+  # await. `VM.new(features:)` promises a usable polyfill on return, but
+  # loads never drain the job queue, so nothing past the first await
+  # would have run by then; a pending load raises Quickjs::RuntimeError
+  # instead of handing back a silently half-applied VM.
+  #
   # Re-registering a name replaces the entry wholesale, lock included: a
   # VM construction already compiling under the old entry finishes
   # against it (and loads the old bytecode) while the first construction
@@ -57,7 +63,15 @@ module Quickjs
           compiled
         end
       }
-      vm.send(:_load_polyfill_bytecode, bytecode)
+      begin
+        vm.send(:_load_polyfill_bytecode, bytecode)
+      rescue Quickjs::RuntimeError => e
+        # The C layer only sees bytecode; name the registration so a VM
+        # with several polyfill features points at the one that failed.
+        # `raise e, msg` clones — class, js_name, and any JS backtrace
+        # already set on the original all survive.
+        raise e, "#{feature}: #{e.message}"
+      end
     end
   end
 

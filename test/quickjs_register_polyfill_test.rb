@@ -128,6 +128,19 @@ describe "Quickjs.register_polyfill" do
     _(err.message).must_match(/polyfill exploded/)
   end
 
+  # Loads never drain the job queue, so nothing past a top-level await has
+  # run when VM.new returns — the load used to report success with the
+  # polyfill's globals missing (and a throw behind the await, the same
+  # PENDING shape at load time, was swallowed outright). PENDING is now an
+  # error: registered polyfill top-levels must settle synchronously. The
+  # message names the offending feature, since a VM can enable several.
+  it 'raises when the polyfill uses top-level await' do
+    Quickjs.register_polyfill(@feature, source: 'await 0; throw new TypeError("never surfaces");')
+
+    err = _ { Quickjs::VM.new(features: [@feature]) }.must_raise Quickjs::RuntimeError
+    _(err.message).must_match(/#{@feature}.*settle synchronously/)
+  end
+
   # Mirrors the GVL-release pattern from VM#eval_code: _load_polyfill_bytecode
   # copies the Ruby String to a malloc'd buffer and releases the GVL during
   # JS_ReadObject + JS_EvalFunction. Without that, csim-style warmer-thread VM

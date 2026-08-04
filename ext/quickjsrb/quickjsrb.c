@@ -1126,6 +1126,43 @@ static JSValue load_polyfill_bytecode(VMData *data, const uint8_t *buf, size_t b
   return job.result;
 }
 
+// Shared settle check for every polyfill load's result, bundled or
+// registered. The compiled bytecode is async-wrapped (JS_EVAL_FLAG_ASYNC),
+// so a top-level throw comes back as a rejected promise, not JS_EXCEPTION;
+// re-throwing the reason routes it through to_rb_value's standard
+// exception path (interrupted/OOM mapping, oom_poisoned latching, on_log
+// dispatch). And a top level that awaits is still pending: loads never
+// drain the job queue, so nothing past the first await has run — refuse
+// loudly instead of shipping a silently half-applied VM; polyfill top
+// levels must settle synchronously (the register_polyfill contract).
+// Frees j_result on every path.
+static void finish_polyfill_load(VMData *data, JSValue j_result)
+{
+  if (JS_IsException(j_result))
+  {
+    to_rb_value(data->context, j_result); // raises
+    return;
+  }
+
+  JSPromiseStateEnum state = JS_PromiseState(data->context, j_result);
+  if (state == JS_PROMISE_REJECTED)
+  {
+    JSValue j_reason = JS_PromiseResult(data->context, j_result);
+    JS_FreeValue(data->context, j_result);
+    JS_Throw(data->context, j_reason); // consumes j_reason
+    to_rb_value(data->context, JS_EXCEPTION); // raises
+    return;
+  }
+  if (state == JS_PROMISE_PENDING)
+  {
+    JS_FreeValue(data->context, j_result);
+    VALUE r_msg = rb_str_new2("polyfill top level must settle synchronously: top-level await leaves the load pending and the polyfill silently half-applied");
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
+  }
+
+  JS_FreeValue(data->context, j_result);
+}
+
 static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 {
   VALUE r_opts;
@@ -1192,22 +1229,19 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
   {
-    JSValue j_polyfillFileResult = load_polyfill_bytecode(data, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, false);
-    JS_FreeValue(data->context, j_polyfillFileResult);
+    finish_polyfill_load(data, load_polyfill_bytecode(data, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, false));
 
     quickjsrb_init_file_proxy(data);
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillEncodingId))))
   {
-    JSValue j_polyfillEncodingResult = load_polyfill_bytecode(data, &qjsc_polyfill_encoding_min, qjsc_polyfill_encoding_min_size, false);
-    JS_FreeValue(data->context, j_polyfillEncodingResult);
+    finish_polyfill_load(data, load_polyfill_bytecode(data, &qjsc_polyfill_encoding_min, qjsc_polyfill_encoding_min_size, false));
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillUrlId))))
   {
-    JSValue j_polyfillUrlResult = load_polyfill_bytecode(data, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size, false);
-    JS_FreeValue(data->context, j_polyfillUrlResult);
+    finish_polyfill_load(data, load_polyfill_bytecode(data, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size, false));
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillCryptoId))))
@@ -1752,25 +1786,7 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
     j_result = job.result;
   }
 
-  if (JS_IsException(j_result))
-    return to_rb_value(data->context, j_result); // raises
-
-  // The compiled bytecode is async-wrapped (JS_EVAL_FLAG_ASYNC), so a
-  // top-level throw doesn't come back as JS_EXCEPTION — it comes back as
-  // a rejected promise. Surface it instead of silently shipping a VM
-  // whose polyfill half-ran. Re-throwing the reason routes it through
-  // to_rb_value's standard exception path, so interrupted/OOM mapping,
-  // oom_poisoned latching, and the on_log error dispatch all behave
-  // exactly as for a synchronous throw.
-  if (JS_PromiseState(data->context, j_result) == JS_PROMISE_REJECTED)
-  {
-    JSValue j_reason = JS_PromiseResult(data->context, j_result);
-    JS_FreeValue(data->context, j_result);
-    JS_Throw(data->context, j_reason); // consumes j_reason
-    return to_rb_value(data->context, JS_EXCEPTION); // raises
-  }
-
-  JS_FreeValue(data->context, j_result);
+  finish_polyfill_load(data, j_result); // raises unless settled fulfilled
   return Qnil;
 }
 
