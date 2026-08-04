@@ -376,6 +376,68 @@ vm.eval_code("get_file().size")          #=> Integer (byte size)
 vm.eval_code("await get_file().text()") #=> file content as String
 ```
 
+#### `Quickjs::VM#define_const` / `#define_let` / `#define_var`: 📥 Pass Ruby values into JS
+
+Expose a Ruby value to JS without interpolating it into your source. You pick the binding form, and it behaves exactly as the matching JavaScript declaration does:
+
+```rb
+vm = Quickjs::VM.new
+vm.define_const(:user, { name: 'Itadori', tags: ['strong', 'kind'] })
+
+vm.eval_code("user.name + ': ' + user.tags.join(', ')") #=> "Itadori: strong, kind"
+```
+
+| | JS can reassign it | Redeclaring it in JS | On `globalThis` |
+| --- | --- | --- | --- |
+| `define_const` | no, raises `Quickjs::TypeError` | `Quickjs::SyntaxError` | no |
+| `define_let` | yes | `Quickjs::SyntaxError` | no |
+| `define_var` | yes | allowed | **yes** |
+
+Reach for `define_var` when the JS you're running expects a global to already exist — a third-party bundle reading `globalThis.APP_CONFIG`, for instance. It's the only one of the three that's visible there:
+
+```rb
+vm.define_var(:APP_CONFIG, { retries: 3 })
+
+vm.eval_code('globalThis.APP_CONFIG.retries') #=> 3
+```
+
+Because these are real declarations rather than property assignments, a colliding declaration in your JS is a loud error instead of a silent shadow:
+
+```rb
+vm.define_const(:user, 1)
+vm.eval_code('let user = 2;') #=> raise Quickjs::SyntaxError ("redeclaration of 'user'")
+```
+
+Defining an existing `let` or `var` again assigns to it. A `const` can't be redefined, and neither can a name switch binding form:
+
+```rb
+vm.define_let(:counter, 1)
+vm.define_let(:counter, 2)
+vm.eval_code('counter')       #=> 2
+
+vm.define_const(:user, 1)
+vm.define_const(:user, 2)     #=> raise ArgumentError
+vm.define_var(:counter, 3)    #=> raise ArgumentError (already defined as a let)
+```
+
+The name is a `String` or `Symbol` and comes back as a `Symbol`. It must be a valid JavaScript identifier and not a reserved word.
+
+Values are converted the same way as elsewhere in the gem — `Hash`, `Array`, `String`, numerics, `true`/`false`/`nil`, plus `Quickjs::Value::UNDEFINED` and `Quickjs::Value::NAN`. Anything else raises `TypeError` rather than being silently stringified:
+
+```rb
+vm.define_const(:at, Time.now) #=> raise TypeError
+```
+
+The value is a snapshot taken when you define it, not a live reference. Mutating the Ruby object afterwards won't change what JS sees. Use [`define_function`](#quickjsvmdefine_function--define-a-global-function-for-js-by-ruby) when you want JS to read the current Ruby value on every access:
+
+```rb
+config = { retries: 3 }
+vm.define_function('config') { config }
+
+config[:retries] = 5
+vm.eval_code('config().retries') #=> 5
+```
+
 #### `Quickjs::VM#on_log`: 📡 Handle console logs in real time
 
 Register a block to be called for each `console.(log|info|debug|warn|error)` call.
