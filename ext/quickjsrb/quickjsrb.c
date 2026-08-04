@@ -1135,6 +1135,8 @@ static JSValue load_polyfill_bytecode(VMData *data, const uint8_t *buf, size_t b
 // drain the job queue, so nothing past the first await has run — refuse
 // loudly instead of shipping a silently half-applied VM; polyfill top
 // levels must settle synchronously (the register_polyfill contract).
+// That refusal reuses NoAwaitError, the same class eval_code raises for
+// a promise left unawaited at the top level.
 // Frees j_result on every path.
 static void finish_polyfill_load(VMData *data, JSValue j_result)
 {
@@ -1157,7 +1159,7 @@ static void finish_polyfill_load(VMData *data, JSValue j_result)
   {
     JS_FreeValue(data->context, j_result);
     VALUE r_msg = rb_str_new2("polyfill top level must settle synchronously: top-level await leaves the load pending and the polyfill silently half-applied");
-    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_NO_AWAIT_ERROR), rb_intern("new"), 2, r_msg, Qnil));
   }
 
   JS_FreeValue(data->context, j_result);

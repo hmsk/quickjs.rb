@@ -430,7 +430,7 @@ Quickjs.register_polyfill(
 
 The first VM with a given polyfill pays the parse cost (the source is compiled to QuickJS bytecode on a disposable VM with a generous timeout); subsequent VMs reuse the cached bytecode. The polyfill body runs without consuming the user VM's `timeout_msec` budget — that's reserved for user code.
 
-The polyfill's top level must settle synchronously — no top-level `await`. `VM.new(features:)` guarantees a usable polyfill on return, but loads don't drain the job queue, so nothing past the first `await` would have run by then. A polyfill left pending (and any top-level throw) raises a `Quickjs::RuntimeError` naming the feature at construction, rather than handing back a VM with the polyfill silently half-applied.
+The polyfill's top level must settle synchronously — no top-level `await`. `VM.new(features:)` guarantees a usable polyfill on return, but loads don't drain the job queue, so nothing past the first `await` would have run by then. A polyfill left pending raises a `Quickjs::NoAwaitError`, and any top-level throw raises the matching `Quickjs::RuntimeError` subclass, both naming the feature at construction, rather than handing back a VM with the polyfill silently half-applied.
 
 Intl APIs (Collator, DateTimeFormat, NumberFormat, PluralRules, Locale, etc.) live in a separate companion gem: [`quickjs-polyfill-intl`](https://github.com/hmsk/quickjs-polyfill-intl). Granular, dependency-aware, opt-in per API.
 
