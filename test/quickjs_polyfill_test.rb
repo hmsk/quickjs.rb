@@ -664,3 +664,17 @@ describe "PolyfillCrypto" do
     end
   end
 end
+
+# A bundled polyfill load that fails partway (here: OOM under a tight
+# memory_limit) used to have its result freed unchecked, so VM.new handed
+# back a VM with the polyfill's globals missing and the failure only
+# surfaced later, inside unrelated user code. Bundled loads go through the
+# same settle check as registered ones now.
+describe "bundled polyfill load failure" do
+  it "raises from VM.new instead of returning a half-applied VM" do
+    err = _ { ::Quickjs::VM.new(memory_limit: 80_000, features: [::Quickjs::POLYFILL_ENCODING]) }
+      .must_raise Quickjs::RuntimeError
+
+    _(err.message).must_match(/out of memory/)
+  end
+end

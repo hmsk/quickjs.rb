@@ -1135,6 +1135,8 @@ static JSValue load_polyfill_bytecode(VMData *data, const uint8_t *buf, size_t b
 // drain the job queue, so nothing past the first await has run — refuse
 // loudly instead of shipping a silently half-applied VM; polyfill top
 // levels must settle synchronously (the register_polyfill contract).
+// That refusal reuses NoAwaitError, the same class eval_code raises for
+// a promise left unawaited at the top level.
 // Frees j_result on every path.
 static void finish_polyfill_load(VMData *data, JSValue j_result)
 {
@@ -1157,7 +1159,7 @@ static void finish_polyfill_load(VMData *data, JSValue j_result)
   {
     JS_FreeValue(data->context, j_result);
     VALUE r_msg = rb_str_new2("polyfill top level must settle synchronously: top-level await leaves the load pending and the polyfill silently half-applied");
-    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_NO_AWAIT_ERROR), rb_intern("new"), 2, r_msg, Qnil));
   }
 
   JS_FreeValue(data->context, j_result);
@@ -1227,6 +1229,15 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
         quickjsrb_new_ruby_bridge(data->context, js_quickjsrb_set_timeout, "setTimeout", 2));
   }
 
+  // finish_polyfill_load raises (Ruby longjmp) on a load that fails or
+  // doesn't settle, so nothing holding a JSValue may stay live across the
+  // loads: the free at the bottom of this function would be skipped and
+  // the leaked reference pins its whole object graph past JS_FreeRuntime
+  // (the teardown GC only reclaims what's internally referenced, and the
+  // gc_obj_list assert is compiled out by -DNDEBUG). Drop the global here
+  // and re-acquire it below.
+  JS_FreeValue(data->context, j_global);
+
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
   {
     finish_polyfill_load(data, load_polyfill_bytecode(data, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, false));
@@ -1243,6 +1254,8 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   {
     finish_polyfill_load(data, load_polyfill_bytecode(data, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size, false));
   }
+
+  j_global = JS_GetGlobalObject(data->context);
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillCryptoId))))
   {

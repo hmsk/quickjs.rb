@@ -15,7 +15,7 @@ module Quickjs
   # The polyfill's top level must settle synchronously — no top-level
   # await. `VM.new(features:)` promises a usable polyfill on return, but
   # loads never drain the job queue, so nothing past the first await
-  # would have run by then; a pending load raises Quickjs::RuntimeError
+  # would have run by then; a pending load raises Quickjs::NoAwaitError
   # instead of handing back a silently half-applied VM.
   #
   # Re-registering a name replaces the entry wholesale, lock included: a

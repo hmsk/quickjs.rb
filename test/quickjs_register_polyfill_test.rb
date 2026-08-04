@@ -128,16 +128,31 @@ describe "Quickjs.register_polyfill" do
     _(err.message).must_match(/polyfill exploded/)
   end
 
+  # _apply_registered_polyfills re-raises with the feature name prefixed,
+  # since the C layer only sees bytecode and a VM can enable several
+  # polyfills. `raise e, msg` clones rather than building a fresh error,
+  # so everything the original carried has to survive the prefixing.
+  it 'keeps the JS error class, js_name and JS backtrace when naming the feature' do
+    Quickjs.register_polyfill(@feature, source: 'throw new TypeError("polyfill exploded");')
+
+    err = _ { Quickjs::VM.new(features: [@feature]) }.must_raise Quickjs::TypeError
+    _(err.message).must_equal "#{@feature}: polyfill exploded"
+    _(err.js_name).must_equal 'TypeError'
+    _(err.backtrace.first).must_match(/#{@feature}:1/)
+  end
+
   # Loads never drain the job queue, so nothing past a top-level await has
   # run when VM.new returns — the load used to report success with the
   # polyfill's globals missing (and a throw behind the await, the same
   # PENDING shape at load time, was swallowed outright). PENDING is now an
-  # error: registered polyfill top-levels must settle synchronously. The
-  # message names the offending feature, since a VM can enable several.
+  # error: registered polyfill top-levels must settle synchronously. It
+  # reuses NoAwaitError, the class eval_code raises for a promise left
+  # unawaited at the top level, and the message names the offending
+  # feature, since a VM can enable several.
   it 'raises when the polyfill uses top-level await' do
     Quickjs.register_polyfill(@feature, source: 'await 0; throw new TypeError("never surfaces");')
 
-    err = _ { Quickjs::VM.new(features: [@feature]) }.must_raise Quickjs::RuntimeError
+    err = _ { Quickjs::VM.new(features: [@feature]) }.must_raise Quickjs::NoAwaitError
     _(err.message).must_match(/#{@feature}.*settle synchronously/)
   end
 
