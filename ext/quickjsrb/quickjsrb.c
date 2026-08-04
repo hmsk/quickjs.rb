@@ -1060,35 +1060,41 @@ static JSValue js_console_error(JSContext *ctx, JSValueConst this, int argc, JSV
   return js_quickjsrb_log(ctx, argc, argv, "error");
 }
 
-// Run polyfill bytecode load + eval without the GVL so a background
-// warmer thread can populate a VM pool in parallel with the main thread
-// on multi-core hosts.
+// Run bytecode load + eval without the GVL so background threads (warmer
+// pools populating VMs, per-thread Runnable#run) proceed in parallel with
+// the main thread on multi-core hosts.
 //
-// Two call sites use this helper:
+// Three call sites use the run_bytecode_release_gvl wrapper below:
 //
-//   1. vm_m_initialize — pre-built bytecode (file / encoding / url) embedded
-//      as static C constants. setTimeout (FEATURE_TIMEOUT) and the File
-//      proxy (POLYFILL_FILE, registered ahead of the encoding/url loads)
-//      can already be live here, so the release is safe not because
-//      nothing is registered, but because a load never runs bridge code:
-//      js_quickjsrb_set_timeout only enqueues (pure C; the Ruby-calling
-//      js_delay_and_eval_job runs later, under a GVL-held drain/await), a
-//      load never drains the job queue, and the bundled polyfill
-//      top-levels (built from polyfills/src in this repo) don't call the
-//      File proxy. That audit is the invariant to preserve when rebuilding
-//      bundles or reordering vm_m_initialize.
+//   1. vm_m_initialize — pre-built polyfill bytecode (file / encoding /
+//      url) embedded as static C constants. setTimeout (FEATURE_TIMEOUT)
+//      and the File proxy (POLYFILL_FILE, registered ahead of the
+//      encoding/url loads) can already be live here, so the release is
+//      safe not because nothing is registered, but because a load never
+//      runs bridge code: js_quickjsrb_set_timeout only enqueues (pure C;
+//      the Ruby-calling js_delay_and_eval_job runs later, under a
+//      GVL-held drain/await), a load never drains the job queue, and the
+//      bundled polyfill top-levels (built from polyfills/src in this
+//      repo) don't call the File proxy. That audit is the invariant to
+//      preserve when rebuilding bundles or reordering vm_m_initialize.
 //
-//   2. vm_m_loadPolyfillBytecode — bytecode from a Ruby String, copied to a
-//      malloc'd buffer first so the buffer survives a GC compact. This
+//   2. vm_m_loadPolyfillBytecode — bytecode from a Ruby String, copied to
+//      a malloc'd buffer first so the buffer survives a GC compact. This
 //      bytecode is arbitrary (registered by companion gems), so no audit
 //      applies: the caller gates the release on can_eval_gvl_free() to
 //      bail whenever a direct-rb_funcall bridge (File proxy, crypto, …)
 //      is installed; console.log is covered by js_quickjsrb_log's
 //      gvl_released_js re-acquire either way.
 //
-// load_polyfill_bytecode delegates to the shared GVL-release region (see
-// run_gvl_release_region) so every caller inherits the re-acquire safety,
-// the dispose! handshake, and interrupt-proof cleanup automatically.
+//   3. vm_m_evalBytecode — user bytecode via Runnable#run, same gate and
+//      buffer copy as 2, but with the awaiting runner: js_std_await's job
+//      drain is bridge-free under the gate, the same argument eval_code's
+//      released path relies on.
+//
+// run_bytecode_release_gvl delegates to the shared GVL-release region
+// (see run_gvl_release_region) so every caller inherits the re-acquire
+// safety, the dispose! handshake, and interrupt-proof cleanup
+// automatically.
 struct bytecode_load_job
 {
   JSContext *ctx;
@@ -1098,8 +1104,8 @@ struct bytecode_load_job
 };
 
 // Shared bytecode read + eval core — pure C over JSValues, MUST NOT touch
-// the Ruby VM (the polyfill release path runs it without the GVL; the
-// GVL-held call sites invoke it directly).
+// the Ruby VM (the polyfill and bytecode-run release paths run it without
+// the GVL; the GVL-held call sites invoke it directly).
 static void *bytecode_load_job_run(void *p)
 {
   struct bytecode_load_job *job = p;
@@ -1116,14 +1122,37 @@ static void *bytecode_load_job_run(void *p)
   return NULL;
 }
 
-// take_ownership: true when buf is malloc'd storage that the release region
-// should free on every exit path (including async-interrupt unwinds); false
-// when buf points at static bytecode.
-static JSValue load_polyfill_bytecode(VMData *data, const uint8_t *buf, size_t buf_len, bool take_ownership)
+// Awaiting variant of the core, for vm_m_evalBytecode: js_std_await drains
+// the job queue until the eval's promise settles. Same MUST-NOT-touch-Ruby
+// constraint — on a pure VM (can_eval_gvl_free) every drained job is
+// bridge-free JS, the same argument eval_code's released path relies on.
+// js_std_await passes a non-promise — including an exception preserved by
+// the JS_ReadObject short-circuit — through untouched.
+static void *bytecode_eval_await_job_run(void *p)
+{
+  struct bytecode_load_job *job = p;
+  bytecode_load_job_run(job);
+  job->result = js_std_await(job->ctx, job->result);
+  return NULL;
+}
+
+// job_run: bytecode_load_job_run (load only) or bytecode_eval_await_job_run
+// (load + await). take_ownership: true when buf is malloc'd storage that
+// the release region should free on every exit path (including
+// async-interrupt unwinds); false when buf points at static bytecode.
+static JSValue run_bytecode_release_gvl(VMData *data, void *(*job_run)(void *), const uint8_t *buf, size_t buf_len, bool take_ownership)
 {
   struct bytecode_load_job job = {data->context, buf, buf_len, JS_UNDEFINED};
-  run_gvl_release_region(data, bytecode_load_job_run, &job, &job.result, take_ownership ? (uint8_t *)buf : NULL, NULL);
+  run_gvl_release_region(data, job_run, &job, &job.result, take_ownership ? (uint8_t *)buf : NULL, NULL);
   return job.result;
+}
+
+// Every polyfill load takes the load-only runner; naming that keeps the
+// call sites, which pass their result straight to finish_polyfill_load,
+// down to one line.
+static JSValue load_polyfill_bytecode(VMData *data, const uint8_t *buf, size_t buf_len, bool take_ownership)
+{
+  return run_bytecode_release_gvl(data, bytecode_load_job_run, buf, buf_len, take_ownership);
 }
 
 // Shared settle check for every polyfill load's result, bundled or
@@ -1265,7 +1294,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   // console and the remaining host callbacks are registered below this
   // point. setTimeout and the File proxy above predate the GVL-released
   // polyfill loads only under the audit described at
-  // load_polyfill_bytecode — re-read it before reordering this function
+  // run_bytecode_release_gvl — re-read it before reordering this function
   // or registering anything else above the loads.
   JSValue j_console = JS_NewObject(data->context);
   JS_SetPropertyStr(
@@ -1558,11 +1587,7 @@ static VALUE bytecode_load_body(VALUE p)
 
 static VALUE bytecode_eval_await_body(VALUE p)
 {
-  struct bytecode_load_job *job = (struct bytecode_load_job *)p;
-  bytecode_load_job_run(job);
-  // js_std_await passes a non-promise — including an exception preserved by
-  // the JS_ReadObject short-circuit — through untouched.
-  job->result = js_std_await(job->ctx, job->result);
+  bytecode_eval_await_job_run((struct bytecode_load_job *)p);
   return Qnil;
 }
 
@@ -1714,21 +1739,38 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
 
   arm_eval_timer(data);
 
-  // GVL held: user bytecode may invoke Ruby-bridged callbacks registered
-  // via define_function, which call Ruby APIs. A pure VM could release
-  // here with the same can_eval_gvl_free gate + buffer copy eval_code
-  // uses — left GVL-held deliberately until bytecode eval shows up as a
-  // parallelism bottleneck.
-  struct bytecode_load_job job = {data->context,
-                                  (const uint8_t *)RSTRING_PTR(r_bytecode),
-                                  (size_t)RSTRING_LEN(r_bytecode),
-                                  JS_UNDEFINED};
-  run_held_js_entry(data, bytecode_eval_await_body, (VALUE)&job);
-  if (JS_IsException(job.result))
-    return to_rb_value(data->context, job.result); // raises
+  JSValue j_result;
+  if (can_eval_gvl_free(data))
+  {
+    // Pure VM: no JS→Ruby bridge can fire during the run or the await's
+    // job drain, so run load + await with the GVL released — warmer pools
+    // executing one compiled bundle across per-thread VMs recover
+    // multi-core scaling instead of serializing every run through the
+    // GVL. The bytecode is copied because RSTRING_PTR is GC-movable
+    // while the GVL is released.
+    size_t buf_len;
+    uint8_t *buf = (uint8_t *)copy_rstring_to_owned_buffer(r_bytecode, &buf_len, false);
+    j_result = run_bytecode_release_gvl(data, bytecode_eval_await_job_run, buf, buf_len, true);
+  }
+  else
+  {
+    // Bridged path: user bytecode may invoke Ruby-bridged callbacks
+    // registered via define_function, which call Ruby APIs — keep the GVL
+    // held. With it held there's no compaction risk, so RSTRING_PTR is
+    // usable without a copy.
+    struct bytecode_load_job job = {data->context,
+                                    (const uint8_t *)RSTRING_PTR(r_bytecode),
+                                    (size_t)RSTRING_LEN(r_bytecode),
+                                    JS_UNDEFINED};
+    run_held_js_entry(data, bytecode_eval_await_body, (VALUE)&job);
+    j_result = job.result;
+  }
 
-  JSValue j_returnedValue = JS_GetPropertyStr(data->context, job.result, "value");
-  JS_FreeValue(data->context, job.result);
+  if (JS_IsException(j_result))
+    return to_rb_value(data->context, j_result); // raises
+
+  JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_result, "value");
+  JS_FreeValue(data->context, j_result);
   return to_rb_return_value(data->context, j_returnedValue);
 }
 
