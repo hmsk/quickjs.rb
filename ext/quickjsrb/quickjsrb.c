@@ -1147,6 +1147,14 @@ static JSValue run_bytecode_release_gvl(VMData *data, void *(*job_run)(void *), 
   return job.result;
 }
 
+// Every polyfill load takes the load-only runner; naming that keeps the
+// call sites, which pass their result straight to finish_polyfill_load,
+// down to one line.
+static JSValue load_polyfill_bytecode(VMData *data, const uint8_t *buf, size_t buf_len, bool take_ownership)
+{
+  return run_bytecode_release_gvl(data, bytecode_load_job_run, buf, buf_len, take_ownership);
+}
+
 // Shared settle check for every polyfill load's result, bundled or
 // registered. The compiled bytecode is async-wrapped (JS_EVAL_FLAG_ASYNC),
 // so a top-level throw comes back as a rejected promise, not JS_EXCEPTION;
@@ -1261,19 +1269,19 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillFileId))))
   {
-    finish_polyfill_load(data, run_bytecode_release_gvl(data, bytecode_load_job_run, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, false));
+    finish_polyfill_load(data, load_polyfill_bytecode(data, &qjsc_polyfill_file_min, qjsc_polyfill_file_min_size, false));
 
     quickjsrb_init_file_proxy(data);
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillEncodingId))))
   {
-    finish_polyfill_load(data, run_bytecode_release_gvl(data, bytecode_load_job_run, &qjsc_polyfill_encoding_min, qjsc_polyfill_encoding_min_size, false));
+    finish_polyfill_load(data, load_polyfill_bytecode(data, &qjsc_polyfill_encoding_min, qjsc_polyfill_encoding_min_size, false));
   }
 
   if (RTEST(rb_funcall(r_features, rb_intern("include?"), 1, QUICKJSRB_SYM(featurePolyfillUrlId))))
   {
-    finish_polyfill_load(data, run_bytecode_release_gvl(data, bytecode_load_job_run, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size, false));
+    finish_polyfill_load(data, load_polyfill_bytecode(data, &qjsc_polyfill_url_min, qjsc_polyfill_url_min_size, false));
   }
 
   j_global = JS_GetGlobalObject(data->context);
@@ -1816,7 +1824,7 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   if (can_eval_gvl_free(data))
   {
     uint8_t *buf = (uint8_t *)copy_rstring_to_owned_buffer(r_bytecode, &buf_len, false);
-    j_result = run_bytecode_release_gvl(data, bytecode_load_job_run, buf, buf_len, true);
+    j_result = load_polyfill_bytecode(data, buf, buf_len, true);
   }
   else
   {
