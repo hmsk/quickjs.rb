@@ -287,6 +287,27 @@ describe Quickjs do
     end
   end
 
+  describe "EvalGlobals" do
+    it "exposes globals to evaluated code" do
+      result = ::Quickjs.eval_code("a + b", globals: { a: 1, b: 2 })
+
+      _(result).must_equal 3
+    end
+
+    it "converts nested Ruby values" do
+      result = ::Quickjs.eval_code(
+        "user.name + ': ' + tags.join(', ')",
+        globals: { user: { name: "Itadori" }, tags: ["strong", "kind"] }
+      )
+
+      _(result).must_equal "Itadori: strong, kind"
+    end
+
+    it "rejects globals that are not a Hash" do
+      _ { ::Quickjs.eval_code("1", globals: [1, 2]) }.must_raise TypeError
+    end
+  end
+
   describe "SyncEval" do
     it "evaluates synchronously when async: false" do
       vm = Quickjs::VM.new

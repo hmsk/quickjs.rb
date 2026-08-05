@@ -1213,6 +1213,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   VALUE r_timeout_msec = rb_hash_aref(r_opts, ID2SYM(rb_intern("timeout_msec")));
   if (NIL_P(r_timeout_msec))
     r_timeout_msec = UINT2NUM(100);
+  VALUE r_globals = rb_hash_aref(r_opts, ID2SYM(rb_intern("globals")));
 
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
@@ -1227,6 +1228,10 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   register_module_loader_funcs(data);
   JS_SetHostPromiseRejectionTracker(runtime, quickjsrb_promise_rejection_tracker, NULL);
   js_std_init_handlers(runtime);
+
+  // Validate after handler initialization so a TypeError can safely unwind through vm_free.
+  if (!NIL_P(r_globals))
+    Check_Type(r_globals, T_HASH);
 
   JSValue j_global = JS_GetGlobalObject(data->context);
 
@@ -1314,6 +1319,13 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
       JS_NewCFunction(data->context, js_console_error, "error", 1));
 
   JS_SetPropertyStr(data->context, j_global, "console", j_console);
+
+  if (!NIL_P(r_globals))
+  {
+    RbHashToJsArg globals = {data->context, j_global};
+    rb_hash_foreach(r_globals, rb_hash_entry_to_js, (VALUE)&globals);
+  }
+
   JS_FreeValue(data->context, j_global);
 
   return r_self;

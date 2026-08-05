@@ -26,6 +26,7 @@ Quickjs.eval_code('const fn = (n, pow) => n ** pow; fn(2,8);') # => 256
 Quickjs.eval_code('const fn = (name) => `Hi, ${name}!`; fn("Itadori");') # => "Hi, Itadori!"
 Quickjs.eval_code("[1,2,3]") #=> [1, 2, 3]
 Quickjs.eval_code("({ a: '1', b: 1 })") #=> { 'a' => '1', 'b' => 1 }
+Quickjs.eval_code('a + b', globals: { a: 1, b: 2 }) #=> 3
 ```
 
 <details>
@@ -45,6 +46,14 @@ Quickjs.eval_code(code,
 ```rb
 # Label shown in JS stack traces (default: "<code>")
 Quickjs.eval_code(code, filename: 'my_script.js')
+```
+
+#### Globals
+
+Ruby values can be exposed as JavaScript globals without interpolating them into the source:
+
+```rb
+Quickjs.eval_code('user.name', globals: { user: { name: 'Itadori' } }) #=> "Itadori"
 ```
 
 #### Timeout

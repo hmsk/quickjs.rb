@@ -21,7 +21,7 @@ module Quickjs
   end
 
   class VM
-    def initialize: (?features: Array[Symbol], ?memory_limit: Integer, ?max_stack_size: Integer, ?timeout_msec: Integer) -> void
+    def initialize: (?features: Array[Symbol], ?memory_limit: Integer, ?max_stack_size: Integer, ?timeout_msec: Integer, ?globals: Hash[String | Symbol, untyped]) -> void
 
     def eval_code: (String code, ?async: bool, ?filename: String) -> untyped
 
