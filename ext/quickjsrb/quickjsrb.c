@@ -584,6 +584,14 @@ static char *quickjsrb_module_normalize(JSContext *ctx, const char *base_name, c
   if (!NIL_P(r_cached_canonical))
     return js_strdup(ctx, StringValueCStr(r_cached_canonical));
 
+  // A preloaded name is already in ctx->loaded_modules, so js_find_loaded_module
+  // will hand back that module the moment we return the name. Resolving it here
+  // keeps the user's loader out of it entirely: it is never asked for a module
+  // the VM was constructed with, the way a browser's module map short-circuits
+  // a fetch.
+  if (RTEST(rb_hash_aref(data->preloaded_module_names, r_specifier)))
+    return js_strdup(ctx, StringValueCStr(r_specifier));
+
   struct module_loader_call_args args = {data->module_loader, r_specifier, r_importer};
   int state;
   VALUE r_return = rb_protect(r_module_loader_call, (VALUE)&args, &state);
@@ -630,7 +638,13 @@ static char *quickjsrb_module_normalize(JSContext *ctx, const char *base_name, c
     return NULL;
   }
 
-  rb_hash_aset(data->module_source_cache, r_canonical, r_source);
+  // The loader can also land on a preloaded module the long way round: an
+  // importmap-style scope maps a bare specifier to a canonical that was
+  // preloaded. QuickJS finds it in ctx->loaded_modules and never calls the
+  // load hook, so stashing the source it just handed us would leave an entry
+  // nothing ever clears.
+  if (!RTEST(rb_hash_aref(data->preloaded_module_names, r_canonical)))
+    rb_hash_aset(data->module_source_cache, r_canonical, r_source);
   rb_hash_aset(data->module_resolution_cache, r_key, r_canonical);
 
   return js_strdup(ctx, StringValueCStr(r_canonical));
@@ -1721,6 +1735,169 @@ static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
   return rb_obj_freeze(r_bytecode);
 }
 
+// Stands in for the real loader while compiling a module to bytecode.
+//
+// __JS_EvalInternal runs js_resolve_module before it honors
+// JS_EVAL_FLAG_COMPILE_ONLY, so compiling `import { x } from 'dep'` tries to
+// load 'dep' — which would make a module impossible to compile without its
+// whole dependency graph on hand. Nothing about that resolution survives:
+// JS_WriteModule stores req_module_entries as the specifier written in the
+// source, never the module it resolved to, and export names aren't checked
+// until js_link_module at evaluation time. So an empty stub satisfies the
+// compile and leaves no trace in the blob; the importing VM resolves the real
+// dependency through its own loader.
+//
+// The stubs do land in the compiling context's module map, so this must only
+// ever run on a throwaway VM — otherwise a later real import of 'dep' on that
+// VM would find the empty stub.
+static JSModuleDef *quickjsrb_stub_module_loader(JSContext *ctx, const char *module_name, void *opaque, JSValueConst attributes)
+{
+  static const char *empty_module = "export {};";
+  JSValue j_stub = JS_Eval(ctx, empty_module, strlen(empty_module), module_name,
+                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  if (JS_IsException(j_stub))
+    return NULL;
+
+  JSModuleDef *m = JS_VALUE_GET_PTR(j_stub);
+  JS_FreeValue(ctx, j_stub);
+  return m;
+}
+
+// Compiles source as an ES module and serializes it. Unlike vm_m_compile,
+// `name` is not a debug label: js_read_module rebuilds the JSModuleDef under
+// the name baked in here, so it is the module's identity in every VM that
+// later reads this blob. Quickjs.register_module keys the registry by that
+// same string, which is what keeps the two from drifting apart.
+//
+// Stays private, and must: the stub loader below is swapped in at the
+// *runtime* level for the duration, so this assumes exclusive use of the VM.
+// Quickjs._compile_registered_module honors that by compiling on a disposable
+// VM it owns; exposing this publicly would let a compile race an import on a
+// shared VM and resolve it against stubs.
+static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_disposed(data);
+  Check_Type(r_code, T_STRING);
+  Check_Type(r_name, T_STRING);
+
+  arm_eval_timer(data);
+
+  JS_SetModuleLoaderFunc2(JS_GetRuntime(data->context), NULL, quickjsrb_stub_module_loader,
+                          js_module_check_attributes, NULL);
+  JSValue j_mod = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code),
+                          StringValueCStr(r_name),
+                          JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  register_module_loader_funcs(data);
+  if (JS_IsException(j_mod))
+    return to_rb_value(data->context, j_mod); // raises
+
+  size_t out_len;
+  uint8_t *out_buf = JS_WriteObject(data->context, &out_len, j_mod, JS_WRITE_OBJ_BYTECODE);
+  JS_FreeValue(data->context, j_mod);
+  if (out_buf == NULL)
+  {
+    VALUE r_msg = rb_str_new2("failed to serialize compiled module bytecode");
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
+  }
+
+  VALUE r_bytecode = rb_str_new((const char *)out_buf, (long)out_len);
+  rb_enc_associate(r_bytecode, rb_ascii8bit_encoding());
+  js_free(data->context, out_buf);
+  return rb_obj_freeze(r_bytecode);
+}
+
+// Reads module bytecode into this context. The read registers the JSModuleDef
+// in ctx->loaded_modules but does not evaluate it: evaluation still happens on
+// first import, and js_resolve_module recurses into it from the importer, so
+// no loader hook is involved for a preloaded name.
+//
+// The baked-in name is recorded in preloaded_module_names for the normalize
+// hook's short-circuit, and returned so the caller can confirm it.
+//
+// `name` is the name the caller expects the blob to carry. Reading the same
+// module into a context twice can't be undone — js_read_module appends a
+// second JSModuleDef under the same name, js_find_loaded_module returns the
+// first one it walks past, and the orphan holds its bytecode until the
+// context is freed — so a name already preloaded here skips the read
+// entirely. That also makes this idempotent, which the caller relies on: it
+// is legitimate to preload the same module into a VM more than once.
+static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_name)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_disposed(data);
+  check_oom_poisoned(data);
+
+  // Strict String rather than StringValue's coercion, matching
+  // vm_m_evalBytecode: bytecode is a binary blob, so there's no sensible
+  // to_str-able stand-in for one, and refusing the coercion means no yield
+  // point can open up between the checks above and the context access below.
+  if (!RB_TYPE_P(r_bytecode, T_STRING))
+  {
+    VALUE r_class = rb_class_name(CLASS_OF(r_bytecode));
+    rb_raise(rb_eTypeError, "Bytecode must be a String, got %s", StringValueCStr(r_class));
+  }
+  Check_Type(r_name, T_STRING);
+
+  if (RTEST(rb_hash_aref(data->preloaded_module_names, r_name)))
+    return r_name;
+
+  JSValue j_mod = JS_ReadObject(data->context, (const uint8_t *)RSTRING_PTR(r_bytecode),
+                                (size_t)RSTRING_LEN(r_bytecode), JS_READ_OBJ_BYTECODE);
+  if (JS_IsException(j_mod))
+    return to_rb_value(data->context, j_mod); // raises
+
+  if (JS_VALUE_GET_TAG(j_mod) != JS_TAG_MODULE)
+  {
+    JS_FreeValue(data->context, j_mod);
+    rb_raise(rb_eTypeError, "bytecode is not an ES module (compile it with type: :module)");
+  }
+
+  js_module_set_import_meta(data->context, j_mod, FALSE, FALSE);
+
+  JSAtom j_baked = JS_GetModuleName(data->context, JS_VALUE_GET_PTR(j_mod));
+  const char *baked = JS_AtomToCString(data->context, j_baked);
+  VALUE r_baked = rb_str_new_cstr(baked ? baked : "");
+  if (baked)
+    JS_FreeCString(data->context, baked);
+  JS_FreeAtom(data->context, j_baked);
+
+  // The module def is owned by ctx->loaded_modules (js_new_module_def leaves
+  // it there with ref_count 1); JS_NewModuleValue dup'd it for us.
+  JS_FreeValue(data->context, j_mod);
+
+  // A blob whose baked name disagrees with the name it was filed under would
+  // be resolvable only by the baked one, so the guard above would never see
+  // it again and every preload would read another copy. There is no way to
+  // take the read back, so the VM is already polluted: raise and let the
+  // caller discard it.
+  if (!RTEST(rb_str_equal(r_baked, r_name)))
+  {
+    rb_raise(rb_eArgError, "module bytecode is named %"PRIsVALUE", not %"PRIsVALUE,
+             rb_str_inspect(r_baked), rb_str_inspect(r_name));
+  }
+
+  rb_hash_aset(data->preloaded_module_names, rb_str_freeze(r_baked), Qtrue);
+  return r_baked;
+}
+
+// Number of sources the normalize hook is holding for the load hook to pick
+// up. Exposed only so tests can assert the cache doesn't accumulate entries
+// nothing will ever collect: when a loader resolves a specifier onto a
+// preloaded canonical, QuickJS finds the module and never calls the load hook,
+// so a source stashed for that name would sit there for the VM's lifetime.
+static VALUE vm_m_pendingModuleSourceCount(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  return LONG2NUM(RHASH_SIZE(data->module_source_cache));
+}
+
 static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
 {
   VMData *data;
@@ -2307,6 +2484,9 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "initialize", vm_m_initialize, -1);
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, -1);
   rb_define_private_method(r_class_vm, "_compile_to_bytecode", vm_m_compile, -1);
+  rb_define_private_method(r_class_vm, "_compile_module_to_bytecode", vm_m_compileModule, 2);
+  rb_define_private_method(r_class_vm, "_preload_module_bytecode", vm_m_preloadModuleBytecode, 2);
+  rb_define_private_method(r_class_vm, "_pending_module_source_count", vm_m_pendingModuleSourceCount, 0);
   rb_define_private_method(r_class_vm, "_run_bytecode", vm_m_evalBytecode, 1);
   rb_define_private_method(r_class_vm, "_load_polyfill_bytecode", vm_m_loadPolyfillBytecode, 1);
   rb_define_method(r_class_vm, "call", vm_m_callGlobalFunction, -1);

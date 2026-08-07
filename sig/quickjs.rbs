@@ -15,13 +15,15 @@ module Quickjs
 
   def self.register_polyfill: (Symbol name, source: String | ^() -> String, ?init: String?) -> nil
 
+  def self.register_module: (String name, source: String | ^() -> String) -> nil
+
   class Value
     UNDEFINED: Symbol
     NAN: Symbol
   end
 
   class VM
-    def initialize: (?features: Array[Symbol], ?memory_limit: Integer, ?max_stack_size: Integer, ?timeout_msec: Integer) -> void
+    def initialize: (?features: Array[Symbol], ?preload_modules: Array[String], ?memory_limit: Integer, ?max_stack_size: Integer, ?timeout_msec: Integer) -> void
 
     def eval_code: (String code, ?async: bool, ?filename: String) -> untyped
 
