@@ -1829,10 +1829,19 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
-  StringValue(r_bytecode);
-  Check_Type(r_name, T_STRING);
   check_disposed(data);
   check_oom_poisoned(data);
+
+  // Strict String rather than StringValue's coercion, matching
+  // vm_m_evalBytecode: bytecode is a binary blob, so there's no sensible
+  // to_str-able stand-in for one, and refusing the coercion means no yield
+  // point can open up between the checks above and the context access below.
+  if (!RB_TYPE_P(r_bytecode, T_STRING))
+  {
+    VALUE r_class = rb_class_name(CLASS_OF(r_bytecode));
+    rb_raise(rb_eTypeError, "Bytecode must be a String, got %s", StringValueCStr(r_class));
+  }
+  Check_Type(r_name, T_STRING);
 
   if (RTEST(rb_hash_aref(data->preloaded_module_names, r_name)))
     return r_name;

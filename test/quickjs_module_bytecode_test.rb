@@ -44,6 +44,15 @@ describe "module bytecode primitives" do
     }.must_raise Quickjs::SyntaxError
   end
 
+  it "rejects a non-String blob rather than coercing it" do
+    coercible = Object.new
+    def coercible.to_str = 'not bytecode'
+
+    _ {
+      Quickjs::VM.new.send(:_preload_module_bytecode, coercible, 'junk')
+    }.must_raise TypeError
+  end
+
   describe "resolution" do
     before do
       @bytecode = compile_module("export const who = () => 'preloaded';", 'lib')
