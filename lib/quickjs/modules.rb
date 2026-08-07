@@ -58,7 +58,7 @@ module Quickjs
           compiled
         end
       }
-      vm.send(:_preload_module_bytecode, bytecode)
+      vm.send(:_preload_module_bytecode, bytecode, name)
     end
   end
 

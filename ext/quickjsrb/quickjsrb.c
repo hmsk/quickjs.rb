@@ -1815,16 +1815,27 @@ static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
 // no loader hook is involved for a preloaded name.
 //
 // The baked-in name is recorded in preloaded_module_names for the normalize
-// hook's short-circuit, and returned so the Ruby layer can assert it matches
-// the registry key.
-static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode)
+// hook's short-circuit, and returned so the caller can confirm it.
+//
+// `name` is the name the caller expects the blob to carry. Reading the same
+// module into a context twice can't be undone — js_read_module appends a
+// second JSModuleDef under the same name, js_find_loaded_module returns the
+// first one it walks past, and the orphan holds its bytecode until the
+// context is freed — so a name already preloaded here skips the read
+// entirely. That also makes this idempotent, which the caller relies on: it
+// is legitimate to preload the same module into a VM more than once.
+static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_name)
 {
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   StringValue(r_bytecode);
+  Check_Type(r_name, T_STRING);
   check_disposed(data);
   check_oom_poisoned(data);
+
+  if (RTEST(rb_hash_aref(data->preloaded_module_names, r_name)))
+    return r_name;
 
   JSValue j_mod = JS_ReadObject(data->context, (const uint8_t *)RSTRING_PTR(r_bytecode),
                                 (size_t)RSTRING_LEN(r_bytecode), JS_READ_OBJ_BYTECODE);
@@ -1839,18 +1850,30 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode)
 
   js_module_set_import_meta(data->context, j_mod, FALSE, FALSE);
 
-  JSAtom j_name = JS_GetModuleName(data->context, JS_VALUE_GET_PTR(j_mod));
-  const char *name = JS_AtomToCString(data->context, j_name);
-  VALUE r_name = rb_str_new_cstr(name ? name : "");
-  if (name)
-    JS_FreeCString(data->context, name);
-  JS_FreeAtom(data->context, j_name);
-  rb_hash_aset(data->preloaded_module_names, rb_str_freeze(r_name), Qtrue);
+  JSAtom j_baked = JS_GetModuleName(data->context, JS_VALUE_GET_PTR(j_mod));
+  const char *baked = JS_AtomToCString(data->context, j_baked);
+  VALUE r_baked = rb_str_new_cstr(baked ? baked : "");
+  if (baked)
+    JS_FreeCString(data->context, baked);
+  JS_FreeAtom(data->context, j_baked);
 
   // The module def is owned by ctx->loaded_modules (js_new_module_def leaves
   // it there with ref_count 1); JS_NewModuleValue dup'd it for us.
   JS_FreeValue(data->context, j_mod);
-  return r_name;
+
+  // A blob whose baked name disagrees with the name it was filed under would
+  // be resolvable only by the baked one, so the guard above would never see
+  // it again and every preload would read another copy. There is no way to
+  // take the read back, so the VM is already polluted: raise and let the
+  // caller discard it.
+  if (!RTEST(rb_str_equal(r_baked, r_name)))
+  {
+    rb_raise(rb_eArgError, "module bytecode is named %"PRIsVALUE", not %"PRIsVALUE,
+             rb_str_inspect(r_baked), rb_str_inspect(r_name));
+  }
+
+  rb_hash_aset(data->preloaded_module_names, rb_str_freeze(r_baked), Qtrue);
+  return r_baked;
 }
 
 // Number of sources the normalize hook is holding for the load hook to pick
@@ -2453,7 +2476,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, -1);
   rb_define_private_method(r_class_vm, "_compile_to_bytecode", vm_m_compile, -1);
   rb_define_private_method(r_class_vm, "_compile_module_to_bytecode", vm_m_compileModule, 2);
-  rb_define_private_method(r_class_vm, "_preload_module_bytecode", vm_m_preloadModuleBytecode, 1);
+  rb_define_private_method(r_class_vm, "_preload_module_bytecode", vm_m_preloadModuleBytecode, 2);
   rb_define_private_method(r_class_vm, "_pending_module_source_count", vm_m_pendingModuleSourceCount, 0);
   rb_define_private_method(r_class_vm, "_run_bytecode", vm_m_evalBytecode, 1);
   rb_define_private_method(r_class_vm, "_load_polyfill_bytecode", vm_m_loadPolyfillBytecode, 1);

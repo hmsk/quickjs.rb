@@ -20,7 +20,7 @@ describe "module bytecode primitives" do
     _(bytecode).must_be :frozen?
 
     vm = Quickjs::VM.new
-    _(vm.send(:_preload_module_bytecode, bytecode)).must_equal 'lib'
+    _(vm.send(:_preload_module_bytecode, bytecode, 'lib')).must_equal 'lib'
     vm.import(['hi'], filename: 'lib')
 
     _(vm.eval_code('hi()')).must_equal 'hello'
@@ -34,13 +34,13 @@ describe "module bytecode primitives" do
     classic = Quickjs.compile("1 + 1;").to_s
 
     _ {
-      Quickjs::VM.new.send(:_preload_module_bytecode, classic)
+      Quickjs::VM.new.send(:_preload_module_bytecode, classic, 'classic')
     }.must_raise TypeError
   end
 
   it "rejects a blob that isn't bytecode at all" do
     _ {
-      Quickjs::VM.new.send(:_preload_module_bytecode, 'not bytecode')
+      Quickjs::VM.new.send(:_preload_module_bytecode, 'not bytecode', 'junk')
     }.must_raise Quickjs::SyntaxError
   end
 
@@ -51,7 +51,7 @@ describe "module bytecode primitives" do
 
     it "resolves without any module_loader set" do
       vm = Quickjs::VM.new
-      vm.send(:_preload_module_bytecode, @bytecode)
+      vm.send(:_preload_module_bytecode, @bytecode, 'lib')
       vm.import(['who'], filename: 'lib')
 
       _(vm.eval_code('who()')).must_equal 'preloaded'
@@ -64,7 +64,7 @@ describe "module bytecode primitives" do
       vm = Quickjs::VM.new
       asked = []
       vm.module_loader = ->(specifier, _importer) { asked << specifier; nil }
-      vm.send(:_preload_module_bytecode, @bytecode)
+      vm.send(:_preload_module_bytecode, @bytecode, 'lib')
       vm.import(['who'], filename: 'lib')
 
       _(vm.eval_code('who()')).must_equal 'preloaded'
@@ -78,7 +78,7 @@ describe "module bytecode primitives" do
         asked << specifier
         "export const who = () => 'from-loader';"
       }
-      vm.send(:_preload_module_bytecode, @bytecode)
+      vm.send(:_preload_module_bytecode, @bytecode, 'lib')
       vm.import(['who'], filename: 'lib')
 
       _(vm.eval_code('who()')).must_equal 'preloaded'
@@ -90,7 +90,7 @@ describe "module bytecode primitives" do
       vm.module_loader = ->(specifier, _importer) {
         {code: 'export const who = () => "unused";', as: 'lib'} if specifier == 'aliased'
       }
-      vm.send(:_preload_module_bytecode, @bytecode)
+      vm.send(:_preload_module_bytecode, @bytecode, 'lib')
       vm.import(['who'], filename: 'aliased')
 
       _(vm.eval_code('who()')).must_equal 'preloaded'
@@ -120,7 +120,7 @@ describe "module bytecode primitives" do
         seen << [specifier, importer]
         "export const d = () => 'dep';" if specifier == 'dep'
       }
-      vm.send(:_preload_module_bytecode, bytecode)
+      vm.send(:_preload_module_bytecode, bytecode, 'lib')
       vm.import(['combined'], filename: 'lib')
 
       _(vm.eval_code('combined()')).must_equal 'pre+dep'
@@ -132,10 +132,10 @@ describe "module bytecode primitives" do
     bytecode = compile_module("const s = { n: 0 };\nexport const inc = () => ++s.n;", 'counter')
 
     vm1 = Quickjs::VM.new
-    vm1.send(:_preload_module_bytecode, bytecode)
+    vm1.send(:_preload_module_bytecode, bytecode, 'counter')
     vm1.import(['inc'], filename: 'counter')
     vm2 = Quickjs::VM.new
-    vm2.send(:_preload_module_bytecode, bytecode)
+    vm2.send(:_preload_module_bytecode, bytecode, 'counter')
     vm2.import(['inc'], filename: 'counter')
 
     _(vm1.eval_code('inc()')).must_equal 1
@@ -143,11 +143,61 @@ describe "module bytecode primitives" do
     _(vm2.eval_code('inc()')).must_equal 1
   end
 
+  describe "preloading the same module twice" do
+    before do
+      @bytecode = compile_module("const s = { n: 0 };\nexport const inc = () => ++s.n;", 'counter')
+    end
+
+    # js_read_module appends a second JSModuleDef under the same name rather
+    # than replacing or rejecting, and js_find_loaded_module returns the first
+    # one it walks past, so a re-read leaves an orphan holding its bytecode for
+    # the life of the context.
+    it "reads the bytecode only once" do
+      vm = Quickjs::VM.new
+      vm.send(:_preload_module_bytecode, @bytecode, 'counter')
+      after_first = vm.memory_usage[:js_func_code_size]
+      vm.send(:_preload_module_bytecode, @bytecode, 'counter')
+
+      _(vm.memory_usage[:js_func_code_size]).must_equal after_first
+    end
+
+    it "keeps a single instance of the module" do
+      vm = Quickjs::VM.new
+      vm.send(:_preload_module_bytecode, @bytecode, 'counter')
+      vm.send(:_preload_module_bytecode, @bytecode, 'counter')
+      vm.import(['inc'], filename: 'counter')
+
+      _(vm.eval_code('inc()')).must_equal 1
+      _(vm.eval_code('inc()')).must_equal 2
+    end
+
+    it "tolerates a name listed twice in preload_modules:" do
+      Quickjs.register_module('_test_dup', source: 'export const x = 1;')
+      vm = Quickjs::VM.new(preload_modules: ['_test_dup'])
+      baseline = vm.memory_usage[:js_func_code_size]
+      vm.dispose!
+
+      vm = Quickjs::VM.new(preload_modules: ['_test_dup', '_test_dup'])
+
+      _(vm.memory_usage[:js_func_code_size]).must_equal baseline
+    ensure
+      Quickjs._unregister_module('_test_dup')
+    end
+  end
+
+  it "rejects bytecode whose baked name isn't the one it's filed under" do
+    bytecode = compile_module('export const x = 1;', 'actual')
+
+    _ {
+      Quickjs::VM.new.send(:_preload_module_bytecode, bytecode, 'claimed')
+    }.must_raise ArgumentError
+  end
+
   it "does not evaluate the module until it is imported" do
     bytecode = compile_module("globalThis.sideEffect = 'ran';\nexport const x = 1;", 'effectful')
 
     vm = Quickjs::VM.new
-    vm.send(:_preload_module_bytecode, bytecode)
+    vm.send(:_preload_module_bytecode, bytecode, 'effectful')
     _(vm.eval_code('typeof globalThis.sideEffect')).must_equal 'undefined'
 
     vm.import(['x'], filename: 'effectful')
