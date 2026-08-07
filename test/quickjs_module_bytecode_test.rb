@@ -94,6 +94,22 @@ describe "module bytecode primitives" do
       vm.import(['who'], filename: 'aliased')
 
       _(vm.eval_code('who()')).must_equal 'preloaded'
+      # The load hook never fires on this path (QuickJS finds the preloaded
+      # module first), so the source the loader handed us must not be stashed
+      # for it: nothing would ever clear the entry, and it is the seam where a
+      # second instance of the module could come back through the alias.
+      _(vm.send(:_pending_module_source_count)).must_equal 0
+    end
+
+    it "clears the stashed source once a loader-provided module is loaded" do
+      vm = Quickjs::VM.new
+      vm.module_loader = ->(specifier, _importer) {
+        "export const who = () => 'from-loader';" if specifier == 'plain'
+      }
+      vm.import(['who'], filename: 'plain')
+
+      _(vm.eval_code('who()')).must_equal 'from-loader'
+      _(vm.send(:_pending_module_source_count)).must_equal 0
     end
 
     it "still routes the preloaded module's own imports through the loader" do

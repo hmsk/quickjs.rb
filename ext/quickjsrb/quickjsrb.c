@@ -1768,6 +1768,12 @@ static JSModuleDef *quickjsrb_stub_module_loader(JSContext *ctx, const char *mod
 // the name baked in here, so it is the module's identity in every VM that
 // later reads this blob. Quickjs.register_module keys the registry by that
 // same string, which is what keeps the two from drifting apart.
+//
+// Stays private, and must: the stub loader below is swapped in at the
+// *runtime* level for the duration, so this assumes exclusive use of the VM.
+// Quickjs._compile_registered_module honors that by compiling on a disposable
+// VM it owns; exposing this publicly would let a compile race an import on a
+// shared VM and resolve it against stubs.
 static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
 {
   VMData *data;
@@ -1845,6 +1851,19 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode)
   // it there with ref_count 1); JS_NewModuleValue dup'd it for us.
   JS_FreeValue(data->context, j_mod);
   return r_name;
+}
+
+// Number of sources the normalize hook is holding for the load hook to pick
+// up. Exposed only so tests can assert the cache doesn't accumulate entries
+// nothing will ever collect: when a loader resolves a specifier onto a
+// preloaded canonical, QuickJS finds the module and never calls the load hook,
+// so a source stashed for that name would sit there for the VM's lifetime.
+static VALUE vm_m_pendingModuleSourceCount(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  return LONG2NUM(RHASH_SIZE(data->module_source_cache));
 }
 
 static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
@@ -2435,6 +2454,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_private_method(r_class_vm, "_compile_to_bytecode", vm_m_compile, -1);
   rb_define_private_method(r_class_vm, "_compile_module_to_bytecode", vm_m_compileModule, 2);
   rb_define_private_method(r_class_vm, "_preload_module_bytecode", vm_m_preloadModuleBytecode, 1);
+  rb_define_private_method(r_class_vm, "_pending_module_source_count", vm_m_pendingModuleSourceCount, 0);
   rb_define_private_method(r_class_vm, "_run_bytecode", vm_m_evalBytecode, 1);
   rb_define_private_method(r_class_vm, "_load_polyfill_bytecode", vm_m_loadPolyfillBytecode, 1);
   rb_define_method(r_class_vm, "call", vm_m_callGlobalFunction, -1);
