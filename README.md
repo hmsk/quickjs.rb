@@ -234,6 +234,36 @@ When `module_loader=` is set, pass `filename:` to `import` instead of `from:` to
 
 `import` awaits the module's top-level evaluation — top-level `await`, synchronous body execution, and any chained dynamic `import()`. The call blocks until the module's settle promise resolves. A top-level throw, a failed dynamic `import()`, or a rejected top-level `await` propagates back to Ruby as the matching `Quickjs::*Error` instead of being silently dropped.
 
+#### `Quickjs.compile_module`: 🧊 Compile a module once and import it anywhere
+
+`import(from: source)` reparses the module in every VM you import it into. `compile_module` parses once and returns a `Quickjs::Importable` you can import into any number of VMs, which is what `compile` does for classic scripts.
+
+```rb
+module MyGem
+  MODULE = Quickjs.compile_module(File.read('vendor/lib.js'), filename: 'my_gem/lib.js')
+
+  def self.new_vm
+    vm = Quickjs::VM.new
+    vm.import(['render'], from: MODULE)
+    vm
+  end
+end
+```
+
+It takes the same import shapes and `code_to_expose:` as an inline source, so switching an existing `from:` a `String` to `from:` an `Importable` is the only change needed.
+
+The module's name is generated, not taken from you. It is baked into the bytecode and becomes the module's identity in every VM that imports it, so generating it means two `Importable`s built independently can never collide. `filename:` only prefixes the generated name to keep stack traces readable (`my_gem/lib.js-3f9a...`); it is a label, not an identity. Each VM still gets its own instance of the module with its own module-level state, and importing the same `Importable` into one VM more than once reads the bytecode only the first time.
+
+Compilation happens eagerly, so a gem that may never be used should defer it:
+
+```rb
+def self.compiled = @compiled ||= Quickjs.compile_module(File.read('vendor/lib.js'))
+```
+
+An imported module's own `import`s still resolve through `module_loader` on first use, and `module_loader` is never asked about the `Importable` itself.
+
+**Use this when the module's name is your own business.** If JS code elsewhere in the graph needs to write `import 'lib'` and have a `module_loader` resolve it, the module needs a name everyone agrees on, which is what `register_module` below is for.
+
 #### `Quickjs.register_module`: 📦 Preload ES modules as bytecode
 
 A module resolved through `module_loader` is parsed again by every VM that imports it. `register_module` parses it once per process and hands each VM the compiled bytecode instead, which is the same trick `compile` plays for classic scripts. On a 220KB module that takes importing from ~10.7ms to ~1.8ms per VM.

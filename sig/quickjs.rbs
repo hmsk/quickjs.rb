@@ -17,6 +17,12 @@ module Quickjs
 
   def self.register_module: (String name, source: String | ^() -> String) -> nil
 
+  def self.compile_module: (String source, ?filename: String?, **untyped) -> Quickjs::Importable
+
+  class Importable
+    attr_reader name: String
+  end
+
   class Value
     UNDEFINED: Symbol
     NAN: Symbol
@@ -34,7 +40,7 @@ module Quickjs
     def define_function: (String | Symbol name, *Symbol flags) { (*untyped) -> untyped } -> Symbol
                        | (Array[String | Symbol] path, *Symbol flags) { (*untyped) -> untyped } -> Array[Symbol]
 
-    def import: (String | Array[String] | Hash[Symbol, String] imported, from: String, ?code_to_expose: String?) -> true
+    def import: (String | Array[String] | Hash[Symbol, String] imported, from: String | Quickjs::Importable, ?code_to_expose: String?) -> true
               | (String | Array[String] | Hash[Symbol, String] imported, filename: String, ?code_to_expose: String?) -> true
 
     type module_loader_return = String | Hash[Symbol, String] | nil
