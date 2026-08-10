@@ -196,6 +196,21 @@ describe "Quickjs.register_polyfill" do
     vm&.dispose!
   end
 
+  # The disposed check has to sit after the last GVL-yield point and before
+  # the context is touched. Refusing the coercion is what removes the yield,
+  # so a to_str-able stand-in has to be rejected rather than accepted.
+  it "rejects a non-String blob rather than coercing it" do
+    vm = Quickjs::VM.new
+    coercible = Object.new
+    def coercible.to_str = 'this is not valid bytecode'
+
+    _ {
+      vm.send(:_load_polyfill_bytecode, coercible)
+    }.must_raise TypeError
+  ensure
+    vm&.dispose!
+  end
+
   # Same assertion on the GVL-held path (crypto latches a Ruby bridge, so
   # can_eval_gvl_free bails): the short-circuit lives in the shared core,
   # but only a test on each branch keeps it that way.
