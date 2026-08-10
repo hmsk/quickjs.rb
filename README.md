@@ -254,6 +254,8 @@ Two consequences worth knowing:
 
 Preloading a name that isn't registered raises `ArgumentError`; names must be `String`s (a `Symbol` raises `TypeError`). `Quickjs._unregister_module(name)` removes an entry, which is mostly useful for keeping tests isolated.
 
+**Preloading grants the module to everything running in that VM**, including untrusted code reaching it with a dynamic `import()`, and whether or not your Ruby code ever imports it. `module_loader` is the authorization point, and preloading deliberately bypasses it for that name, so a loader that allows a module for some importers and denies it for others has no say over a preloaded one. If a module needs per-importer or per-scope authorization, resolve it through `module_loader` instead of preloading it, and accept the parse cost as the price of that control.
+
 #### `Quickjs::VM#on_unhandled_rejection`: 🚨 Catch promise rejections that have no handler
 
 Register a block to be notified when a JS Promise rejects with no `.catch` / `then(_, onRejected)` attached at the time of rejection — fire-and-forget chains, failed dynamic imports without `try`, etc.
