@@ -1361,11 +1361,57 @@ describe Quickjs::VM do
       _(call_count).must_equal 1
     end
 
-    it "raises TypeError when the loader Hash is missing code:" do
+    # A Hash without code: is a redirect, so it can only point at a module that
+    # is already loaded. Pointing at one that isn't leaves nothing to load.
+    it "raises ReferenceError when a redirect points at a module that isn't loaded" do
       @vm.module_loader = ->(_specifier, _importer) { {as: '/anywhere'} }
+      err = _ {
+        @vm.import(['x'], from: "import { x } from 'mod'; export { x };")
+      }.must_raise Quickjs::ReferenceError
+
+      _(err.message).must_match(%r{/anywhere})
+      _(err.message).must_match(/without code:/)
+    end
+
+    it "raises TypeError when the loader Hash has a non-String code:" do
+      @vm.module_loader = ->(_specifier, _importer) { {code: 42, as: '/anywhere'} }
       _ {
         @vm.import(['x'], from: "import { x } from 'mod'; export { x };")
       }.must_raise Quickjs::TypeError
+    end
+
+    it "redirects a specifier onto a module the loader already provided" do
+      loaded = []
+      @vm.module_loader = ->(specifier, _importer) {
+        loaded << specifier
+        case specifier
+        when '/real.js' then {code: "const s = { n: 0 };\nexport const bump = () => ++s.n;", as: '/real.js'}
+        when 'alias' then {as: '/real.js'}
+        end
+      }
+
+      @vm.import(['bump'], from: "import { bump } from '/real.js'; export { bump };")
+      @vm.import({bump: 'aliasBump'}, from: "import { bump } from 'alias'; export { bump };")
+
+      # Same module instance behind both specifiers, so the counter is shared.
+      _(@vm.eval_code('bump()')).must_equal 1
+      _(@vm.eval_code('aliasBump()')).must_equal 2
+      _(loaded).must_equal ['/real.js', 'alias']
+    end
+
+    it "redirects a specifier onto a preloaded module" do
+      Quickjs.register_module('_test_redirect_target', source: 'export const hi = () => "preloaded";')
+      vm = Quickjs::VM.new(preload_modules: ['_test_redirect_target'])
+      vm.module_loader = ->(specifier, _importer) {
+        {as: '_test_redirect_target'} if specifier == 'friendly-name'
+      }
+
+      vm.import(['hi'], filename: 'friendly-name')
+
+      _(vm.eval_code('hi()')).must_equal 'preloaded'
+      _(vm.send(:_pending_module_source_count)).must_equal 0
+    ensure
+      Quickjs._unregister_module('_test_redirect_target')
     end
 
     it "raises TypeError when the loader Hash is missing as:" do

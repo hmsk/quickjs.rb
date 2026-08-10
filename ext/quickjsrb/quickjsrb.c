@@ -620,14 +620,18 @@ static char *quickjsrb_module_normalize(JSContext *ctx, const char *base_name, c
   {
     r_source = rb_hash_aref(r_return, ID2SYM(rb_intern("code")));
     r_canonical = rb_hash_aref(r_return, ID2SYM(rb_intern("as")));
-    if (!RB_TYPE_P(r_source, T_STRING))
-    {
-      JS_ThrowTypeError(ctx, "module loader Hash must include code: (String, the module source)");
-      return NULL;
-    }
     if (!RB_TYPE_P(r_canonical, T_STRING))
     {
       JS_ThrowTypeError(ctx, "module loader Hash must include as: (String, the canonical module name)");
+      return NULL;
+    }
+    // `code:` is optional: omitting it makes the Hash a pure redirect, "resolve
+    // this specifier to `as:`", which is meaningful exactly when that module is
+    // already in the map and has no source left to provide. Requiring it would
+    // force importmap-style loaders to invent a source value nothing reads.
+    if (!NIL_P(r_source) && !RB_TYPE_P(r_source, T_STRING))
+    {
+      JS_ThrowTypeError(ctx, "module loader Hash code: must be a String (the module source), or omitted to redirect to as:");
       return NULL;
     }
   }
@@ -643,7 +647,7 @@ static char *quickjsrb_module_normalize(JSContext *ctx, const char *base_name, c
   // preloaded. QuickJS finds it in ctx->loaded_modules and never calls the
   // load hook, so stashing the source it just handed us would leave an entry
   // nothing ever clears.
-  if (!RTEST(rb_hash_aref(data->preloaded_module_names, r_canonical)))
+  if (!NIL_P(r_source) && !RTEST(rb_hash_aref(data->preloaded_module_names, r_canonical)))
     rb_hash_aset(data->module_source_cache, r_canonical, r_source);
   rb_hash_aset(data->module_resolution_cache, r_key, r_canonical);
 
@@ -658,8 +662,12 @@ static JSModuleDef *quickjsrb_module_loader(JSContext *ctx, const char *module_n
   VALUE r_source = rb_hash_aref(data->module_source_cache, r_canonical);
   if (NIL_P(r_source))
   {
-    // Defensive: normalize populates this on every miss.
-    JS_ThrowReferenceError(ctx, "module loader: no cached source for '%s'", module_name);
+    // Reachable through a redirect: a Hash without `code:` resolves a specifier
+    // onto another canonical without providing any source, which only works if
+    // that module is already loaded — and if it were, QuickJS would have found
+    // it and never called this hook. For every other path normalize stashes a
+    // source on the way past, so arriving here means the redirect dangled.
+    JS_ThrowReferenceError(ctx, "module loader has no source for '%s': a Hash without code: redirects to an already-loaded module, and this one isn't loaded", module_name);
     return NULL;
   }
   // QuickJS won't call load again for this canonical — its own module cache
