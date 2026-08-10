@@ -223,6 +223,41 @@ When `module_loader=` is set, pass `filename:` to `import` instead of `from:` to
 
 `import` awaits the module's top-level evaluation — top-level `await`, synchronous body execution, and any chained dynamic `import()`. The call blocks until the module's settle promise resolves. A top-level throw, a failed dynamic `import()`, or a rejected top-level `await` propagates back to Ruby as the matching `Quickjs::*Error` instead of being silently dropped.
 
+#### `Quickjs.register_module`: 📦 Preload ES modules as bytecode
+
+A module resolved through `module_loader` is parsed again by every VM that imports it. `register_module` parses it once per process and hands each VM the compiled bytecode instead, which is the same trick `compile` plays for classic scripts. On a 220KB module that takes importing from ~10.7ms to ~1.8ms per VM.
+
+```rb
+Quickjs.register_module('lib', source: File.read('lib.js'))
+
+vm = Quickjs::VM.new(preload_modules: ['lib'])
+vm.import(['call'], filename: 'lib')
+vm.eval_code('call(1, 2)')
+```
+
+Registration is process-wide, `preload_modules:` is per VM. Registering only makes a module available; each VM says which ones it wants. That split is deliberate: reading a module into a VM costs about 1.26ms per 220KB whether or not it ends up being imported, so a registry that every VM read wholesale would be slower than plain source loading as soon as a VM used only part of it. It is the same reason browsers ask for `<link rel="modulepreload">` per document rather than preloading everything they know about.
+
+`source:` also accepts a `Proc` returning a `String`, so a gem can register at `require` time without paying the file-read cost unless a VM actually preloads it:
+
+```rb
+Quickjs.register_module('lib', source: -> { File.read('lib.js') })
+```
+
+The first VM to preload a given module pays the compile cost (on a disposable VM with a generous timeout, so it doesn't consume the user VM's `timeout_msec`); later VMs reuse the cached bytecode. Each VM still gets its own instance of the module, with its own module-level state.
+
+**`name` is the canonical name, not a label.** It is the string JS writes in its `import` statement, the name QuickJS keys its module map by, and it is baked into the compiled bytecode. If your `module_loader` resolves specifiers to absolute paths, register under the resolved path (`/vendor/lodash.js`), not the bare specifier your JS happens to write (`lodash`). A loader that maps a specifier onto a preloaded canonical via `as:` still lands on the preloaded module, so importmap-style scoping keeps working.
+
+Relative-looking names are the one case where that bites without a loader in play. With no `module_loader` set, QuickJS's own normalization resolves `./lib.js` against the importing file before looking in the module map, so a module registered as `./lib.js` is never found and the import falls through to the filesystem loader. Register a bare or absolute name (`lib.js`, `/app/lib.js`) unless a `module_loader` is doing the normalizing.
+
+Two consequences worth knowing:
+
+- **A preloaded module wins over `module_loader`, which is never asked for that name.** The module is already in the VM's module map, exactly as if it had been imported earlier, so resolution finds it before any loader runs.
+- **A preloaded module's own imports are not preloaded.** They resolve through `module_loader` on first import like any other specifier, so register each module you want cached. This differs from HTML's `modulepreload`, which walks the dependency graph.
+
+Preloading a name that isn't registered raises `ArgumentError`; names must be `String`s (a `Symbol` raises `TypeError`). `Quickjs._unregister_module(name)` removes an entry, which is mostly useful for keeping tests isolated.
+
+**Preloading grants the module to everything running in that VM**, including untrusted code reaching it with a dynamic `import()`, and whether or not your Ruby code ever imports it. `module_loader` is the authorization point, and preloading deliberately bypasses it for that name, so a loader that allows a module for some importers and denies it for others has no say over a preloaded one. If a module needs per-importer or per-scope authorization, resolve it through `module_loader` instead of preloading it, and accept the parse cost as the price of that control.
+
 #### `Quickjs::VM#on_unhandled_rejection`: 🚨 Catch promise rejections that have no handler
 
 Register a block to be notified when a JS Promise rejects with no `.catch` / `then(_, onRejected)` attached at the time of rejection — fire-and-forget chains, failed dynamic imports without `try`, etc.
@@ -431,6 +466,8 @@ Quickjs.register_polyfill(
 The first VM with a given polyfill pays the parse cost (the source is compiled to QuickJS bytecode on a disposable VM with a generous timeout); subsequent VMs reuse the cached bytecode. The polyfill body runs without consuming the user VM's `timeout_msec` budget — that's reserved for user code.
 
 The polyfill's top level must settle synchronously — no top-level `await`. `VM.new(features:)` guarantees a usable polyfill on return, but loads don't drain the job queue, so nothing past the first `await` would have run by then. A polyfill left pending raises a `Quickjs::NoAwaitError`, and any top-level throw raises the matching `Quickjs::RuntimeError` subclass, both naming the feature at construction, rather than handing back a VM with the polyfill silently half-applied.
+
+To ship JS that user code `import`s rather than globals it reaches for, see [`Quickjs.register_module`](#quickjsregister_module--preload-es-modules-as-bytecode), which follows the same registry protocol at the module layer instead of the global one.
 
 Intl APIs (Collator, DateTimeFormat, NumberFormat, PluralRules, Locale, etc.) live in a separate companion gem: [`quickjs-polyfill-intl`](https://github.com/hmsk/quickjs-polyfill-intl). Granular, dependency-aware, opt-in per API.
 
