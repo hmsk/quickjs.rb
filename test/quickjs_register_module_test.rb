@@ -66,6 +66,33 @@ describe "Quickjs.register_module" do
     _ { Quickjs::VM.new(preload_modules: [@name]) }.must_raise TypeError
   end
 
+  # Module names cross into QuickJS as raw bytes and come back binary-encoded,
+  # so anything comparing them against the caller's UTF-8 name has to do it on
+  # bytes rather than with encoding-aware equality.
+  describe "a non-ASCII name" do
+    before { @jp = "_test_モジュール_#{object_id}" }
+    after  { Quickjs._unregister_module(@jp) }
+
+    it "is importable" do
+      Quickjs.register_module(@jp, source: 'export const 値 = "日本語";')
+      vm = Quickjs::VM.new(preload_modules: [@jp])
+      vm.import(['値'], filename: @jp)
+
+      _(vm.eval_code('値')).must_equal '日本語'
+    end
+
+    it "is deduplicated like any other" do
+      Quickjs.register_module(@jp, source: 'export const x = 1;')
+      vm = Quickjs::VM.new(preload_modules: [@jp])
+      baseline = vm.memory_usage[:js_func_code_size]
+      vm.dispose!
+
+      vm = Quickjs::VM.new(preload_modules: [@jp, @jp])
+
+      _(vm.memory_usage[:js_func_code_size]).must_equal baseline
+    end
+  end
+
   it "raises for a name that isn't registered" do
     _ {
       Quickjs::VM.new(preload_modules: ['_never_registered'])

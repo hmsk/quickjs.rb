@@ -247,6 +247,8 @@ The first VM to preload a given module pays the compile cost (on a disposable VM
 
 **`name` is the canonical name, not a label.** It is the string JS writes in its `import` statement, the name QuickJS keys its module map by, and it is baked into the compiled bytecode. If your `module_loader` resolves specifiers to absolute paths, register under the resolved path (`/vendor/lodash.js`), not the bare specifier your JS happens to write (`lodash`). A loader that maps a specifier onto a preloaded canonical via `as:` still lands on the preloaded module, so importmap-style scoping keeps working.
 
+Relative-looking names are the one case where that bites without a loader in play. With no `module_loader` set, QuickJS's own normalization resolves `./lib.js` against the importing file before looking in the module map, so a module registered as `./lib.js` is never found and the import falls through to the filesystem loader. Register a bare or absolute name (`lib.js`, `/app/lib.js`) unless a `module_loader` is doing the normalizing.
+
 Two consequences worth knowing:
 
 - **A preloaded module wins over `module_loader`, which is never asked for that name.** The module is already in the VM's module map, exactly as if it had been imported earlier, so resolution finds it before any loader runs.

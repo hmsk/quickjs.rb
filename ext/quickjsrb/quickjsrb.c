@@ -1814,8 +1814,9 @@ static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
 // first import, and js_resolve_module recurses into it from the importer, so
 // no loader hook is involved for a preloaded name.
 //
-// The baked-in name is recorded in preloaded_module_names for the normalize
-// hook's short-circuit, and returned so the caller can confirm it.
+// The name is recorded in preloaded_module_names for the normalize hook's
+// short-circuit, and returned so the caller can confirm the blob was filed
+// where it asked.
 //
 // `name` is the name the caller expects the blob to carry. Reading the same
 // module into a context twice can't be undone — js_read_module appends a
@@ -1843,7 +1844,14 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_
   }
   Check_Type(r_name, T_STRING);
 
-  if (RTEST(rb_hash_aref(data->preloaded_module_names, r_name)))
+  // A module name crosses into QuickJS as raw bytes and comes back binary, so
+  // it is compared and keyed on bytes here. Encoding-aware equality would call
+  // a non-ASCII name different from the identical name the caller passed in
+  // (UTF-8 from the registry), and this is also the form the normalize hook
+  // looks up, since it builds its specifier from a C string too.
+  VALUE r_key = rb_str_new(RSTRING_PTR(r_name), RSTRING_LEN(r_name));
+
+  if (RTEST(rb_hash_aref(data->preloaded_module_names, r_key)))
     return r_name;
 
   JSValue j_mod = JS_ReadObject(data->context, (const uint8_t *)RSTRING_PTR(r_bytecode),
@@ -1875,14 +1883,14 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_
   // it again and every preload would read another copy. There is no way to
   // take the read back, so the VM is already polluted: raise and let the
   // caller discard it.
-  if (!RTEST(rb_str_equal(r_baked, r_name)))
+  if (!RTEST(rb_str_equal(r_baked, r_key)))
   {
     rb_raise(rb_eArgError, "module bytecode is named %"PRIsVALUE", not %"PRIsVALUE,
              rb_str_inspect(r_baked), rb_str_inspect(r_name));
   }
 
-  rb_hash_aset(data->preloaded_module_names, rb_str_freeze(r_baked), Qtrue);
-  return r_baked;
+  rb_hash_aset(data->preloaded_module_names, rb_str_freeze(r_key), Qtrue);
+  return r_name;
 }
 
 // Number of sources the normalize hook is holding for the load hook to pick
