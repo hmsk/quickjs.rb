@@ -78,7 +78,7 @@ export const member = () => "mem";')
     one = Quickjs.compile_module('export const which = () => "one";', filename: 'lib.js')
     two = Quickjs.compile_module('export const which = () => "two";', filename: 'lib.js')
 
-    _(one.name).wont_equal two.name
+    _(one.canonical_name).wont_equal two.canonical_name
 
     vm = Quickjs::VM.new
     vm.import({which: 'whichOne'}, from: one)
@@ -91,7 +91,7 @@ export const member = () => "mem";')
   it "puts filename: in the module name for stack traces" do
     lib = Quickjs.compile_module('export const boom = () => { throw new Error("bang"); };',
                                  filename: 'my_gem/lib.js')
-    _(lib.name).must_match(%r{\Amy_gem/lib\.js-\h{16}\z})
+    _(lib.canonical_name).must_match(%r{\Amy_gem/lib\.js-\h{16}\z})
 
     vm = Quickjs::VM.new
     vm.import(['boom'], from: lib)
@@ -148,7 +148,7 @@ export const member = () => "mem";')
       asked = []
       vm.module_loader = ->(specifier, _importer) {
         asked << specifier
-        {as: lib.name} if specifier == 'my-gem'
+        {as: lib.canonical_name} if specifier == 'my-gem'
       }
 
       vm.import(['render'], from: lib)

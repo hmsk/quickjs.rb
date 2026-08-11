@@ -20,7 +20,7 @@ module Quickjs
   def self.compile_module: (String source, ?filename: String?, **untyped) -> Quickjs::Importable
 
   class Importable
-    attr_reader name: String
+    attr_reader canonical_name: String
   end
 
   class Value

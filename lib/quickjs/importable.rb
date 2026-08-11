@@ -10,15 +10,19 @@ module Quickjs
   # ships JS of its own, since a global registry would make unrelated gems
   # coordinate on a name none of their VMs ever share.
   class Importable
-    attr_reader :name
+    # The name QuickJS keys its module map by, the same thing a module_loader
+    # calls `as:`. Not the `filename:` that was passed in: that is only a
+    # prefix of this. Useful for pointing a loader at this module by a
+    # friendlier specifier.
+    attr_reader :canonical_name
 
-    def initialize(bytecode, name)
+    def initialize(bytecode, canonical_name)
       @bytecode = bytecode
-      @name = name
+      @canonical_name = canonical_name
     end
 
     def inspect
-      "#<#{self.class} #{@name} (#{@bytecode.bytesize} bytes)>"
+      "#<#{self.class} #{@canonical_name} (#{@bytecode.bytesize} bytes)>"
     end
 
     private
@@ -67,8 +71,8 @@ module Quickjs
       importable = opts[:from]
       return super unless importable.is_a?(Importable)
 
-      send(:_preload_module_bytecode, importable.send(:bytecode), importable.name)
-      super(imported, **opts.except(:from), filename: importable.name)
+      send(:_preload_module_bytecode, importable.send(:bytecode), importable.canonical_name)
+      super(imported, **opts.except(:from), filename: importable.canonical_name)
     end
   end
 

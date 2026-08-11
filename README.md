@@ -250,7 +250,7 @@ It takes the same import shapes and `code_to_expose:` as an inline source, so sw
 
 Hold the `Importable` wherever the JS belongs — a constant in a gem, an attribute on a service object — and import it into as many VMs as you like. Nothing about it is process-global, which matters when several libraries in one app each ship their own JS: none of them has to agree with the others about anything.
 
-The module's name is generated, not taken from you. It is baked into the bytecode and becomes the module's identity in every VM that imports it, so generating it means two `Importable`s built independently can never collide. `filename:` only prefixes the generated name to keep stack traces readable (`renderer.js-3f9a...`); it is a label, not an identity. Each VM still gets its own instance of the module with its own module-level state, and importing the same `Importable` into one VM more than once reads the bytecode only the first time.
+The module's name is generated, not taken from you. It is baked into the bytecode and becomes the module's identity in every VM that imports it, so generating it means two `Importable`s built independently can never collide. `filename:` only prefixes the generated name to keep stack traces readable; it is a label, not an identity. `Importable#canonical_name` returns the generated one (`renderer.js-3f9a...`), which is what a `module_loader` means by `as:`. Each VM still gets its own instance of the module with its own module-level state, and importing the same `Importable` into one VM more than once reads the bytecode only the first time.
 
 Compilation happens eagerly, so defer it if the JS might never be used:
 
@@ -267,7 +267,7 @@ An imported module's own `import`s still resolve through `module_loader` on firs
 ```rb
 vm.import(['render'], from: RENDERER)
 vm.module_loader = ->(specifier, _importer) {
-  {as: RENDERER.name} if specifier == 'renderer'
+  {as: RENDERER.canonical_name} if specifier == 'renderer'
 }
 
 # JS elsewhere in the graph can now write: import { render } from 'renderer'
