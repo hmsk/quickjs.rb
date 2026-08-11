@@ -1983,10 +1983,17 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
-  // StringValue can invoke a non-String argument's to_str, which may
-  // yield the GVL — run it before the disposed check so nothing below
-  // touches a context freed by a concurrent dispose! in that window.
-  StringValue(r_bytecode);
+  // The disposed check has to sit after the last GVL-yield point and before
+  // the context is touched. Refusing a to_str-able stand-in removes the yield
+  // instead of ordering around it: bytecode is a binary blob, so coercion buys
+  // nothing, and without it there is no window for a concurrent dispose! to
+  // free the context between the check and the load. Same guard as
+  // vm_m_evalBytecode and _preload_module_bytecode.
+  if (!RB_TYPE_P(r_bytecode, T_STRING))
+  {
+    VALUE r_class = rb_class_name(CLASS_OF(r_bytecode));
+    rb_raise(rb_eTypeError, "Bytecode must be a String, got %s", StringValueCStr(r_class));
+  }
 
   check_disposed(data);
   check_oom_poisoned(data);
