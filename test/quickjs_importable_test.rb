@@ -139,6 +139,26 @@ export const member = () => "mem";')
       _(asked).must_be_empty
     end
 
+    # An Importable's name is generated, so JS elsewhere in the graph can't
+    # write `import 'my-gem'` and reach it. A redirect gives it a name on the
+    # VMs that want one, without a process-global registry entry.
+    it "can be reached by a name of the host's choosing through a redirect" do
+      lib = Quickjs.compile_module('export const render = () => "rendered";')
+      vm = Quickjs::VM.new
+      asked = []
+      vm.module_loader = ->(specifier, _importer) {
+        asked << specifier
+        {as: lib.name} if specifier == 'my-gem'
+      }
+
+      vm.import(['render'], from: lib)
+      vm.import({render: 'aliasRender'}, from: "import { render } from 'my-gem'; export { render };")
+
+      _(vm.eval_code('aliasRender()')).must_equal 'rendered'
+      _(vm.eval_code('render === aliasRender')).must_equal true
+      _(asked).must_equal ['my-gem']
+    end
+
     it "still routes the module's own imports through the loader" do
       lib = Quickjs.compile_module("import { d } from 'dep';\nexport const combined = () => `imp+${d()}`;")
       vm = Quickjs::VM.new

@@ -262,7 +262,15 @@ def self.compiled = @compiled ||= Quickjs.compile_module(File.read('vendor/lib.j
 
 An imported module's own `import`s still resolve through `module_loader` on first use, and `module_loader` is never asked about the `Importable` itself.
 
-**Use this when the module's name is your own business.** If JS code elsewhere in the graph needs to write `import 'lib'` and have a `module_loader` resolve it, the module needs a name everyone agrees on, which is what `register_module` below is for.
+**Use this when the module's name is your own business.** If JS code elsewhere in the graph needs to write `import 'lib'` and have a `module_loader` resolve it, the module needs a name everyone agrees on, which is what `register_module` below is for. Or give the generated name a friendly alias on the VMs that want one, with a [redirect](#quickjsvmmodule_loader--resolve-import-specifiers-from-ruby):
+
+```rb
+vm.import(['render'], from: MyGem::MODULE)
+vm.module_loader = ->(specifier, _importer) {
+  {as: MyGem::MODULE.name} if specifier == 'my-gem'
+}
+# JS can now write: import { render } from 'my-gem'
+```
 
 #### `Quickjs.register_module`: 📦 Preload ES modules as bytecode
 
