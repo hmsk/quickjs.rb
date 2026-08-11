@@ -190,8 +190,19 @@ Return value:
 
 - A `String` — that's the source. The canonical name used for QuickJS's module cache is the specifier itself.
 - A `Hash` `{ code:, as: }` — `code:` is the source, `as:` becomes the canonical name. Use this when the same specifier should resolve to different modules depending on the importer (importmap "scopes"), since QuickJS caches by canonical name and changing the canonical is what isolates the two modules.
+- A `Hash` `{ as: }` with no `code:` — a redirect: "resolve this specifier to `as:`". No source is provided, so the target has to be a module the VM already has, whether preloaded with `preload_modules:` or loaded by an earlier import. Pointing at anything else raises `Quickjs::ReferenceError`, since there is nothing left to load.
 - `nil` or `false` — raises `Quickjs::ReferenceError` on the JS side ("module not found").
 - Anything else — `Quickjs::TypeError`.
+
+```rb
+# Give a preloaded module a name of your choosing, without shipping its source twice
+vm = Quickjs::VM.new(preload_modules: ['/vendor/lodash.js'])
+vm.module_loader = ->(specifier, _importer) {
+  {as: '/vendor/lodash.js'} if specifier == 'lodash'
+}
+```
+
+Watch out for one consequence: `{code: modules[specifier], as: name}` where the lookup misses is a redirect to `name` rather than a `TypeError`, so it fails later with a `ReferenceError` instead of at the point of the mistake. Return `nil` for an unknown specifier rather than a `Hash` with a missing `code:`.
 
 Importmap scope example:
 
