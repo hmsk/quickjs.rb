@@ -212,4 +212,71 @@ describe "module bytecode primitives" do
     vm.import(['x'], filename: 'effectful')
     _(vm.eval_code('globalThis.sideEffect')).must_equal 'ran'
   end
+
+  it "reads the same bytecode into a VM per thread without crashing" do
+    bytecode = compile_module('export const answer = () => 21 * 2;', 'answer')
+
+    results = Array.new(8) {
+      Thread.new {
+        vm = Quickjs::VM.new
+
+        begin
+          vm.send(:_preload_module_bytecode, bytecode, 'answer')
+          vm.import(['answer'], filename: 'answer')
+          vm.eval_code('answer()')
+        ensure
+          vm.dispose!
+        end
+      }
+    }.map(&:value)
+
+    _(results).must_equal Array.new(8, 42)
+  end
+
+  # Deserializing is proportional to the blob, not to what the module computes,
+  # so the timing workload is a module made large rather than one made slow.
+  #
+  # The size is tuned rather than arbitrary, because it trades the two failure
+  # modes against each other. Growing it grows the GVL-free dispose! in lockstep
+  # with the read, which lifts the GVL-held case toward the 0.8 threshold —
+  # measured 1.11 at 5k functions, 0.92 at 10k, 0.83 at 20k, i.e. closer to
+  # passing when it shouldn't. Shrinking it leaves thread setup a bigger share
+  # of a shorter run, which lifts the released case — 0.62 at 5k, up to 0.75 at
+  # 2.5k, closer to failing when it shouldn't. 5k sits near the widest point.
+  def bulky_module_source(functions: 5_000)
+    Array.new(functions) {|i|
+      "export function f#{i}(a, b) { return a * #{i} + b - Math.sqrt(a + #{i}); }"
+    }.join("\n")
+  end
+
+  # Preloading is the warmer-pool hot path for modules: compile a bundle once,
+  # read it into a VM per thread. The read releases the GVL unconditionally —
+  # it registers the module def without running any of it, so no bridge can
+  # fire and no can_eval_gvl_free gate is needed. Before the release, threads
+  # populating their VMs serialized on the GVL.
+  #
+  # Each iteration reads a distinct module into one long-lived VM rather than
+  # building a VM per read, because dispose! releases the GVL on its own: with
+  # a VM per iteration the freeing parallelizes either way and swamps what is
+  # being measured, leaving held and released only 0.85 vs 0.78 apart. Reading
+  # into a single VM keeps the deserialize dominant, and the two land on
+  # opposite sides of the threshold with room to spare (~1.1 vs ~0.5).
+  it "reads module bytecode concurrently with measurable speedup" do
+    source  = bulky_module_source
+    modules = Array.new(8) {|i| [compile_module(source, "bulky#{i}"), "bulky#{i}"] }
+
+    # The iteration count is told to the helper rather than left to its default,
+    # because every iteration has to read a module the VM hasn't seen: a repeat
+    # is deduplicated into a no-op, so wrapping around the list would silently
+    # give the one-thread and two-thread runs different amounts of work to do.
+    assert_run_in_parallel(total_iterations: modules.size) do |iterations|
+      vm = Quickjs::VM.new
+
+      begin
+        iterations.times {|i| vm.send(:_preload_module_bytecode, *modules[i]) }
+      ensure
+        vm.dispose!
+      end
+    end
+  end
 end

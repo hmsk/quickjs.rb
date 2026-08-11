@@ -1086,7 +1086,7 @@ static JSValue js_console_error(JSContext *ctx, JSValueConst this, int argc, JSV
 // pools populating VMs, per-thread Runnable#run) proceed in parallel with
 // the main thread on multi-core hosts.
 //
-// Three call sites use the run_bytecode_release_gvl wrapper below:
+// Four call sites use the run_bytecode_release_gvl wrapper below:
 //
 //   1. vm_m_initialize — pre-built polyfill bytecode (file / encoding /
 //      url) embedded as static C constants. setTimeout (FEATURE_TIMEOUT)
@@ -1112,6 +1112,14 @@ static JSValue js_console_error(JSContext *ctx, JSValueConst this, int argc, JSV
 //      buffer copy as 2, but with the awaiting runner: js_std_await's job
 //      drain is bridge-free under the gate, the same argument eval_code's
 //      released path relies on.
+//
+//   4. vm_m_preloadModuleBytecode — module bytecode from a Ruby String,
+//      copied like 2/3, but with the deserialize-only runner
+//      (bytecode_read_job_run) and no can_eval_gvl_free gate. A preload
+//      registers the module def without running any top level, so no bridge
+//      can fire regardless of what's installed — the release is
+//      unconditional, and safe even on a bridged VM where 2/3 fall back to
+//      the GVL-held path.
 //
 // run_bytecode_release_gvl delegates to the shared GVL-release region
 // (see run_gvl_release_region) so every caller inherits the re-acquire
@@ -1155,6 +1163,20 @@ static void *bytecode_eval_await_job_run(void *p)
   struct bytecode_load_job *job = p;
   bytecode_load_job_run(job);
   job->result = js_std_await(job->ctx, job->result);
+  return NULL;
+}
+
+// Deserialize-only variant, for vm_m_preloadModuleBytecode: reads a module
+// def into ctx->loaded_modules without evaluating it, so a later import can
+// link and run it. Unlike the two runners above this never reaches JS
+// execution or the job queue — JS_ReadObject only deserializes, deferring
+// import resolution to js_link_module at eval time — so its release needs no
+// can_eval_gvl_free gate: there is no top level that could reach a Ruby
+// bridge, on any VM. Same MUST-NOT-touch-Ruby constraint all the same.
+static void *bytecode_read_job_run(void *p)
+{
+  struct bytecode_load_job *job = p;
+  job->result = JS_ReadObject(job->ctx, job->buf, job->buf_len, JS_READ_OBJ_BYTECODE);
   return NULL;
 }
 
@@ -1862,8 +1884,25 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_
   if (RTEST(rb_hash_aref(data->preloaded_module_names, r_key)))
     return r_name;
 
-  JSValue j_mod = JS_ReadObject(data->context, (const uint8_t *)RSTRING_PTR(r_bytecode),
-                                (size_t)RSTRING_LEN(r_bytecode), JS_READ_OBJ_BYTECODE);
+  // Deserialize with the GVL released. The read touches no Ruby and no
+  // bridge — it only registers the def, deferring linking to import — so it
+  // releases unconditionally (no can_eval_gvl_free gate): a pool of
+  // per-thread VMs each preloading the same modules deserializes in parallel
+  // instead of serializing through the GVL. RSTRING_PTR is GC-movable while
+  // released, so the bytecode is copied to a buffer the region owns and frees.
+  //
+  // An async interrupt in the region's GVL re-acquire frees j_mod but leaves
+  // the def js_new_module_def already registered in loaded_modules, untracked
+  // by preloaded_module_names. That is reachable on a VM the caller keeps —
+  // import(names, from:) preloads into a live VM, not just VM.new into a
+  // half-built one — so it is worth spelling out what a retry does: the
+  // untracked name misses the guard above, a second def is read under the same
+  // name, js_find_loaded_module returns the first, and the retry records the
+  // name. Behaviour recovers, at the cost of one orphan holding its bytecode
+  // for the life of the context, so unregistering on interrupt isn't worth it.
+  size_t buf_len;
+  uint8_t *buf = (uint8_t *)copy_rstring_to_owned_buffer(r_bytecode, &buf_len, false);
+  JSValue j_mod = run_bytecode_release_gvl(data, bytecode_read_job_run, buf, buf_len, true);
   if (JS_IsException(j_mod))
     return to_rb_value(data->context, j_mod); // raises
 
