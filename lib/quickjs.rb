@@ -10,6 +10,7 @@ require_relative "quickjs/quickjsrb"
 require_relative "quickjs/runnable"
 require_relative "quickjs/polyfills"
 require_relative "quickjs/modules"
+require_relative "quickjs/importable"
 
 module Quickjs
   class Blob
