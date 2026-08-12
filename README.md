@@ -420,7 +420,7 @@ vm.define_const(:user, 2)     #=> raise ArgumentError
 vm.define_var(:counter, 3)    #=> raise ArgumentError (already defined as a let)
 ```
 
-The name is a `String` or `Symbol` and comes back as a `Symbol`. It must be a valid JavaScript identifier and not a reserved word.
+The name is a `String` or `Symbol` and comes back as a `Symbol`. It has to match `/\A[A-Za-z_$][A-Za-z0-9_$]*\z/` and not be a reserved word. That is narrower than JavaScript itself, which also accepts Unicode identifiers like `値`: the name is concatenated into source that gets evaluated, so the pattern is what stops one from smuggling in arbitrary JS.
 
 Values are converted the same way as elsewhere in the gem — `Hash`, `Array`, `String`, numerics, `true`/`false`/`nil`, plus `Quickjs::Value::UNDEFINED` and `Quickjs::Value::NAN`. Anything else raises `TypeError` rather than being silently stringified:
 

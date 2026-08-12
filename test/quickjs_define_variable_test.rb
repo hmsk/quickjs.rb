@@ -219,4 +219,40 @@ describe "VM#define_const / #define_let / #define_var" do
       _(@vm.eval_code("scale(2) * factor")).must_equal 6
     end
   end
+
+  # Injecting configuration and then importing a module that reads it is the
+  # obvious pairing, and a declaration reaching module scope isn't obvious
+  # from either feature on its own: a module has its own scope, and only
+  # `var` lands on `globalThis`.
+  describe "interaction with modules" do
+    it "exposes a const to an imported module" do
+      @vm.define_const(:injected, "from-ruby")
+      @vm.import(["read"], from: Quickjs.compile_module("export const read = () => injected;"))
+
+      _(@vm.eval_code("read()")).must_equal "from-ruby"
+    end
+
+    it "exposes a var to an imported module through globalThis" do
+      @vm.define_var(:injectedVar, "from-ruby-var")
+      @vm.import(["read"], from: Quickjs.compile_module("export const read = () => globalThis.injectedVar;"))
+
+      _(@vm.eval_code("read()")).must_equal "from-ruby-var"
+    end
+
+    # The module body evaluates at import time, before this name exists, so
+    # this only works because the binding is resolved when `read` is called.
+    it "exposes a const defined after the module was imported" do
+      @vm.import(["read"], from: Quickjs.compile_module("export const read = () => later;"))
+      @vm.define_const(:later, "defined-after")
+
+      _(@vm.eval_code("read()")).must_equal "defined-after"
+    end
+
+    it "is visible to a Runnable executed on the same VM" do
+      @vm.define_const(:fromRuby, "visible")
+      Quickjs.compile("globalThis.seen = fromRuby;").run(on: @vm)
+
+      _(@vm.eval_code("seen")).must_equal "visible"
+    end
+  end
 end
