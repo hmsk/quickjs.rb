@@ -1553,6 +1553,17 @@ describe Quickjs::VM do
       _(err.message).must_match(/poisoned/)
     end
 
+    # Compiling is the entry point that most needs the guard: the state OOM
+    # leaves behind is precisely what another throw on the parser-error path
+    # can turn into a segfault.
+    it "compile raises Quickjs::RuntimeError after the VM is OOM-poisoned" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      _ { vm.eval_code('new Array(2_000_000).fill(0); void 0') }.must_raise Quickjs::RuntimeError
+
+      err = _ { vm.compile('1 + 1') }.must_raise Quickjs::RuntimeError
+      _(err.message).must_match(/poisoned/)
+    end
+
     it "run with no on: disposes the temporary VM after execution" do
       runnable = @vm.compile('40 + 2')
       _(runnable.run).must_equal 42
@@ -2038,6 +2049,62 @@ describe "Quickjs::Blocking" do
         vm = Quickjs::VM.new(timeout_msec: 10_000)
         begin
           iterations.times { runnable.run(on: vm) }
+        ensure
+          vm.dispose!
+        end
+      end
+    end
+
+    # Parsing is proportional to the source, not to what the source computes,
+    # so the compile workloads below are made large rather than slow. Scaling
+    # this much further needs a different shape: JS_EVAL_FLAG_ASYNC turns
+    # these top-level declarations into closure variables, and somewhere past
+    # 65k of them the compile fails outright.
+    def bulky_source(functions: 500)
+      Array.new(functions) {|i|
+        "function f#{i}(a, b) { return a * #{i} + b - Math.sqrt(a + #{i}); }"
+      }.join("\n")
+    end
+
+    it "compiles on a VM per thread without crashing" do
+      source   = bulky_source(functions: 20)
+      expected = Quickjs.compile(source).to_s
+
+      results = Array.new(4) {
+        Thread.new {
+          vm = Quickjs::VM.new(timeout_msec: 10_000)
+
+          begin
+            3.times.map { vm.compile(source).to_s }
+          ensure
+            vm.dispose!
+          end
+        }
+      }.map(&:value)
+
+      # Not `.uniq`: a thread that quietly produced fewer results than it was
+      # asked for would still leave one distinct value behind.
+      _(results.flatten).must_equal Array.new(12, expected)
+    end
+
+    # Compiling is a pool's other bottleneck: a shared compile-only VM turns
+    # each new script body into bytecode, and before the release it held the
+    # GVL for the whole parse — stopping every other thread, including the
+    # warmers building the next VMs. What the ratio below measures is only
+    # the compiles overlapping each other; VM.new and dispose! are ~2% of the
+    # timed block, and both already release the GVL anyway.
+    #
+    # The release is unconditional here, unlike the two above: a compile-only
+    # eval runs no JS, so no bridge can fire and no can_eval_gvl_free gate is
+    # needed.
+    it "compiles concurrently with measurable speedup" do
+      source = bulky_source
+
+      assert_run_in_parallel do |iterations|
+        vm = Quickjs::VM.new(timeout_msec: 10_000)
+
+        begin
+          iterations.times { vm.compile(source) }
         ensure
           vm.dispose!
         end
