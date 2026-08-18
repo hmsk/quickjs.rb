@@ -2108,7 +2108,7 @@ describe "Quickjs::Blocking" do
     # this much further needs a different shape: JS_EVAL_FLAG_ASYNC turns
     # these top-level declarations into closure variables, and somewhere past
     # 65k of them the compile fails outright.
-    def bulky_source(functions: 500)
+    def bulky_source(functions: 2_000)
       Array.new(functions) {|i|
         "function f#{i}(a, b) { return a * #{i} + b - Math.sqrt(a + #{i}); }"
       }.join("\n")
@@ -2135,16 +2135,25 @@ describe "Quickjs::Blocking" do
       _(results.flatten).must_equal Array.new(12, expected)
     end
 
-    # Compiling is a pool's other bottleneck: a shared compile-only VM turns
-    # each new script body into bytecode, and before the release it held the
-    # GVL for the whole parse — stopping every other thread, including the
-    # warmers building the next VMs. What the ratio below measures is only
-    # the compiles overlapping each other; VM.new and dispose! are ~2% of the
-    # timed block, and both already release the GVL anyway.
+    # Compiling is a pool's other bottleneck: a dedicated compile-only VM
+    # turns each new script body into bytecode, and before the release it
+    # held the GVL for the whole parse — stopping every other thread,
+    # including the warmers building the next VMs.
     #
     # The release is unconditional here, unlike the two above: a compile-only
     # eval runs no JS, so no bridge can fire and no can_eval_gvl_free gate is
     # needed.
+    #
+    # 2000 functions rather than the 500 this started at, because 500 put the
+    # single-threaded side at ~13ms on a macOS runner and a window that short
+    # loses to scheduler noise: it measured 0.88 there and exhausted all three
+    # of the helper's attempts, while the same commit passed the same job on
+    # an earlier run. Raising the workload is available here even though #77
+    # ruled it out for the preload test — that one's confound is dispose!
+    # cost growing with the resident module defs, and a compile VM keeps
+    # nothing, so its dispose! stays flat. Measured: VM.new + dispose! is
+    # 0.04ms, which is 0.6% of the timed block at 500 and 0.1% at 2000, and
+    # the ratio itself holds at 0.50-0.58 from 31KB of source through 262KB.
     it "compiles concurrently with measurable speedup" do
       source = bulky_source
 
