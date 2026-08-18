@@ -2435,6 +2435,7 @@ static VALUE import_body(VALUE p)
   VALUE r_custom_exposure = rb_hash_aref(r_opts, ID2SYM(rb_intern("code_to_expose")));
 
   char *filename;
+  char generated_filename[QUICKJSRB_GENERATED_NAME_SIZE];
   VALUE r_seeded_key = Qnil;
   if (!NIL_P(r_filename))
   {
@@ -2442,7 +2443,8 @@ static VALUE import_body(VALUE p)
   }
   else
   {
-    filename = random_string();
+    random_filename(generated_filename);
+    filename = generated_filename;
     char *source = StringValueCStr(r_from);
     JSValue module = JS_Eval(data->context, source, strlen(source), filename, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
     if (JS_IsException(module))

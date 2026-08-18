@@ -1295,6 +1295,19 @@ describe Quickjs::VM do
       _ { @vm.module_loader = 'not a proc' }.must_raise TypeError
     end
 
+    # The bridge module imports the generated filename after looking it up in
+    # the resolution cache. A filename that went stale before the bridge source
+    # was built reads as garbage, misses the cache, and falls through here, so
+    # an empty `asked` is what pins the generated name staying valid.
+    it "never asks the loader for the bridge filename it generated" do
+      asked = []
+      @vm.module_loader = ->(specifier, _importer) { asked << specifier; nil }
+      @vm.import('Imported', from: File.read('./test/fixture.esm.js'))
+
+      _(@vm.eval_code("Imported()")).must_equal "I am a default export of ESM."
+      _(asked).must_be_empty
+    end
+
     it "passes the from: bridge filename as importer to a 2-arity loader" do
       seen_importer = nil
       @vm.module_loader = ->(specifier, importer) {
