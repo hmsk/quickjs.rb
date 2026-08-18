@@ -269,7 +269,16 @@ describe "module bytecode primitives" do
     # because every iteration has to read a module the VM hasn't seen: a repeat
     # is deduplicated into a no-op, so wrapping around the list would silently
     # give the one-thread and two-thread runs different amounts of work to do.
-    assert_run_in_parallel(total_iterations: modules.size) do |iterations|
+    #
+    # More trials than the helper's default because this workload has less
+    # headroom above the 0.8 threshold than the other GVL tests: it flapped on
+    # CI at 0.811, missing by 1.3%, on 4 of 8 jobs in one run while the same
+    # commit went 8 for 8 in the other. Each side is the min of its trials, so
+    # more attempts only lowers both floors, and a runner has to be busy across
+    # all of them to produce a false failure. Widening the threshold instead
+    # would buy false passes, which is the worse direction: the GVL-held case
+    # measures as low as 0.83 on some machines.
+    assert_run_in_parallel(trials: 12, total_iterations: modules.size) do |iterations|
       vm = Quickjs::VM.new
 
       begin
