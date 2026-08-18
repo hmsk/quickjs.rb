@@ -1860,6 +1860,42 @@ static VALUE compiled_to_bytecode_string(VMData *data, JSValue j_compiled, const
   return run_held_js_entry(data, bytecode_serialize_held, (VALUE)&job);
 }
 
+struct js_exception_job
+{
+  VMData *data;
+  JSValue j_exception;
+};
+
+static VALUE js_exception_body(VALUE p)
+{
+  struct js_exception_job *job = (struct js_exception_job *)p;
+  return to_rb_value(job->data->context, job->j_exception); // raises
+}
+
+// Turns a thrown JSValue into the Ruby exception it raises, as a counted JS
+// entry rather than a bare call. Converting an error is JS execution: it
+// reads name, message and stack off the thrown object, and any of the three
+// can be an accessor inherited from a prototype the VM's own code has
+// replaced. So a parse failure on a VM where something did
+//
+//   Object.defineProperty(SyntaxError.prototype, 'name', { get: () => boom() })
+//
+// runs boom() during conversion — and with evals_in_flight back at zero after
+// the release region, a dispose! from that bridge was granted and the rest of
+// the conversion ran against a freed context. Reproducible SIGSEGV.
+//
+// The parse half of a compile is counted and the serialize half is counted;
+// this is the third tail out of the same function, and it was the one left
+// bare.
+static VALUE js_exception_to_rb(VMData *data, JSValue j_exception)
+{
+  struct js_exception_job job = {
+      .data = data,
+      .j_exception = j_exception,
+  };
+  return run_held_js_entry(data, js_exception_body, (VALUE)&job);
+}
+
 static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
 {
   VMData *data;
@@ -1914,7 +1950,7 @@ static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
   JSValue j_func = compile_release_gvl(data, r_code, filename);
   if (JS_IsException(j_func))
   {
-    return to_rb_value(data->context, j_func); // raises Ruby exception
+    return js_exception_to_rb(data, j_func); // raises Ruby exception
   }
 
   return compiled_to_bytecode_string(data, j_func, "failed to serialize compiled bytecode");
@@ -2003,7 +2039,7 @@ static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
   register_module_loader_funcs(data);
   if (JS_IsException(j_mod))
-    return to_rb_value(data->context, j_mod); // raises
+    return js_exception_to_rb(data, j_mod); // raises
 
   return compiled_to_bytecode_string(data, j_mod, "failed to serialize compiled module bytecode");
 }

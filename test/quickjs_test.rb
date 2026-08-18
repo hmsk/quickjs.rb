@@ -1581,6 +1581,37 @@ describe Quickjs::VM do
       _(err.message).must_match(/poisoned/)
     end
 
+    # Converting a thrown value reads name, message and stack off the error
+    # object, and any of the three can be an accessor inherited from a
+    # prototype the VM's own JS has replaced. So a parse failure runs a bridge
+    # during conversion — and with the parse's counter already released,
+    # dispose! from that bridge was granted and the rest of the conversion ran
+    # against a freed context. SIGSEGV rather than an exception, so a
+    # regression takes the suite down with it.
+    it "refuses dispose! from a bridge reached while converting a compile error" do
+      vm = Quickjs::VM.new
+      outcome = nil
+      vm.define_function('probe') {
+        outcome = begin
+          vm.dispose!
+          :disposed
+        rescue ThreadError => e
+          e
+        end
+        'Poisoned'
+      }
+      vm.eval_code(<<~JS)
+        Object.defineProperty(SyntaxError.prototype, 'name', { configurable: true, get: () => probe() });
+        0
+      JS
+
+      _ { vm.compile('function (') }.must_raise Quickjs::RuntimeError
+      _(outcome).must_be_kind_of ThreadError
+      _(vm.disposed?).must_equal false
+    ensure
+      vm.dispose!
+    end
+
     it "run with no on: disposes the temporary VM after execution" do
       runnable = @vm.compile('40 + 2')
       _(runnable.run).must_equal 42
