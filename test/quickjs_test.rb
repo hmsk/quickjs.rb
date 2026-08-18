@@ -556,6 +556,23 @@ describe Quickjs::VM do
     assert_in_delta(started + 200, Time.now.to_f * 1000, 100)
   end
 
+  # compile arms the eval timer, which resets the clock the enclosing eval is
+  # being measured against. Unguarded, every c() here pushed started_at
+  # forward, interrupt_handler never saw the limit elapse, and the loop ran
+  # forever on a VM that asked to be bounded at 200ms.
+  #
+  # Bounded rather than `while (true)` so a regression fails instead of
+  # hanging the suite: one bridged compile costs ~7us, so the budget lapses
+  # around iteration 27k and the loop caps out at ~1.5s if it doesn't.
+  it "a compile inside a bridge callback does not reset the enclosing eval's budget" do
+    vm = Quickjs::VM.new(timeout_msec: 200)
+    vm.define_function('c') { vm.compile('function a() {}'); 1 }
+
+    _ {
+      vm.eval_code('let s = 0; for (let i = 0; i < 200000; i++) { s += c(); } s')
+    }.must_raise Quickjs::InterruptedError
+  end
+
   it "can enable setTimeout selectively" do
     skip "should timeout"
     vm = Quickjs::VM.new(features: [::Quickjs::MODULE_OS])
