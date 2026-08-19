@@ -1308,6 +1308,22 @@ describe Quickjs::VM do
       _(asked).must_be_empty
     end
 
+    # A filename: that is not already a String is coerced by StringValueCStr,
+    # and the coerced String is referenced by nothing the caller can see: the
+    # kwargs hash still holds the original object. Pins that the borrowed
+    # pointer survives Quickjs._build_import running arbitrary Ruby.
+    it "accepts a to_str filename and still resolves it through the loader" do
+      coercible = Object.new
+      def coercible.to_str = 'mod.js'.dup
+
+      @vm.module_loader = ->(specifier, _importer) {
+        "export default () => 'from loader';" if specifier == 'mod.js'
+      }
+      @vm.import('Imported', filename: coercible)
+
+      _(@vm.eval_code('Imported()')).must_equal 'from loader'
+    end
+
     it "passes the from: bridge filename as importer to a 2-arity loader" do
       seen_importer = nil
       @vm.module_loader = ->(specifier, importer) {
