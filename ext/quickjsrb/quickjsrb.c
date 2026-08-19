@@ -1706,6 +1706,14 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
       async_mode = false;
   }
 
+  // Argument parsing allocates, so it can yield the GVL to a concurrent
+  // dispose! that leaves data->context dangling — and arm_eval_timer
+  // dereferences the runtime, which puts it ahead of both the release
+  // region's own re-check and run_held_js_entry's. Nothing between here and
+  // the release yields (StringValue can't coerce: parse_code_and_filename
+  // already refused a non-String), and dispose! refuses once either of those
+  // has counted us, so re-checking here closes the window on both paths.
+  check_disposed(data);
   arm_eval_timer(data);
 
   StringValue(r_code);
@@ -1729,40 +1737,223 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
   return to_rb_return_value(data->context, job.result);
 }
 
+struct compile_job
+{
+  JSContext *ctx;
+  const char *code;
+  size_t code_len;
+  const char *filename;
+  JSValue result;
+};
+
+// Parses to a function object and stops there. Like the preload read, and
+// unlike the eval core above, this runs no JS at all, so its release needs
+// no can_eval_gvl_free gate — there is no top level that could reach a Ruby
+// bridge, on any VM. JS_EVAL_TYPE_GLOBAL is what carries that argument:
+// __JS_EvalInternal only resolves imports for the JSModuleDef it builds
+// under JS_EVAL_TYPE_MODULE, so no module loader can fire here either. A
+// module compile is a different story and gets no such freedom. Same
+// MUST-NOT-touch-Ruby constraint as every other released job.
+static void *compile_job_run(void *p)
+{
+  struct compile_job *job = p;
+  job->result = JS_Eval(job->ctx, job->code, job->code_len, job->filename,
+                        JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC | JS_EVAL_FLAG_COMPILE_ONLY);
+  return NULL;
+}
+
+// Inputs are copied because RSTRING_PTR can be invalidated by GC compaction
+// while we're released, same as eval_code_release_gvl.
+static JSValue compile_release_gvl(VMData *data, VALUE r_code, const char *filename)
+{
+  size_t code_len;
+  char *code_buf = copy_rstring_to_owned_buffer(r_code, &code_len, true);
+
+  char *filename_buf = strdup(filename);
+  if (filename_buf == NULL)
+  {
+    free(code_buf);
+    rb_raise(rb_eNoMemError, "failed to allocate compile filename buffer");
+  }
+
+  struct compile_job job = {
+      .ctx = data->context,
+      .code = code_buf,
+      .code_len = code_len,
+      .filename = filename_buf,
+      .result = JS_UNDEFINED,
+  };
+  run_gvl_release_region(data, compile_job_run, &job, &job.result, code_buf, filename_buf);
+
+  return job.result;
+}
+
+struct bytecode_serialize_job
+{
+  VMData *data;
+  JSValue j_compiled; // owned here; see compiled_to_bytecode_string for the rule
+  uint8_t *out_buf;
+  const char *failure_message;
+};
+
+static VALUE bytecode_serialize_body(VALUE p)
+{
+  struct bytecode_serialize_job *job = (struct bytecode_serialize_job *)p;
+
+  size_t out_len;
+  job->out_buf = JS_WriteObject(job->data->context, &out_len, job->j_compiled, JS_WRITE_OBJ_BYTECODE);
+  if (job->out_buf == NULL)
+  {
+    VALUE r_msg = rb_str_new2(job->failure_message);
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
+  }
+
+  VALUE r_bytecode = rb_str_new((const char *)job->out_buf, (long)out_len);
+  rb_enc_associate(r_bytecode, rb_ascii8bit_encoding());
+  return rb_obj_freeze(r_bytecode);
+}
+
+static VALUE bytecode_serialize_cleanup(VALUE p)
+{
+  struct bytecode_serialize_job *job = (struct bytecode_serialize_job *)p;
+
+  JS_FreeValue(job->data->context, job->j_compiled);
+  if (job->out_buf != NULL)
+    js_free(job->data->context, job->out_buf);
+  return Qnil;
+}
+
+static VALUE bytecode_serialize_held(VALUE p)
+{
+  return rb_ensure(bytecode_serialize_body, p, bytecode_serialize_cleanup, p);
+}
+
+// Serializes a compiled function or module into a frozen ASCII-8BIT String.
+// Shared by both compile entry points, and a GVL-held JS entry rather than
+// plain inline code for two reasons: rb_str_new allocates, which is a thread
+// switch point, so without evals_in_flight elevated a concurrent dispose!
+// could free the context between JS_WriteObject and the js_free below; and
+// the blob JS_WriteObject hands back is js_malloc'd, so it has to go home
+// through js_free to keep the runtime's memory accounting straight — the
+// ensure gets it there however the body exits, including an async interrupt
+// landing in rb_str_new.
+//
+// Ownership of j_compiled transfers here in full, but "consumes it" is not
+// quite the whole rule, because run_held_js_entry's disposed check raises
+// ahead of the rb_ensure that does the freeing. That path frees nothing, and
+// must not: dispose! sets disposed before handing the teardown to
+// JS_FreeRuntime, so by the time the check fires j_compiled's storage is
+// either already reclaimed or being reclaimed concurrently with the GVL
+// released, and a JS_FreeValue aimed at it would be a use-after-free rather
+// than a cleanup. Nothing leaks either way — the runtime took it. So: freed
+// through the context on every exit while the VM is alive, abandoned to the
+// teardown once it is not. Unreachable today in any case, since neither
+// caller yields the GVL between its compile and this call.
+static VALUE compiled_to_bytecode_string(VMData *data, JSValue j_compiled, const char *failure_message)
+{
+  struct bytecode_serialize_job job = {
+      .data = data,
+      .j_compiled = j_compiled,
+      .out_buf = NULL,
+      .failure_message = failure_message,
+  };
+  return run_held_js_entry(data, bytecode_serialize_held, (VALUE)&job);
+}
+
+struct js_exception_job
+{
+  VMData *data;
+  JSValue j_exception;
+};
+
+static VALUE js_exception_body(VALUE p)
+{
+  struct js_exception_job *job = (struct js_exception_job *)p;
+  return to_rb_value(job->data->context, job->j_exception); // raises
+}
+
+// Turns a thrown JSValue into the Ruby exception it raises, as a counted JS
+// entry rather than a bare call. Converting an error is JS execution: it
+// reads name, message and stack off the thrown object, and any of the three
+// can be an accessor inherited from a prototype the VM's own code has
+// replaced. So a parse failure on a VM where something did
+//
+//   Object.defineProperty(SyntaxError.prototype, 'name', { get: () => boom() })
+//
+// runs boom() during conversion — and with evals_in_flight back at zero after
+// the release region, a dispose! from that bridge was granted and the rest of
+// the conversion ran against a freed context. Reproducible SIGSEGV.
+//
+// The parse half of a compile is counted and the serialize half is counted;
+// this is the third tail out of the same function, and it was the one left
+// bare.
+static VALUE js_exception_to_rb(VMData *data, JSValue j_exception)
+{
+  struct js_exception_job job = {
+      .data = data,
+      .j_exception = j_exception,
+  };
+  return run_held_js_entry(data, js_exception_body, (VALUE)&job);
+}
+
 static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
 {
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
+  check_oom_poisoned(data);
 
   VALUE r_code, r_opts;
   rb_scan_args(argc, argv, "1:", &r_code, &r_opts);
   const char *filename = parse_code_and_filename(r_code, r_opts);
 
-  arm_eval_timer(data);
+  // Re-check for the same reason vm_m_evalCode does: argument parsing can
+  // yield to a concurrent dispose!, and arm_eval_timer is the first thing
+  // here to touch the context.
+  //
+  // Arming buys a compile nothing: the parser never calls js_poll_interrupts
+  // — every call site is in the interpreter, for-in, instanceof or regexp
+  // exec — so timeout_msec does not bound a compile, and a pathological
+  // source parses for as long as it takes. Releasing the GVL at least keeps
+  // that off every other Ruby thread. It is kept only so an outermost
+  // compile starts from a fresh clock rather than inheriting a lapsed one.
+  //
+  // Nested, it is worse than useless: a compile issued from a bridge
+  // callback (a define_function proc, an on_log listener) would overwrite
+  // the enclosing eval's started_at on every call, so interrupt_handler
+  // never sees the elapsed limit and the enclosing eval never times out at
+  // all. vm_m_loadPolyfillBytecode conditions on the same counter for the
+  // same reason.
+  //
+  // Not a file-wide invariant yet, to be clear. vm_m_evalCode,
+  // vm_m_evalBytecode, call_global_function_body, vm_m_import and
+  // vm_m_drainJobs all still arm unconditionally and all still defeat
+  // timeout_msec the same way. Hoisting the condition into arm_eval_timer
+  // would close them together, but it would also start interrupting
+  // workloads that re-enter the VM from a bridge and today run unbounded —
+  // a semantics change that deserves its own PR rather than a ride on this
+  // one.
+  check_disposed(data);
+  if (data->evals_in_flight == 0)
+    arm_eval_timer(data);
 
+  // A guaranteed no-op: parse_code_and_filename already refused a
+  // non-String, so no to_str can run here and open a yield point between
+  // the check above and the release below.
   StringValue(r_code);
-  JSValue j_func = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), filename,
-                           JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC | JS_EVAL_FLAG_COMPILE_ONLY);
+  // Serializing stays on the GVL-held side of the region: the region frees
+  // its buffers with free(), while JS_WriteObject's blob has to go back
+  // through js_free, and teaching it a second kind of ownership for one
+  // caller isn't worth it. Parsing dominates anyway — leaving the serialize
+  // behind only pulls the two-thread ratio from ~0.5 to ~0.55.
+  JSValue j_func = compile_release_gvl(data, r_code, filename);
   if (JS_IsException(j_func))
   {
-    return to_rb_value(data->context, j_func); // raises Ruby exception
+    return js_exception_to_rb(data, j_func); // raises Ruby exception
   }
 
-  size_t out_len;
-  uint8_t *out_buf = JS_WriteObject(data->context, &out_len, j_func, JS_WRITE_OBJ_BYTECODE);
-  JS_FreeValue(data->context, j_func);
-  if (out_buf == NULL)
-  {
-    VALUE r_msg = rb_str_new2("failed to serialize compiled bytecode");
-    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
-  }
-
-  VALUE r_bytecode = rb_str_new((const char *)out_buf, (long)out_len);
-  rb_enc_associate(r_bytecode, rb_ascii8bit_encoding());
-  js_free(data->context, out_buf);
-  return rb_obj_freeze(r_bytecode);
+  return compiled_to_bytecode_string(data, j_func, "failed to serialize compiled bytecode");
 }
 
 // Stands in for the real loader while compiling a module to bytecode.
@@ -1810,33 +2001,47 @@ static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
+  check_oom_poisoned(data);
   Check_Type(r_code, T_STRING);
   Check_Type(r_name, T_STRING);
 
-  arm_eval_timer(data);
+  // Hoisted above everything that touches the runtime. Check_Type already
+  // ruled out a to_str, but StringValueCStr still calls rb_str_modify to
+  // NUL-terminate a shared or embedded-NUL-free substring, and that
+  // allocates — the same thread switch point the rest of this file treats as
+  // a yield. Left where it read most naturally, inline in the JS_Eval
+  // arguments, a concurrent dispose! landing there would free the runtime
+  // out from under the loader swap and the eval. Coercing first puts the
+  // disposed check after the last yield and before the first context access,
+  // as on the other JS entry points.
+  const char *name = StringValueCStr(r_name);
+
+  check_disposed(data);
+  // Guarded for the reason spelled out in vm_m_compile: only the outermost
+  // JS entry point owns the timeout budget. Nesting can't happen on this
+  // path today — it is private and both callers compile on a disposable VM
+  // they own — but the two compile entry points arming differently would be
+  // a difference with no reason behind it.
+  if (data->evals_in_flight == 0)
+    arm_eval_timer(data);
 
   JS_SetModuleLoaderFunc2(JS_GetRuntime(data->context), NULL, quickjsrb_stub_module_loader,
                           js_module_check_attributes, NULL);
-  JSValue j_mod = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code),
-                          StringValueCStr(r_name),
+  // RSTRING_PTR raw, where the released paths copy — the copy there is for GC
+  // movability, and the NUL that quickjs.h:835 asks for comes free with it.
+  // Held here, the raw pointer carries that NUL anyway: Ruby only shares one
+  // String's buffer with another when the substring runs to the parent's end,
+  // so ptr[len] is always somebody's terminator. Worth stating because the
+  // lexer's comment and regexp scanners test for the NUL before the end
+  // pointer, so a buffer without one would let a source ending mid-comment
+  // read on into whatever follows it in memory.
+  JSValue j_mod = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), name,
                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
   register_module_loader_funcs(data);
   if (JS_IsException(j_mod))
-    return to_rb_value(data->context, j_mod); // raises
+    return js_exception_to_rb(data, j_mod); // raises
 
-  size_t out_len;
-  uint8_t *out_buf = JS_WriteObject(data->context, &out_len, j_mod, JS_WRITE_OBJ_BYTECODE);
-  JS_FreeValue(data->context, j_mod);
-  if (out_buf == NULL)
-  {
-    VALUE r_msg = rb_str_new2("failed to serialize compiled module bytecode");
-    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
-  }
-
-  VALUE r_bytecode = rb_str_new((const char *)out_buf, (long)out_len);
-  rb_enc_associate(r_bytecode, rb_ascii8bit_encoding());
-  js_free(data->context, out_buf);
-  return rb_obj_freeze(r_bytecode);
+  return compiled_to_bytecode_string(data, j_mod, "failed to serialize compiled module bytecode");
 }
 
 // Reads module bytecode into this context. The read registers the JSModuleDef
@@ -2213,6 +2418,7 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   }
 }
 
+
 struct js_entry_call
 {
   int argc;
@@ -2336,8 +2542,7 @@ static VALUE call_global_function_body(VALUE p)
       j_args[i] = to_js_value(data->context, argv[i + 1]);
   }
 
-  clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
-  JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
+  arm_eval_timer(data);
 
   JSValue j_result = JS_Call(data->context, j_func, j_this, nargs, (JSValueConst *)j_args);
 

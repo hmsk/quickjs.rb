@@ -556,6 +556,23 @@ describe Quickjs::VM do
     assert_in_delta(started + 200, Time.now.to_f * 1000, 100)
   end
 
+  # compile arms the eval timer, which resets the clock the enclosing eval is
+  # being measured against. Unguarded, every c() here pushed started_at
+  # forward, interrupt_handler never saw the limit elapse, and the loop ran
+  # forever on a VM that asked to be bounded at 200ms.
+  #
+  # Bounded rather than `while (true)` so a regression fails instead of
+  # hanging the suite: one bridged compile costs ~7us, so the budget lapses
+  # around iteration 27k and the loop caps out at ~1.5s if it doesn't.
+  it "a compile inside a bridge callback does not reset the enclosing eval's budget" do
+    vm = Quickjs::VM.new(timeout_msec: 200)
+    vm.define_function('c') { vm.compile('function a() {}'); 1 }
+
+    _ {
+      vm.eval_code('let s = 0; for (let i = 0; i < 200000; i++) { s += c(); } s')
+    }.must_raise Quickjs::InterruptedError
+  end
+
   it "can enable setTimeout selectively" do
     skip "should timeout"
     vm = Quickjs::VM.new(features: [::Quickjs::MODULE_OS])
@@ -1553,6 +1570,48 @@ describe Quickjs::VM do
       _(err.message).must_match(/poisoned/)
     end
 
+    # Compiling is the entry point that most needs the guard: the state OOM
+    # leaves behind is precisely what another throw on the parser-error path
+    # can turn into a segfault.
+    it "compile raises Quickjs::RuntimeError after the VM is OOM-poisoned" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      _ { vm.eval_code('new Array(2_000_000).fill(0); void 0') }.must_raise Quickjs::RuntimeError
+
+      err = _ { vm.compile('1 + 1') }.must_raise Quickjs::RuntimeError
+      _(err.message).must_match(/poisoned/)
+    end
+
+    # Converting a thrown value reads name, message and stack off the error
+    # object, and any of the three can be an accessor inherited from a
+    # prototype the VM's own JS has replaced. So a parse failure runs a bridge
+    # during conversion — and with the parse's counter already released,
+    # dispose! from that bridge was granted and the rest of the conversion ran
+    # against a freed context. SIGSEGV rather than an exception, so a
+    # regression takes the suite down with it.
+    it "refuses dispose! from a bridge reached while converting a compile error" do
+      vm = Quickjs::VM.new
+      outcome = nil
+      vm.define_function('probe') {
+        outcome = begin
+          vm.dispose!
+          :disposed
+        rescue ThreadError => e
+          e
+        end
+        'Poisoned'
+      }
+      vm.eval_code(<<~JS)
+        Object.defineProperty(SyntaxError.prototype, 'name', { configurable: true, get: () => probe() });
+        0
+      JS
+
+      _ { vm.compile('function (') }.must_raise Quickjs::RuntimeError
+      _(outcome).must_be_kind_of ThreadError
+      _(vm.disposed?).must_equal false
+    ensure
+      vm.dispose!
+    end
+
     it "run with no on: disposes the temporary VM after execution" do
       runnable = @vm.compile('40 + 2')
       _(runnable.run).must_equal 42
@@ -2038,6 +2097,71 @@ describe "Quickjs::Blocking" do
         vm = Quickjs::VM.new(timeout_msec: 10_000)
         begin
           iterations.times { runnable.run(on: vm) }
+        ensure
+          vm.dispose!
+        end
+      end
+    end
+
+    # Parsing is proportional to the source, not to what the source computes,
+    # so the compile workloads below are made large rather than slow. Scaling
+    # this much further needs a different shape: JS_EVAL_FLAG_ASYNC turns
+    # these top-level declarations into closure variables, and somewhere past
+    # 65k of them the compile fails outright.
+    def bulky_source(functions: 2_000)
+      Array.new(functions) {|i|
+        "function f#{i}(a, b) { return a * #{i} + b - Math.sqrt(a + #{i}); }"
+      }.join("\n")
+    end
+
+    it "compiles on a VM per thread without crashing" do
+      source   = bulky_source(functions: 20)
+      expected = Quickjs.compile(source).to_s
+
+      results = Array.new(4) {
+        Thread.new {
+          vm = Quickjs::VM.new(timeout_msec: 10_000)
+
+          begin
+            3.times.map { vm.compile(source).to_s }
+          ensure
+            vm.dispose!
+          end
+        }
+      }.map(&:value)
+
+      # Not `.uniq`: a thread that quietly produced fewer results than it was
+      # asked for would still leave one distinct value behind.
+      _(results.flatten).must_equal Array.new(12, expected)
+    end
+
+    # Compiling is a pool's other bottleneck: a dedicated compile-only VM
+    # turns each new script body into bytecode, and before the release it
+    # held the GVL for the whole parse — stopping every other thread,
+    # including the warmers building the next VMs.
+    #
+    # The release is unconditional here, unlike the two above: a compile-only
+    # eval runs no JS, so no bridge can fire and no can_eval_gvl_free gate is
+    # needed.
+    #
+    # 2000 functions rather than the 500 this started at, because 500 put the
+    # single-threaded side at ~13ms on a macOS runner and a window that short
+    # loses to scheduler noise: it measured 0.88 there and exhausted all three
+    # of the helper's attempts, while the same commit passed the same job on
+    # an earlier run. Raising the workload is available here even though #77
+    # ruled it out for the preload test — that one's confound is dispose!
+    # cost growing with the resident module defs, and a compile VM keeps
+    # nothing, so its dispose! stays flat. Measured: VM.new + dispose! is
+    # 0.04ms, which is 0.6% of the timed block at 500 and 0.1% at 2000, and
+    # the ratio itself holds at 0.50-0.58 from 31KB of source through 262KB.
+    it "compiles concurrently with measurable speedup" do
+      source = bulky_source
+
+      assert_run_in_parallel do |iterations|
+        vm = Quickjs::VM.new(timeout_msec: 10_000)
+
+        begin
+          iterations.times { vm.compile(source) }
         ensure
           vm.dispose!
         end

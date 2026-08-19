@@ -443,7 +443,7 @@ vm.eval_code('1 + 1') # raises Quickjs::RuntimeError "VM has been disposed"
 Thread.new { vm.dispose! }
 ```
 
-Disposing a VM that is mid-evaluation on another thread would free the runtime out from under the running JS, so `dispose!` raises `ThreadError` while JS is executing on the VM (`eval_code`, `call`, `import`, `drain_jobs!`, `Runnable#run`) — dispose after the call returns.
+Disposing a VM that is mid-evaluation on another thread would free the runtime out from under the running JS, so `dispose!` raises `ThreadError` while JS is executing on the VM (`eval_code`, `call`, `import`, `drain_jobs!`, `compile`, `Runnable#run`) — dispose after the call returns.
 
 #### `Quickjs::VM#drain_jobs!`: Run pending JS jobs to completion
 
@@ -464,6 +464,8 @@ Useful when porting JS that assumed V8's implicit-drain semantics — V8 (and th
 #### Threads and parallelism
 
 `eval_code` and `Runnable#run` release Ruby's GVL while JS runs, as long as no JS→Ruby bridge is registered on the VM (no `define_function`, `module_loader`, `on_unhandled_rejection`, and none of `FEATURE_TIMEOUT` / `POLYFILL_FILE` / `POLYFILL_CRYPTO` — `console.log` is fine). Separate VMs on separate Ruby threads then evaluate genuinely in parallel on multi-core hosts — including the compile-once-run-everywhere pattern, where per-thread VMs execute the same `Runnable` concurrently. When a bridge is registered, the GVL stays held for that VM's evals and they serialize as usual.
+
+`compile` releases the GVL for the parse regardless of what is registered on the VM — parsing to bytecode runs no JS, so no bridge can be reached and the no-bridge rule above doesn't apply to it. Serializing the result back into a Ruby String stays on the GVL, which costs about 5% of the available speedup. So a dedicated compile VM, on its own thread, parses in parallel with everything else running in the process. `compile_module` (and therefore `Quickjs.register_module` / `Quickjs.compile_module`) does not release the GVL.
 
 The rules for sharing VMs across threads:
 
