@@ -27,6 +27,9 @@ const int num_native_errors = sizeof(native_errors) / sizeof(native_errors[0]);
 static int dispatch_log(VMData *data, const char *severity, VALUE r_row);
 static void check_disposed(VMData *data);
 static void run_gvl_release_region(VMData *data, void *(*job_run)(void *), void *job, JSValue *j_result, void *owned_buf0, void *owned_buf1);
+// Defined below, next to the stack-bounds query it depends on; enter_js_entry
+// above needs it.
+static void rebase_stack_limit(VMData *data);
 
 JSValue to_js_value(JSContext *ctx, VALUE r_value);
 VALUE to_rb_value(JSContext *ctx, JSValue j_val);
@@ -1489,6 +1492,72 @@ static void *eval_code_job_run(void *p)
   return NULL;
 }
 
+// Opens a JS entry on this VM, or refuses if another thread already has one
+// open. README's "one VM, one thread at a time" rule stops being advisory
+// here: QuickJS contexts have no internal locking, so two threads inside
+// JS_Eval on the same context corrupt the heap, and since eval can release
+// the GVL they really do run at the same time rather than interleaving by
+// accident.
+//
+// A mutex would be the wrong instrument twice over. Held across the release
+// it deadlocks — the unlock lives after rb_thread_call_without_gvl
+// re-acquires the GVL, so a second thread blocks in pthread_mutex_lock
+// while holding the GVL and the first can never get back in to release it.
+// And a plain mutex self-deadlocks on the nesting this codebase relies on,
+// where an on_log listener inside a released region re-enters the same VM
+// on the same thread. Comparing the owner has neither problem: it lets
+// nesting through by construction and needs no lock at all.
+// Split from the raise so callers holding malloc'd state can test first and
+// clean up before unwinding (run_gvl_release_region owns input buffers by
+// the time it asks).
+static bool js_entry_owned_elsewhere(VMData *data)
+{
+  return data->evals_in_flight > 0 && data->owner_thread != rb_thread_current();
+}
+
+static void refuse_cross_thread_entry(VMData *data)
+{
+  rb_raise(rb_eThreadError,
+           "cannot use a Quickjs::VM from two threads at once; it is already evaluating on %+" PRIsVALUE,
+           data->owner_thread);
+}
+
+// Entry-point guard, sitting next to check_disposed. enter_js_entry alone is
+// not enough: several entry points read or mutate runtime state before they
+// reach a counted region — JS_IsJobPending in drain_jobs!, arm_eval_timer
+// almost everywhere, JS_SetModuleLoaderFunc2 in compile_module — and those
+// touches are already unsafe against another thread's in-flight JS.
+static void check_js_entry_owner(VMData *data)
+{
+  if (js_entry_owned_elsewhere(data))
+    refuse_cross_thread_entry(data);
+}
+
+static void enter_js_entry(VMData *data)
+{
+  if (js_entry_owned_elsewhere(data))
+    refuse_cross_thread_entry(data);
+
+  // After the refusal and before the count, in that order for two reasons.
+  // The re-base mutates rt->stack_top, which another thread's in-flight JS is
+  // checking itself against, so a caller about to be turned away must not have
+  // touched it. And rebase_stack_limit reads evals_in_flight to recognise the
+  // outermost entry, which the increment below is about to spoil.
+  rebase_stack_limit(data);
+
+  data->owner_thread = rb_thread_current();
+  data->evals_in_flight++;
+}
+
+// Balances enter_js_entry. Clearing the owner only as the outermost entry
+// closes is what lets a VM be handed between threads sequentially, which
+// the README allows and pool warmers depend on.
+static void leave_js_entry(VMData *data)
+{
+  if (--data->evals_in_flight == 0)
+    data->owner_thread = Qnil;
+}
+
 // A GVL-release region — the one place that owns the handshake required to
 // run a pure-C QuickJS job with the GVL released: the save/restore of
 // gvl_released_js (restore, not clear, so a region nested through an
@@ -1525,7 +1594,7 @@ static VALUE gvl_release_region_cleanup(VALUE p)
   struct gvl_release_region *region = (struct gvl_release_region *)p;
   VMData *data = region->data;
   data->gvl_released_js = region->prev_gvl_released;
-  data->evals_in_flight--;
+  leave_js_entry(data);
   data->gvl_release_regions--;
   free(region->owned_bufs[0]);
   free(region->owned_bufs[1]);
@@ -1645,11 +1714,14 @@ static void rebase_stack_limit(VMData *data)
 
 static void run_gvl_release_region(VMData *data, void *(*job_run)(void *), void *job, JSValue *j_result, void *owned_buf0, void *owned_buf1)
 {
-  if (data->disposed)
+  // Both refusals have to happen before the buffers are handed to the
+  // region, since the rb_ensure that would free them is not armed yet.
+  if (data->disposed || js_entry_owned_elsewhere(data))
   {
     free(owned_buf0);
     free(owned_buf1);
-    check_disposed(data); // raises
+    check_disposed(data);            // raises when disposed
+    refuse_cross_thread_entry(data); // otherwise it was the owner check
   }
 
   struct gvl_release_region region = {
@@ -1662,8 +1734,7 @@ static void run_gvl_release_region(VMData *data, void *(*job_run)(void *), void 
       .completed = false,
   };
 
-  rebase_stack_limit(data);
-  data->evals_in_flight++;
+  enter_js_entry(data); // cannot raise: the check above already passed
   data->gvl_release_regions++;
   data->gvl_released_js = true;
   rb_ensure(gvl_release_region_run, (VALUE)&region, gvl_release_region_cleanup, (VALUE)&region);
@@ -1685,7 +1756,7 @@ static void check_no_gvl_release_in_flight(VMData *data)
 
 static VALUE evals_in_flight_release(VALUE p)
 {
-  ((VMData *)p)->evals_in_flight--;
+  leave_js_entry((VMData *)p);
   return Qnil;
 }
 
@@ -1706,8 +1777,9 @@ static VALUE evals_in_flight_release(VALUE p)
 static VALUE run_held_js_entry(VMData *data, VALUE (*body)(VALUE), VALUE arg)
 {
   check_disposed(data);
-  rebase_stack_limit(data);
-  data->evals_in_flight++;
+  // Raises before the ensure is armed, which is safe here: unlike the
+  // release region, this path owns no malloc'd state at this point.
+  enter_js_entry(data);
   return rb_ensure(body, arg, evals_in_flight_release, (VALUE)data);
 }
 
@@ -1793,6 +1865,7 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
 
   check_disposed(data);
   check_oom_poisoned(data);
+  check_js_entry_owner(data);
 
   VALUE r_code, r_opts;
   rb_scan_args(argc, argv, "1:", &r_code, &r_opts);
@@ -2003,6 +2076,7 @@ static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
 
   check_disposed(data);
   check_oom_poisoned(data);
+  check_js_entry_owner(data);
 
   VALUE r_code, r_opts;
   rb_scan_args(argc, argv, "1:", &r_code, &r_opts);
@@ -2102,6 +2176,7 @@ static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
 
   check_disposed(data);
   check_oom_poisoned(data);
+  check_js_entry_owner(data);
   Check_Type(r_code, T_STRING);
   Check_Type(r_name, T_STRING);
 
@@ -2171,6 +2246,7 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_
 
   check_disposed(data);
   check_oom_poisoned(data);
+  check_js_entry_owner(data);
 
   // Strict String rather than StringValue's coercion, matching
   // vm_m_evalBytecode: bytecode is a binary blob, so there's no sensible
@@ -2269,6 +2345,7 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
 
   check_disposed(data);
   check_oom_poisoned(data);
+  check_js_entry_owner(data);
 
   if (!RB_TYPE_P(r_bytecode, T_STRING))
   {
@@ -2353,6 +2430,7 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
 
   check_disposed(data);
   check_oom_poisoned(data);
+  check_js_entry_owner(data);
 
   // "Unbudgeted" needs enforcing, not just skipping arm_eval_timer: the
   // interrupt handler installed by a previous eval stays armed with that
@@ -2554,6 +2632,7 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
+  check_js_entry_owner(data);
   check_no_gvl_release_in_flight(data);
 
   struct define_function_call call = {
@@ -2715,6 +2794,7 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
 
   check_disposed(data);
   check_oom_poisoned(data);
+  check_js_entry_owner(data);
 
   // evals_in_flight stays elevated for the whole call, not just the
   // JS_Eval / JS_Call moments: the body holds live JSValues across Ruby
@@ -2876,6 +2956,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
 
   check_disposed(data);
   check_oom_poisoned(data);
+  check_js_entry_owner(data);
 
   // Module top-level code is user JS like any eval — budget it. Without
   // this, import ran under whatever handler the previous entry point
@@ -2932,6 +3013,7 @@ static VALUE vm_m_memoryUsage(VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
   check_disposed(data);
+  check_js_entry_owner(data);
   JSMemoryUsage s;
   JS_ComputeMemoryUsage(JS_GetRuntime(data->context), &s);
   VALUE h = rb_hash_new();
@@ -2955,6 +3037,7 @@ static VALUE vm_m_runGC(VALUE r_self)
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
   check_disposed(data);
+  check_js_entry_owner(data);
   JS_RunGC(JS_GetRuntime(data->context));
   return Qnil;
 }
@@ -2983,6 +3066,7 @@ static VALUE vm_m_drainJobs(VALUE r_self)
 
   check_disposed(data);
   check_oom_poisoned(data);
+  check_js_entry_owner(data);
 
   if (!JS_IsJobPending(JS_GetRuntime(data->context)))
     return INT2NUM(0);

@@ -517,6 +517,86 @@ describe Quickjs::VM do
     end
   end
 
+  describe "one VM, one thread at a time" do
+    # QuickJS contexts have no internal locking, so two threads inside JS on
+    # one VM corrupt the heap. The bridge blocking on a Queue is what makes
+    # this deterministic: the proc yields the GVL while it waits, so the
+    # second thread genuinely runs while the first is mid-entry.
+    it "refuses a second thread while a JS entry is in flight" do
+      vm = Quickjs::VM.new(timeout_msec: 30_000)
+      entered = Queue.new
+      release = Queue.new
+      vm.define_function('pause') do
+        entered << :in
+        release.pop
+        1
+      end
+
+      runner = Thread.new { vm.eval_code('pause(); 42') }
+      entered.pop
+
+      err = _ { vm.eval_code('1 + 1') }.must_raise ThreadError
+      _(err.message).must_match(/from two threads at once/)
+
+      release << :go
+      _(runner.value).must_equal 42
+    end
+
+    it "refuses every entry point, not just eval_code" do
+      vm = Quickjs::VM.new(timeout_msec: 30_000)
+      entered = Queue.new
+      release = Queue.new
+      vm.define_function('pause') do
+        entered << :in
+        release.pop
+        1
+      end
+      vm.eval_code('globalThis.noop = () => 1')
+
+      runner = Thread.new { vm.eval_code('pause(); 42') }
+      entered.pop
+
+      _ { vm.compile('1 + 1') }.must_raise ThreadError
+      _ { vm.call('noop') }.must_raise ThreadError
+      _ { vm.drain_jobs! }.must_raise ThreadError
+      _ { vm.import('X', from: 'export default 1;') }.must_raise ThreadError
+      _ { vm.define_function('another') { 1 } }.must_raise ThreadError
+      # Not JS entries, but they walk the same runtime: JS_RunGC beside live
+      # JS is a heap corruptor, and the usage read races the allocator.
+      _ { vm.gc! }.must_raise ThreadError
+      _ { vm.memory_usage }.must_raise ThreadError
+
+      release << :go
+      _(runner.value).must_equal 42
+    end
+
+    # The counter alone cannot express the rule: same-thread nesting elevates
+    # it too, and a bridge re-entering its own VM is a supported shape.
+    it "still allows the owning thread to re-enter from a bridge" do
+      vm = Quickjs::VM.new
+      vm.define_function('nested') { vm.eval_code('1 + 1') }
+
+      _(vm.eval_code('nested()')).must_equal 2
+    end
+
+    it "still allows a VM to move between threads when nothing is in flight" do
+      vm = Quickjs::VM.new
+
+      _(Thread.new { vm.eval_code('1 + 1') }.value).must_equal 2
+      _(Thread.new { vm.eval_code('2 + 2') }.value).must_equal 4
+      _(vm.eval_code('3 + 3')).must_equal 6
+    end
+
+    # A stranded owner would lock the VM to one thread for good, the same way
+    # a stranded counter would refuse dispose! forever.
+    it "releases ownership when the entry ends by raising" do
+      vm = Quickjs::VM.new
+      _ { vm.eval_code('nope()') }.must_raise Quickjs::ReferenceError
+
+      _(Thread.new { vm.eval_code('1 + 1') }.value).must_equal 2
+    end
+  end
+
   it "accepts some options to constrain its resource" do
     vm = Quickjs::VM.new(
       memory_limit: 1024 * 1024,
