@@ -249,7 +249,11 @@ static VALUE vm_alloc(VALUE r_self)
 
 // Utils
 
-#define QUICKJSRB_GENERATED_NAME_SIZE 16
+// Derived, not two independent numbers: snprintf truncates silently, so a
+// buffer sized apart from the requested length would quietly hand back a
+// shorter name than asked for the moment anyone raised the entropy.
+#define QUICKJSRB_GENERATED_NAME_LEN 12
+#define QUICKJSRB_GENERATED_NAME_SIZE (QUICKJSRB_GENERATED_NAME_LEN + 1)
 
 static void random_filename(char buf[QUICKJSRB_GENERATED_NAME_SIZE])
 {
@@ -257,7 +261,7 @@ static void random_filename(char buf[QUICKJSRB_GENERATED_NAME_SIZE])
       rb_const_get(rb_cClass, rb_intern("SecureRandom")),
       rb_intern("alphanumeric"),
       1,
-      INT2NUM(12));
+      INT2NUM(QUICKJSRB_GENERATED_NAME_LEN));
   // Copy the bytes out rather than handing back StringValueCStr(r_rand):
   // nothing else references the generated String, so a GC anywhere in the
   // caller's remaining work frees it and leaves the caller formatting bytes
