@@ -2640,14 +2640,22 @@ static VALUE import_body(VALUE p)
   VALUE r_custom_exposure = rb_hash_aref(r_opts, ID2SYM(rb_intern("code_to_expose")));
 
   char *filename;
+  char generated_filename[QUICKJSRB_GENERATED_NAME_SIZE];
   VALUE r_seeded_key = Qnil;
   if (!NIL_P(r_filename))
   {
+    // Borrowed for the rest of the call, so r_filename has to outlive the
+    // bridge snprintf below. A literal String is rooted by the kwargs hash
+    // through argv, but StringValueCStr writes a coerced String back through
+    // &r_filename, and a to_str result is referenced by nothing else — only
+    // this local, which the compiler is free to treat as dead right here
+    // while filename is still being read. Guarded after the last read.
     filename = StringValueCStr(r_filename);
   }
   else
   {
-    filename = random_string();
+    random_filename(generated_filename);
+    filename = generated_filename;
     char *source = StringValueCStr(r_from);
     JSValue module = JS_Eval(data->context, source, strlen(source), filename, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
     if (JS_IsException(module))
@@ -2694,6 +2702,7 @@ static VALUE import_body(VALUE p)
   int length = snprintf(NULL, 0, importAndGlobalizeModule, import_name, filename, globalize);
   char *result = (char *)malloc(length + 1);
   snprintf(result, length + 1, importAndGlobalizeModule, import_name, filename, globalize);
+  RB_GC_GUARD(r_filename);
 
   JSValue j_codeResult = JS_Eval(data->context, result, strlen(result), vmInternalFilename, JS_EVAL_TYPE_MODULE);
   free(result);

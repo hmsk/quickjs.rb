@@ -249,14 +249,25 @@ static VALUE vm_alloc(VALUE r_self)
 
 // Utils
 
-static char *random_string()
+// Derived, not two independent numbers: snprintf truncates silently, so a
+// buffer sized apart from the requested length would quietly hand back a
+// shorter name than asked for the moment anyone raised the entropy.
+#define QUICKJSRB_GENERATED_NAME_LEN 12
+#define QUICKJSRB_GENERATED_NAME_SIZE (QUICKJSRB_GENERATED_NAME_LEN + 1)
+
+static void random_filename(char buf[QUICKJSRB_GENERATED_NAME_SIZE])
 {
   VALUE r_rand = rb_funcall(
       rb_const_get(rb_cClass, rb_intern("SecureRandom")),
       rb_intern("alphanumeric"),
       1,
-      INT2NUM(12));
-  return StringValueCStr(r_rand);
+      INT2NUM(QUICKJSRB_GENERATED_NAME_LEN));
+  // Copy the bytes out rather than handing back StringValueCStr(r_rand):
+  // nothing else references the generated String, so a GC anywhere in the
+  // caller's remaining work frees it and leaves the caller formatting bytes
+  // from a recycled slot.
+  snprintf(buf, QUICKJSRB_GENERATED_NAME_SIZE, "%s", StringValueCStr(r_rand));
+  RB_GC_GUARD(r_rand);
 }
 
 static bool is_native_error_name(const char *error_name)
