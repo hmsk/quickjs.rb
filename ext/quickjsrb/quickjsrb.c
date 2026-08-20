@@ -2115,6 +2115,9 @@ static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
   // a semantics change that deserves its own PR rather than a ride on this
   // one.
   check_disposed(data);
+  // Same re-check as vm_m_evalCode, for the same reason: parsing yielded, so
+  // the owner may have changed since the check at entry.
+  check_js_entry_owner(data);
   if (data->evals_in_flight == 0)
     arm_eval_timer(data);
 
@@ -2175,6 +2178,15 @@ static JSModuleDef *quickjsrb_stub_module_loader(JSContext *ctx, const char *mod
 // Quickjs._compile_registered_module honors that by compiling on a disposable
 // VM it owns; exposing this publicly would let a compile race an import on a
 // shared VM and resolve it against stubs.
+struct compile_module_job
+{
+  VMData *data;
+  VALUE r_code;
+  const char *name;
+};
+
+static VALUE compile_module_body(VALUE p);
+
 static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
 {
   VMData *data;
@@ -2198,17 +2210,36 @@ static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
   const char *name = StringValueCStr(r_name);
 
   check_disposed(data);
+  // Re-checked after the coercion above yields, and then immediately turned
+  // into a claim by run_held_js_entry below: unlike the other compile paths,
+  // the runtime work here is a full JS_Eval plus a runtime-level loader swap,
+  // so a check that recorded nothing would leave both of those exposed to a
+  // second thread passing the same idle check.
+  check_js_entry_owner(data);
   // Guarded for the reason spelled out in vm_m_compile: only the outermost
   // JS entry point owns the timeout budget. Nesting can't happen on this
   // path today — it is private and both callers compile on a disposable VM
   // they own — but the two compile entry points arming differently would be
   // a difference with no reason behind it.
+  // Armed before the claim below, not after: the condition reads the counter
+  // that run_held_js_entry is about to raise, so claiming first would skip
+  // the arm on every outermost compile.
   if (data->evals_in_flight == 0)
     arm_eval_timer(data);
 
-  // The JS_Eval below is inline rather than routed through either counting
-  // choke point, so it takes the re-base itself.
-  rebase_stack_limit(data);
+  struct compile_module_job job = {
+      .data = data,
+      .r_code = r_code,
+      .name = name,
+  };
+  return run_held_js_entry(data, compile_module_body, (VALUE)&job);
+}
+
+static VALUE compile_module_body(VALUE p)
+{
+  struct compile_module_job *job = (struct compile_module_job *)p;
+  VMData *data = job->data;
+  VALUE r_code = job->r_code;
 
   JS_SetModuleLoaderFunc2(JS_GetRuntime(data->context), NULL, quickjsrb_stub_module_loader,
                           js_module_check_attributes, NULL);
@@ -2220,7 +2251,7 @@ static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
   // lexer's comment and regexp scanners test for the NUL before the end
   // pointer, so a buffer without one would let a source ending mid-comment
   // read on into whatever follows it in memory.
-  JSValue j_mod = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), name,
+  JSValue j_mod = JS_Eval(data->context, RSTRING_PTR(r_code), RSTRING_LEN(r_code), job->name,
                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
   register_module_loader_funcs(data);
   if (JS_IsException(j_mod))
