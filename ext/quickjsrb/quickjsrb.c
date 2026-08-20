@@ -1887,6 +1887,12 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
   // already refused a non-String), and dispose! refuses once either of those
   // has counted us, so re-checking here closes the window on both paths.
   check_disposed(data);
+  // Ownership needs the same re-check as disposal, and for the same reason:
+  // the parsing above yields, so another thread can have taken the VM since
+  // the check at entry. arm_eval_timer writes the shared eval_time, so
+  // without this it would reset the budget of the eval that thread is
+  // already running — the counted regions below refuse, but only after.
+  check_js_entry_owner(data);
   arm_eval_timer(data);
 
   StringValue(r_code);
@@ -2605,11 +2611,14 @@ static VALUE define_global_function_body(VALUE p)
 }
 
 // Registering a function is a JS entry point like any other, and was the one
-// that never said so. The body resolves the path with JS_Eval and
-// JS_GetPropertyStr, either of which can land on an accessor property and run
-// user JS that calls a bridge — and it interleaves that with rb_funcall(to_s)
-// on caller-supplied objects, which yields the GVL. With evals_in_flight left
-// at zero throughout, dispose! did not refuse:
+// that never said so. Two independent problems land on this call, and routing
+// the body through run_held_js_entry is what closes both.
+//
+// Lifetime: the body resolves the path with JS_Eval and JS_GetPropertyStr,
+// either of which can land on an accessor property and run user JS that calls
+// a bridge — and it interleaves that with rb_funcall(to_s) on caller-supplied
+// objects, which yields the GVL. With evals_in_flight left at zero throughout,
+// dispose! did not refuse:
 //
 //   vm.define_function('boom') { vm.dispose!; 1 }
 //   vm.eval_code("Object.defineProperty(globalThis, 'myLib', { get() { boom(); return {}; } }); 0")
@@ -2619,6 +2628,22 @@ static VALUE define_global_function_body(VALUE p)
 // JS_GetPropertyStr and JS_FreeValue against a freed JSContext. Elevating the
 // counter for the whole body is what every other JS entry point already does,
 // and it turns that into the ThreadError dispose! owes the caller.
+//
+// Concurrency: that same GVL yield lets a second thread in. A bare owner check
+// would pass on an idle VM and record nothing, so the second thread passes the
+// same idle check and walks into JS_Eval alongside the traversal. Only
+// claiming the VM closes that.
+//
+// Neither reason subsumes the other — one is a single thread freeing the
+// context under its own traversal, the other is two threads inside JS_Eval at
+// once — so retiring one of them is not grounds for unwinding the routing.
+//
+// The absent check_js_entry_owner beside check_disposed is deliberate, not the
+// oversight it looks like next to the other six entry points: this is the one
+// where nothing touches the runtime before the counted region, so the claim
+// inside run_held_js_entry is the whole guard. check_no_gvl_release_in_flight
+// and rb_scan_args above it read no runtime state; anything added there that
+// does needs the explicit check back.
 static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
 {
   rb_need_block();
@@ -2632,7 +2657,6 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_js_entry_owner(data);
   check_no_gvl_release_in_flight(data);
 
   struct define_function_call call = {
@@ -2813,6 +2837,12 @@ static VALUE vm_m_set_module_loader(VALUE r_self, VALUE r_loader)
   if (!NIL_P(r_loader) && !rb_obj_is_kind_of(r_loader, rb_cProc))
     rb_raise(rb_eTypeError, "module_loader must be a Proc or nil");
 
+  // register_module_loader_funcs below dereferences the context, so a
+  // disposed VM was a use-after-free here, and a VM being evaluated by
+  // another thread means swapping the loader out from under a running
+  // import. Neither was checked.
+  check_disposed(data);
+  check_js_entry_owner(data);
   check_no_gvl_release_in_flight(data);
   data->module_loader = r_loader;
   // Stale entries from the previous loader's policy would survive the
