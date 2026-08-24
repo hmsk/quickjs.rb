@@ -877,6 +877,35 @@ describe Quickjs::VM do
         err = _ { @vm.define_function(["obj", 123]) { } }.must_raise TypeError
         _(err.message).must_include "Symbol or a String"
       end
+
+      # Resolving a path is not a lookup: the first segment goes through
+      # JS_Eval and the rest through JS_GetPropertyStr, so an accessor
+      # property runs user JS that can call back into Ruby. Until
+      # define_function elevated evals_in_flight for its whole body, dispose!
+      # did not refuse from inside that callback, and the traversal carried on
+      # against a freed JSContext — a SIGSEGV rather than an exception, so a
+      # regression takes the whole suite down with it.
+      it "refuses dispose! from a bridge reached while resolving the path" do
+        outcome = nil
+        @vm.eval_code(<<~JS)
+          globalThis._lib = {};
+          Object.defineProperty(globalThis, 'myLib', { get: () => { probe(); return _lib; } });
+          0
+        JS
+        @vm.define_function('probe') {
+          outcome = begin
+            @vm.dispose!
+            :disposed
+          rescue ThreadError => e
+            e
+          end
+          nil
+        }
+
+        _(@vm.define_function(["myLib", "hello"]) { 42 }).must_equal [:myLib, :hello]
+        _(outcome).must_be_kind_of ThreadError
+        _(@vm.eval_code("_lib.hello()")).must_equal 42
+      end
     end
   end
 

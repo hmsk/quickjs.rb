@@ -2289,20 +2289,21 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   return Qnil;
 }
 
-static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
+struct define_function_call
 {
-  rb_need_block();
-
+  VMData *data;
   VALUE r_name;
   VALUE r_flags;
   VALUE r_block;
-  rb_scan_args(argc, argv, "10*&", &r_name, &r_flags, &r_block);
+};
 
-  VMData *data;
-  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
-
-  check_disposed(data);
-  check_no_gvl_release_in_flight(data);
+static VALUE define_global_function_body(VALUE p)
+{
+  struct define_function_call *call = (struct define_function_call *)p;
+  VMData *data = call->data;
+  VALUE r_name = call->r_name;
+  VALUE r_flags = call->r_flags;
+  VALUE r_block = call->r_block;
 
   if (RB_TYPE_P(r_name, T_ARRAY))
   {
@@ -2347,9 +2348,12 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
     {
       VALUE r_first_str = rb_funcall(RARRAY_AREF(r_name, 0), rb_intern("to_s"), 0);
       const char *first_seg = StringValueCStr(r_first_str);
-      // This lookup eval runs under whatever interrupt handler the
-      // previous eval left armed; refresh the clock so a lapsed budget
-      // can't misfire here and masquerade as "'%s' is not an object".
+      // Resolving the first segment is not a lookup, it is an eval: `myLib`
+      // can be an accessor property, so this runs arbitrary JS and can reach
+      // a Ruby bridge. It runs under whatever interrupt handler the previous
+      // eval left armed, so refresh the clock — a lapsed budget misfires here
+      // and masquerades as "'%s' is not an object", blaming the caller's path
+      // for what was a timeout.
       arm_eval_timer(data);
       j_parent = JS_Eval(data->context, first_seg, strlen(first_seg), vmInternalFilename, JS_EVAL_TYPE_GLOBAL);
 
@@ -2418,6 +2422,44 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   }
 }
 
+// Registering a function is a JS entry point like any other, and was the one
+// that never said so. The body resolves the path with JS_Eval and
+// JS_GetPropertyStr, either of which can land on an accessor property and run
+// user JS that calls a bridge — and it interleaves that with rb_funcall(to_s)
+// on caller-supplied objects, which yields the GVL. With evals_in_flight left
+// at zero throughout, dispose! did not refuse:
+//
+//   vm.define_function('boom') { vm.dispose!; 1 }
+//   vm.eval_code("Object.defineProperty(globalThis, 'myLib', { get() { boom(); return {}; } }); 0")
+//   vm.define_function(['myLib', 'hello']) { 1 }   # SIGSEGV
+//
+// dispose! succeeds from inside the getter, and the traversal then runs
+// JS_GetPropertyStr and JS_FreeValue against a freed JSContext. Elevating the
+// counter for the whole body is what every other JS entry point already does,
+// and it turns that into the ThreadError dispose! owes the caller.
+static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
+{
+  rb_need_block();
+
+  VALUE r_name;
+  VALUE r_flags;
+  VALUE r_block;
+  rb_scan_args(argc, argv, "10*&", &r_name, &r_flags, &r_block);
+
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  check_disposed(data);
+  check_no_gvl_release_in_flight(data);
+
+  struct define_function_call call = {
+      .data = data,
+      .r_name = r_name,
+      .r_flags = r_flags,
+      .r_block = r_block,
+  };
+  return run_held_js_entry(data, define_global_function_body, (VALUE)&call);
+}
 
 struct js_entry_call
 {
