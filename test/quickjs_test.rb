@@ -518,6 +518,16 @@ describe Quickjs::VM do
   end
 
   describe "one VM, one thread at a time" do
+    # Every wait below is bounded. A runner thread that dies before it reaches
+    # the bridge never signals, and an unbounded pop turns that into a six hour
+    # CI hang rather than a failure: #82 kills these threads on Linux with a
+    # false stack overflow, and the suite sat at the GitHub job limit three
+    # times before the cause was visible.
+    def await(queue, what)
+      queue.pop(timeout: 10) ||
+        flunk("timed out waiting for #{what}; a thread likely died before signalling (see #82)")
+    end
+
     # QuickJS contexts have no internal locking, so two threads inside JS on
     # one VM corrupt the heap. The bridge blocking on a Queue is what makes
     # this deterministic: the proc yields the GVL while it waits, so the
@@ -528,12 +538,12 @@ describe Quickjs::VM do
       release = Queue.new
       vm.define_function('pause') do
         entered << :in
-        release.pop
+        release.pop(timeout: 30)
         1
       end
 
       runner = Thread.new { vm.eval_code('pause(); 42') }
-      entered.pop
+      await(entered, "the bridge to be entered")
 
       err = _ { vm.eval_code('1 + 1') }.must_raise ThreadError
       _(err.message).must_match(/from two threads at once/)
@@ -548,13 +558,13 @@ describe Quickjs::VM do
       release = Queue.new
       vm.define_function('pause') do
         entered << :in
-        release.pop
+        release.pop(timeout: 30)
         1
       end
       vm.eval_code('globalThis.noop = () => 1')
 
       runner = Thread.new { vm.eval_code('pause(); 42') }
-      entered.pop
+      await(entered, "the bridge to be entered")
 
       _ { vm.compile('1 + 1') }.must_raise ThreadError
       _ { vm.call('noop') }.must_raise ThreadError
@@ -597,7 +607,7 @@ describe Quickjs::VM do
       release = Queue.new
       vm.define_function('gate') do
         in_getter << :in
-        release.pop
+        release.pop(timeout: 30)
         1
       end
       vm.eval_code(<<~JS)
@@ -607,7 +617,7 @@ describe Quickjs::VM do
       JS
 
       definer = Thread.new { vm.define_function(%w[myLib hello]) { 42 } }
-      in_getter.pop # provably inside JS_Eval on the path's first segment
+      await(in_getter, "the path getter to be entered") # inside JS_Eval on the first segment
 
       _ { vm.eval_code('1 + 1') }.must_raise ThreadError
 
@@ -624,12 +634,12 @@ describe Quickjs::VM do
       release = Queue.new
       vm.define_function('pause') do
         entered << :in
-        release.pop
+        release.pop(timeout: 30)
         1
       end
 
       runner = Thread.new { vm.eval_code('pause(); 42') }
-      entered.pop
+      await(entered, "the bridge to be entered")
 
       _ { vm.module_loader = ->(_s, _i) { nil } }.must_raise ThreadError
 
