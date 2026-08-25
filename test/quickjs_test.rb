@@ -2122,10 +2122,6 @@ describe "Quickjs::Blocking" do
     _(run_threads(&block)).must_equal %w(t1 t1 t1 t2)
   end
 
-  def pend_on_ubuntu
-    skip('unresolved stack overflow on Ubuntu of GitHub Actions') unless RUBY_PLATFORM.match(/darwin/)
-  end
-
   describe "ProcessBlocking" do
     before do
       @vm = Quickjs::VM.new(timeout_msec: 500, features: [::Quickjs::MODULE_OS])
@@ -2138,7 +2134,6 @@ describe "Quickjs::Blocking" do
     end
 
     it "ensure Kernel#sleep via a provided function is fine" do
-      pend_on_ubuntu
       @vm.define_function 'rbsleep' do |n|
         sleep n
       end
@@ -2156,28 +2151,24 @@ describe "Quickjs::Blocking" do
     # blocking-looking calls (os.sleep, os.setTimeout, os.sleepAsync) no
     # longer hold up sibling Ruby threads.
     it "os.sleep does not block other threads" do
-      pend_on_ubuntu
       assert_sleep_a_sec_within_thread do
         @vm.eval_code('os.sleep(200);')
       end
     end
 
     it "awaiting os.setTimeout does not block other threads" do
-      pend_on_ubuntu
       assert_sleep_a_sec_within_thread do
         @vm.eval_code('await new Promise(resolve => os.setTimeout(resolve, 200));')
       end
     end
 
     it "awaiting async function which wraps os.setTimeout does not block other threads" do
-      pend_on_ubuntu
       assert_sleep_a_sec_within_thread do
         @vm.eval_code('async function top () { await new Promise(resolve => os.setTimeout(resolve, 200)); } await top();')
       end
     end
 
     it "awaiting os.sleepAsync does not block other threads" do
-      pend_on_ubuntu
       assert_sleep_a_sec_within_thread do
         @vm.eval_code('async function top () { await os.sleepAsync(200); } await top();')
       end
@@ -2190,7 +2181,6 @@ describe "Quickjs::Blocking" do
     end
 
     it "awaiting setTimeout does not block other threads" do
-      pend_on_ubuntu
       assert_sleep_a_sec_within_thread do
         @vm.eval_code('await new Promise(resolve => setTimeout(resolve, 200));')
       end
@@ -2356,7 +2346,6 @@ describe "Quickjs::Blocking" do
     # path must keep the GVL held when FEATURE_TIMEOUT is enabled, otherwise
     # those Ruby APIs run without the GVL and crash.
     it "tolerates setTimeout in JS without crashing the interpreter" do
-      pend_on_ubuntu
       vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
 
       begin
