@@ -581,6 +581,66 @@ describe Quickjs::VM do
     _ { vm.eval_code("await longProcess()") }.must_raise Quickjs::InterruptedError
   end
 
+  describe "StackLimitFollowsTheEvaluatingThread" do
+    RUNAWAY = 'function f(n){ return 1 + f(n + 1); } f(0)'
+
+    # A thread that never finishes would hang the suite rather than fail it,
+    # and the failure mode being fixed here is exactly one that used to hang.
+    def value_within(seconds, &block)
+      thread = Thread.new(&block)
+      flunk("thread did not finish within #{seconds}s") unless thread.join(seconds)
+      thread.value
+    end
+
+    # JS_NewRuntime latches rt->stack_top from the creating thread and nothing
+    # revisits it, so the overflow limit keeps describing a stack the evaluating
+    # thread is not on. Which direction trips is down to where the OS put the two
+    # stacks, so both are covered: on Linux the default budget is already a wide
+    # enough gap, while on macOS the stacks land close enough that it takes a
+    # smaller budget to expose the same latch.
+    it "evaluates from a thread other than the one that built the VM" do
+      vm = Quickjs::VM.new
+
+      _(value_within(10) { vm.eval_code('1 + 1') }).must_equal 2
+    end
+
+    it "evaluates a VM built on another thread from the main one" do
+      vm = nil
+      Thread.new { vm = Quickjs::VM.new(max_stack_size: 256 * 1024) }.join
+
+      _(vm.eval_code('1 + 1')).must_equal 2
+    end
+
+    it "hands VMs from warmer threads to worker threads without false overflows" do
+      queue = SizedQueue.new(4)
+      warmers = 2.times.map { Thread.new { 10.times { queue << Quickjs::VM.new } } }
+      results = 2.times.map do
+        Thread.new { 10.times.map { queue.pop.eval_code('1 + 1') } }
+      end
+      warmers.each { |t| flunk("warmer stalled") unless t.join(20) }
+      values = results.flat_map { |t| flunk("worker stalled") unless t.join(20); t.value }
+
+      _(values).must_equal Array.new(20, 2)
+    end
+
+    # Re-basing the limit must not become a way of removing it.
+    it "still stops runaway recursion on the thread that built the VM" do
+      vm = Quickjs::VM.new(timeout_msec: 10_000)
+
+      _ { vm.eval_code(RUNAWAY) }.must_raise Quickjs::RuntimeError
+    end
+
+    # A bridge re-entering its own VM is deeper on the same stack, so it must
+    # keep the outermost entry's budget. Handing it a fresh one would remove the
+    # guard exactly where runaway recursion needs catching.
+    it "does not hand a nested entry a fresh budget" do
+      vm = Quickjs::VM.new(timeout_msec: 10_000)
+      vm.define_function('again') { vm.eval_code('again()') }
+
+      _ { vm.eval_code('again()') }.must_raise Quickjs::RuntimeError
+    end
+  end
+
   describe "DrainJobs" do
     before do
       @vm = Quickjs::VM.new

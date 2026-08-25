@@ -1545,6 +1545,27 @@ static VALUE gvl_release_region_cleanup(VALUE p)
 // dispose!), so re-check here: nothing between this check and the release
 // yields, and dispose! refuses while evals_in_flight > 0, so the two
 // sides can't miss each other.
+// QuickJS latches rt->stack_top from whichever thread called JS_NewRuntime and
+// never revisits it, so rt->stack_limit (stack_top - stack_size) keeps pointing
+// into that thread's stack for the life of the VM. Evaluate from a thread whose
+// stack sits below that limit and js_check_stack_overflow trips on its very
+// first check, reporting "stack overflow" on code as trivial as 1 + 1.
+//
+// Whether it fires is luck of where the OS put the two stacks: on macOS the gap
+// stays under the 4MB default, so the handoff README.md:472 promises appears to
+// work, while on Linux every cross-thread eval raises.
+//
+// Re-base the limit onto the thread that is about to run JS. Outermost entry
+// only: a nested one (a bridge re-entering its own VM, an on_log listener
+// evaluating) sits deeper on the same stack, and re-basing there would hand it
+// a fresh full budget, removing the guard exactly where runaway recursion is
+// what needs catching.
+static void rebase_stack_limit(VMData *data)
+{
+  if (data->evals_in_flight == 0)
+    JS_UpdateStackTop(JS_GetRuntime(data->context));
+}
+
 static void run_gvl_release_region(VMData *data, void *(*job_run)(void *), void *job, JSValue *j_result, void *owned_buf0, void *owned_buf1)
 {
   if (data->disposed)
@@ -1564,6 +1585,7 @@ static void run_gvl_release_region(VMData *data, void *(*job_run)(void *), void 
       .completed = false,
   };
 
+  rebase_stack_limit(data);
   data->evals_in_flight++;
   data->gvl_release_regions++;
   data->gvl_released_js = true;
@@ -1607,6 +1629,7 @@ static VALUE evals_in_flight_release(VALUE p)
 static VALUE run_held_js_entry(VMData *data, VALUE (*body)(VALUE), VALUE arg)
 {
   check_disposed(data);
+  rebase_stack_limit(data);
   data->evals_in_flight++;
   return rb_ensure(body, arg, evals_in_flight_release, (VALUE)data);
 }
@@ -2024,6 +2047,10 @@ static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
   // a difference with no reason behind it.
   if (data->evals_in_flight == 0)
     arm_eval_timer(data);
+
+  // The JS_Eval below is inline rather than routed through either counting
+  // choke point, so it takes the re-base itself.
+  rebase_stack_limit(data);
 
   JS_SetModuleLoaderFunc2(JS_GetRuntime(data->context), NULL, quickjsrb_stub_module_loader,
                           js_module_check_attributes, NULL);
