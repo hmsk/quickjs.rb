@@ -1266,7 +1266,8 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   JSRuntime *runtime = JS_GetRuntime(data->context);
 
   JS_SetMemoryLimit(runtime, NUM2UINT(r_memory_limit));
-  JS_SetMaxStackSize(runtime, NUM2UINT(r_max_stack_size));
+  data->requested_max_stack_size = (size_t)NUM2ULL(r_max_stack_size);
+  JS_SetMaxStackSize(runtime, data->requested_max_stack_size);
 
   register_module_loader_funcs(data);
   JS_SetHostPromiseRejectionTracker(runtime, quickjsrb_promise_rejection_tracker, NULL);
@@ -1545,6 +1546,45 @@ static VALUE gvl_release_region_cleanup(VALUE p)
 // dispose!), so re-check here: nothing between this check and the release
 // yields, and dispose! refuses while evals_in_flight > 0, so the two
 // sides can't miss each other.
+// How much stack the calling thread still has below this frame, or 0 when the
+// platform won't say. Both calls are non-POSIX, and the two the CI matrix
+// covers are the two spelled out here; anywhere else opts out of clamping and
+// keeps the caller's requested budget as-is.
+static size_t current_thread_stack_headroom(void)
+{
+  uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
+  uintptr_t low = 0;
+#if defined(__APPLE__)
+  pthread_t self = pthread_self();
+  // Apple reports the address one past the top of the stack, growing down.
+  uintptr_t high = (uintptr_t)pthread_get_stackaddr_np(self);
+  size_t size = pthread_get_stacksize_np(self);
+  if (high == 0 || size == 0 || size > high)
+    return 0;
+  low = high - size;
+#elif defined(__linux__)
+  pthread_attr_t attr;
+  if (pthread_getattr_np(pthread_self(), &attr) != 0)
+    return 0;
+  void *base;
+  size_t size;
+  int rc = pthread_attr_getstack(&attr, &base, &size);
+  pthread_attr_destroy(&attr);
+  if (rc != 0 || base == NULL || size == 0)
+    return 0;
+  low = (uintptr_t)base;
+#else
+  return 0;
+#endif
+  return sp > low ? (size_t)(sp - low) : 0;
+}
+
+// Room left for QuickJS to report the overflow and for Ruby to unwind through
+// the bridge frames above it once it does. The check itself only compares the
+// frame pointer, so the margin has to cover everything that still has to run
+// after it fires.
+#define QUICKJSRB_STACK_MARGIN (256 * 1024)
+
 // QuickJS latches rt->stack_top from whichever thread called JS_NewRuntime and
 // never revisits it, so rt->stack_limit (stack_top - stack_size) keeps pointing
 // into that thread's stack for the life of the VM. Evaluate from a thread whose
@@ -1555,15 +1595,37 @@ static VALUE gvl_release_region_cleanup(VALUE p)
 // stays under the 4MB default, so the handoff README.md:472 promises appears to
 // work, while on Linux every cross-thread eval raises.
 //
-// Re-base the limit onto the thread that is about to run JS. Outermost entry
-// only: a nested one (a bridge re-entering its own VM, an on_log listener
-// evaluating) sits deeper on the same stack, and re-basing there would hand it
-// a fresh full budget, removing the guard exactly where runaway recursion is
-// what needs catching.
+// Re-basing alone would trade that for something worse. A Ruby thread's machine
+// stack is a fraction of the main thread's, so a 4MB budget re-based onto one
+// outlives the stack it is measuring: Ruby's guard page is reached first and
+// the process takes a SystemStackError mid-eval instead of QuickJS raising. So
+// the budget is re-derived here too, clamped to what this thread actually has.
+// A caller who asked for no limit at all still gets none.
+//
+// Outermost entry only: a nested one (a bridge re-entering its own VM, an
+// on_log listener evaluating) sits deeper on the same stack, and re-basing
+// there would hand it a fresh full budget, removing the guard exactly where
+// runaway recursion is what needs catching.
 static void rebase_stack_limit(VMData *data)
 {
-  if (data->evals_in_flight == 0)
-    JS_UpdateStackTop(JS_GetRuntime(data->context));
+  if (data->evals_in_flight != 0)
+    return;
+
+  JSRuntime *runtime = JS_GetRuntime(data->context);
+  JS_UpdateStackTop(runtime);
+
+  if (data->requested_max_stack_size == 0)
+    return; // caller asked for no limit; honour it
+
+  size_t headroom = current_thread_stack_headroom();
+  if (headroom == 0)
+    return; // platform won't say, so leave the request alone
+
+  // Below the margin there is no budget worth granting: clamping to what is
+  // left makes the first check fire and raise, which beats running on into
+  // the guard page.
+  size_t usable = headroom > QUICKJSRB_STACK_MARGIN ? headroom - QUICKJSRB_STACK_MARGIN : 1;
+  JS_SetMaxStackSize(runtime, usable < data->requested_max_stack_size ? usable : data->requested_max_stack_size);
 }
 
 static void run_gvl_release_region(VMData *data, void *(*job_run)(void *), void *job, JSValue *j_result, void *owned_buf0, void *owned_buf1)

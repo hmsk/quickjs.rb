@@ -630,6 +630,26 @@ describe Quickjs::VM do
       _ { vm.eval_code(RUNAWAY) }.must_raise Quickjs::RuntimeError
     end
 
+    # A Ruby thread's machine stack is a fraction of the main thread's, so a
+    # budget re-based onto one without being clamped to it outlives the stack it
+    # is measuring: Ruby's guard page is reached first and the process takes a
+    # SystemStackError mid-eval, which is why this asserts the error type rather
+    # than just that something was raised.
+    it "still stops runaway recursion on a thread that did not build the VM" do
+      vm = Quickjs::VM.new(timeout_msec: 10_000)
+
+      err = value_within(20) do
+        begin
+          vm.eval_code(RUNAWAY)
+        rescue => e
+          e
+        end
+      end
+
+      _(err).must_be_kind_of Quickjs::RuntimeError
+      _(err.message).must_match(/stack overflow/)
+    end
+
     # A bridge re-entering its own VM is deeper on the same stack, so it must
     # keep the outermost entry's budget. Handing it a fresh one would remove the
     # guard exactly where runaway recursion needs catching.
