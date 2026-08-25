@@ -650,6 +650,30 @@ describe Quickjs::VM do
       _(err.message).must_match(/stack overflow/)
     end
 
+# A Fiber runs on its own mmap'd machine stack, outside the bounds pthread
+# reports for the thread hosting it, so the headroom query cannot describe
+# it and answers 0. Enumerator and every fiber scheduler land here too.
+# Re-basing on a stack that cannot then be clamped is the one outcome worse
+# than not re-basing at all: the budget would outlive the fiber's much
+# smaller stack, and runaway recursion would reach Ruby's guard page and
+# take the process down instead of raising. Whatever happens in a fiber has
+# to stay inside the exception system.
+it "does not run off the end of a Fiber's stack" do
+  vm = Quickjs::VM.new(timeout_msec: 10_000)
+
+  raised = Fiber.new do
+    begin
+      vm.eval_code(RUNAWAY)
+      nil
+    rescue Exception => e
+      e
+    end
+  end.resume
+
+  _(raised).must_be_kind_of Exception
+  _(raised).wont_be_kind_of SystemStackError
+end
+
     # A bridge re-entering its own VM is deeper on the same stack, so it must
     # keep the outermost entry's budget. Handing it a fresh one would remove the
     # guard exactly where runaway recursion needs catching.

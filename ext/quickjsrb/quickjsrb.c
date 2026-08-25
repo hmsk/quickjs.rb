@@ -1538,18 +1538,10 @@ static VALUE gvl_release_region_cleanup(VALUE p)
   return Qnil;
 }
 
-// Run job_run(job) with the GVL released. owned_buf0/1 are malloc'd
-// buffers backing the job's inputs; ownership transfers to the region,
-// which frees them on every exit path — including the disposed bail-out
-// below and async-interrupt unwinds. The caller's check_disposed may be
-// stale by now (argument parsing can yield the GVL to a concurrent
-// dispose!), so re-check here: nothing between this check and the release
-// yields, and dispose! refuses while evals_in_flight > 0, so the two
-// sides can't miss each other.
 // How much stack the calling thread still has below this frame, or 0 when the
 // platform won't say. Both calls are non-POSIX, and the two the CI matrix
-// covers are the two spelled out here; anywhere else opts out of clamping and
-// keeps the caller's requested budget as-is.
+// covers are the two spelled out here; anywhere else answers 0, which
+// rebase_stack_limit reads as "leave this VM alone".
 static size_t current_thread_stack_headroom(void)
 {
   uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
@@ -1597,10 +1589,17 @@ static size_t current_thread_stack_headroom(void)
 //
 // Re-basing alone would trade that for something worse. A Ruby thread's machine
 // stack is a fraction of the main thread's, so a 4MB budget re-based onto one
-// outlives the stack it is measuring: Ruby's guard page is reached first and
-// the process takes a SystemStackError mid-eval instead of QuickJS raising. So
-// the budget is re-derived here too, clamped to what this thread actually has.
-// A caller who asked for no limit at all still gets none.
+// outlives the stack it is measuring: Ruby's guard page is reached first and the
+// eval dies with SystemStackError instead of QuickJS raising. Base and budget
+// therefore move together, or not at all.
+//
+// Not at all is a real case. pthread reports the *thread's* stack, and a Ruby
+// Fiber runs on its own mmap'd one outside those bounds, as do Enumerator and
+// every fiber scheduler; the query returns 0 there, and on platforms with
+// neither call it always does. Re-basing without being able to clamp is the
+// worst of the three outcomes, so an unmeasurable stack leaves the VM exactly
+// as it was: still latched to its creating thread, still the pre-existing
+// behaviour, and no new way to run off the end of a stack.
 //
 // Outermost entry only: a nested one (a bridge re-entering its own VM, an
 // on_log listener evaluating) sits deeper on the same stack, and re-basing
@@ -1611,15 +1610,15 @@ static void rebase_stack_limit(VMData *data)
   if (data->evals_in_flight != 0)
     return;
 
+  size_t headroom = current_thread_stack_headroom();
+  if (headroom == 0)
+    return; // cannot measure this stack, so do not start describing it
+
   JSRuntime *runtime = JS_GetRuntime(data->context);
   JS_UpdateStackTop(runtime);
 
   if (data->requested_max_stack_size == 0)
     return; // caller asked for no limit; honour it
-
-  size_t headroom = current_thread_stack_headroom();
-  if (headroom == 0)
-    return; // platform won't say, so leave the request alone
 
   // Below the margin there is no budget worth granting: clamping to what is
   // left makes the first check fire and raise, which beats running on into
@@ -1627,6 +1626,15 @@ static void rebase_stack_limit(VMData *data)
   size_t usable = headroom > QUICKJSRB_STACK_MARGIN ? headroom - QUICKJSRB_STACK_MARGIN : 1;
   JS_SetMaxStackSize(runtime, usable < data->requested_max_stack_size ? usable : data->requested_max_stack_size);
 }
+
+// Run job_run(job) with the GVL released. owned_buf0/1 are malloc'd
+// buffers backing the job's inputs; ownership transfers to the region,
+// which frees them on every exit path — including the disposed bail-out
+// below and async-interrupt unwinds. The caller's check_disposed may be
+// stale by now (argument parsing can yield the GVL to a concurrent
+// dispose!), so re-check here: nothing between this check and the release
+// yields, and dispose! refuses while evals_in_flight > 0, so the two
+// sides can't miss each other.
 
 static void run_gvl_release_region(VMData *data, void *(*job_run)(void *), void *job, JSValue *j_result, void *owned_buf0, void *owned_buf1)
 {
