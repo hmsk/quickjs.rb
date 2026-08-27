@@ -33,3 +33,25 @@ jobs:
           bundler-cache: true
       - name: Run the default task
         run: bundle exec rake
+
+  # musl reports the stack differently from glibc, and the difference is not
+  # cosmetic: pthread_attr_getstack on the main thread returns the currently
+  # mapped part of the stack rather than what RLIMIT_STACK allows. A change to
+  # the stack-limit handling that is fine on both matrix legs above can still
+  # make every eval on Alpine raise "stack overflow", which is what happened
+  # while #92 was being worked on. One job is enough to catch that shape.
+  musl:
+    runs-on: ubuntu-latest
+    name: Ruby 3.4 on alpine (musl)
+    container: ruby:3.4-alpine
+
+    steps:
+      - name: Install build dependencies
+        run: apk add --no-cache build-base linux-headers git
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Install gems
+        run: bundle install
+      - name: Run the default task
+        run: bundle exec rake

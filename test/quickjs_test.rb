@@ -384,6 +384,17 @@ describe Quickjs::VM do
   end
 
   describe "Dispose" do
+# allocate is public on every Ruby class, and an object allocated but never
+# initialized still reaches vm_free. That handed js_std_free_handlers a
+# runtime whose handlers js_std_init_handlers had never set up, and the
+# process died in the GC at exit rather than anywhere a backtrace would
+# point at.
+it "survives an allocated VM that was never initialized" do
+  Quickjs::VM.allocate
+
+  _(Quickjs::VM.new.eval_code('1 + 1')).must_equal 2
+end
+
 # initialize writes to the runtime from its second line on, starting with
 # JS_SetContextOpaque, and had no disposed check. On a disposed VM that
 # dereferenced a context dispose! had already freed, so
@@ -747,7 +758,11 @@ end
   end
 
   describe "StackLimitFollowsTheEvaluatingThread" do
-    RUNAWAY = 'function f(n){ return 1 + f(n + 1); } f(0)'
+    # A constant here would resolve to ::RUNAWAY and leak onto Object for
+    # anything that loads the suite.
+    def runaway_js
+      'function f(n){ return 1 + f(n + 1); } f(0)'
+    end
 
     # A thread that never finishes would hang the suite rather than fail it,
     # and the failure mode being fixed here is exactly one that used to hang.
@@ -792,7 +807,7 @@ end
     it "still stops runaway recursion on the thread that built the VM" do
       vm = Quickjs::VM.new(timeout_msec: 10_000)
 
-      _ { vm.eval_code(RUNAWAY) }.must_raise Quickjs::RuntimeError
+      _ { vm.eval_code(runaway_js) }.must_raise Quickjs::RuntimeError
     end
 
     # A Ruby thread's machine stack is a fraction of the main thread's, so a
@@ -805,7 +820,7 @@ end
 
       err = value_within(20) do
         begin
-          vm.eval_code(RUNAWAY)
+          vm.eval_code(runaway_js)
         rescue => e
           e
         end
@@ -828,7 +843,7 @@ it "does not run off the end of a Fiber's stack" do
 
   raised = Fiber.new do
     begin
-      vm.eval_code(RUNAWAY)
+      vm.eval_code(runaway_js)
       nil
     rescue Exception => e
       e
@@ -838,6 +853,42 @@ it "does not run off the end of a Fiber's stack" do
   _(raised).must_be_kind_of Exception
   _(raised).wont_be_kind_of SystemStackError
 end
+
+    # NUM2ULL reads a negative as SIZE_MAX, which puts stack_limit above
+    # stack_top and makes every eval raise "stack overflow". Only the headroom
+    # clamp hid that, and only where the stack can be measured at all.
+    it "refuses a negative max_stack_size" do
+      _ { Quickjs::VM.new(max_stack_size: -1) }.must_raise ArgumentError
+    end
+
+    # The guard is only observable where the request wins the clamp, which is
+    # the main thread: headroom there is far above max_stack_size, so the budget
+    # is the request and a nested re-base would restart it from a deeper frame.
+    #
+    # Asserted through the shape rather than an absolute depth, which is machine
+    # specific. Sharing the outermost budget makes the reachable nesting depth
+    # scale with the option; restarting it per entry makes the machine stack the
+    # only bound, and the depth stops responding to the option at all. Measured
+    # while writing this: 22 and 44 with the guard, 1361 and 1361 without it.
+    it "makes a nested entry share the outermost budget rather than restart it" do
+      reached = lambda do |size|
+        vm = Quickjs::VM.new(timeout_msec: 20_000, max_stack_size: size)
+        depth = 0
+        vm.define_function('again') { depth += 1; vm.eval_code('again()') }
+        begin
+          vm.eval_code('again()')
+        rescue StandardError
+          nil
+        end
+        depth
+      end
+
+      small = reached.call(128 * 1024)
+      large = reached.call(256 * 1024)
+
+      _(small).must_be :>, 0
+      _(large.to_f / small).must_be :>, 1.5
+    end
 
     # A bridge re-entering its own VM is deeper on the same stack, so it must
     # keep the outermost entry's budget. Handing it a fresh one would remove the

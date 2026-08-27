@@ -1255,6 +1255,14 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   VALUE r_max_stack_size = rb_hash_aref(r_opts, ID2SYM(rb_intern("max_stack_size")));
   if (NIL_P(r_max_stack_size))
     r_max_stack_size = UINT2NUM(1024 * 1024 * 4);
+  // NUM2ULL reads a negative as SIZE_MAX, which is not a large budget but a
+  // broken one: stack_limit lands above stack_top and every eval raises
+  // "stack overflow", and only where the headroom clamp happens to catch it
+  // first does that stay hidden. Refuse it here, where the caller can still
+  // see what they typed.
+  if (!RB_INTEGER_TYPE_P(r_max_stack_size) ||
+      RTEST(rb_funcall(r_max_stack_size, rb_intern("negative?"), 0)))
+    rb_raise(rb_eArgError, "max_stack_size must be a non-negative Integer");
   VALUE r_features = rb_hash_aref(r_opts, ID2SYM(rb_intern("features")));
   if (NIL_P(r_features))
     r_features = rb_ary_new();
@@ -1286,6 +1294,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   register_module_loader_funcs(data);
   JS_SetHostPromiseRejectionTracker(runtime, quickjsrb_promise_rejection_tracker, NULL);
   js_std_init_handlers(runtime);
+  data->std_handlers_installed = true;
 
   JSValue j_global = JS_GetGlobalObject(data->context);
 
@@ -1618,44 +1627,73 @@ static VALUE gvl_release_region_cleanup(VALUE p)
   return Qnil;
 }
 
-// How much stack the calling thread still has below this frame, or 0 when the
-// platform won't say. Both calls are non-POSIX, and the two the CI matrix
-// covers are the two spelled out here; anywhere else answers 0, which
-// rebase_stack_limit reads as "leave this VM alone".
-static size_t current_thread_stack_headroom(void)
+// The bounds of the calling thread's stack, probed once and remembered. They
+// do not move for the life of the thread, and the probe is far too expensive
+// to repeat: on glibc the main thread takes the path that opens
+// /proc/self/maps and parses it line by line looking for the vma holding
+// __libc_stack_end, which in a Ruby process with its many mappings measured
+// at ~68us. That was landing on every outermost entry, against a bare
+// eval_code('1+1') of ~2.5us.
+//
+// Probing once and answering from the cache also settles the fiber case for
+// free. A Ruby Fiber (and Enumerator, and every fiber scheduler) runs on its
+// own mmap'd stack outside these bounds, so a frame pointer that falls
+// outside them is not on this thread's stack and there is nothing to
+// measure; that answer needs no syscall once the bounds are known.
+struct thread_stack_bounds
 {
-  uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
-  uintptr_t low = 0, high = 0;
+  uintptr_t low;
+  uintptr_t high;
+  bool probed;
+};
+
+static void probe_thread_stack_bounds(struct thread_stack_bounds *bounds)
+{
+  bounds->probed = true;
+  bounds->low = 0;
+  bounds->high = 0;
 #if defined(__APPLE__)
   pthread_t self = pthread_self();
   // Apple reports the address one past the top of the stack, growing down.
-  high = (uintptr_t)pthread_get_stackaddr_np(self);
+  uintptr_t high = (uintptr_t)pthread_get_stackaddr_np(self);
   size_t size = pthread_get_stacksize_np(self);
   if (high == 0 || size == 0 || size > high)
-    return 0;
-  low = high - size;
+    return;
+  bounds->low = high - size;
+  bounds->high = high;
 #elif defined(__linux__)
   pthread_attr_t attr;
   if (pthread_getattr_np(pthread_self(), &attr) != 0)
-    return 0;
+    return;
   void *base;
   size_t size;
   int rc = pthread_attr_getstack(&attr, &base, &size);
   pthread_attr_destroy(&attr);
   if (rc != 0 || base == NULL || size == 0)
-    return 0;
-  low = (uintptr_t)base;
-  high = low + size;
-#else
-  return 0;
+    return;
+  bounds->low = (uintptr_t)base;
+  bounds->high = bounds->low + size;
 #endif
-  // Both bounds, not just the lower one. A Ruby Fiber runs on its own mmap'd
-  // stack, and where the allocator puts it relative to the thread stack is not
-  // ours to predict: below it, sp <= low and the old check already answered 0;
-  // above it, sp - low measures across unrelated mappings and reports headroom
-  // that is not there. Believing it would re-base onto the fiber with a budget
-  // sized for another stack, which is the crash this function exists to avoid.
-  return (sp > low && sp < high) ? (size_t)(sp - low) : 0;
+}
+
+// How much stack the calling thread still has below this frame, or 0 when
+// that cannot be answered: the platform has neither call, the probe failed,
+// or the frame is not on this thread's stack at all. rebase_stack_limit
+// reads 0 as "leave this VM alone".
+static size_t current_thread_stack_headroom(void)
+{
+  static __thread struct thread_stack_bounds bounds;
+  if (!bounds.probed)
+    probe_thread_stack_bounds(&bounds);
+  if (bounds.high == 0)
+    return 0;
+
+  // Both bounds, not just the lower one. Where the allocator puts a fiber's
+  // stack relative to the thread's is not ours to predict: below it, sp <= low
+  // and a lower-bound check already answered 0; above it, sp - low measures
+  // across unrelated mappings and reports headroom that is not there.
+  uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
+  return (sp > bounds.low && sp < bounds.high) ? (size_t)(sp - bounds.low) : 0;
 }
 
 // Room left for QuickJS to report the overflow and for Ruby to unwind through
@@ -1698,8 +1736,21 @@ static void rebase_stack_limit(VMData *data)
     return;
 
   size_t headroom = current_thread_stack_headroom();
-  if (headroom == 0)
-    return; // cannot measure this stack, so do not start describing it
+
+  // A headroom under the margin is not a small budget, it is an unusable
+  // answer: there would be no room left to report the overflow with. musl
+  // makes that the normal case rather than a corner one, because its
+  // main-thread pthread_attr_getstack reports only the currently mapped part
+  // of the stack rather than what RLIMIT_STACK allows, so early on the answer
+  // is a few pages. Clamping to what is left there set stack_limit one byte
+  // below stack_top and every eval raised "stack overflow", 1 + 1 included.
+  //
+  // So this joins the zero case: an answer we cannot use leaves the VM exactly
+  // as it was, latched to its creating thread. Cross-thread handoff stays
+  // broken on such a platform, which is the pre-existing behaviour, rather
+  // than the platform breaking outright.
+  if (headroom <= QUICKJSRB_STACK_MARGIN)
+    return;
 
   JSRuntime *runtime = JS_GetRuntime(data->context);
   JS_UpdateStackTop(runtime);
@@ -1707,10 +1758,7 @@ static void rebase_stack_limit(VMData *data)
   if (data->requested_max_stack_size == 0)
     return; // caller asked for no limit; honour it
 
-  // Below the margin there is no budget worth granting: clamping to what is
-  // left makes the first check fire and raise, which beats running on into
-  // the guard page.
-  size_t usable = headroom > QUICKJSRB_STACK_MARGIN ? headroom - QUICKJSRB_STACK_MARGIN : 1;
+  size_t usable = headroom - QUICKJSRB_STACK_MARGIN;
   JS_SetMaxStackSize(runtime, usable < data->requested_max_stack_size ? usable : data->requested_max_stack_size);
 }
 
@@ -3161,9 +3209,16 @@ static VALUE vm_m_memoryPoisoned(VALUE r_self)
 // progressing. Safe to release because nothing in the teardown path calls
 // back into Ruby: module_loader, console, and define_function callbacks
 // only fire during JS execution, not during free.
+struct teardown_job
+{
+  JSContext *context;
+  bool std_handlers_installed;
+};
+
 static void *vm_dispose_no_gvl(void *p)
 {
-  vm_teardown_context((JSContext *)p);
+  struct teardown_job *job = (struct teardown_job *)p;
+  vm_teardown_context(job->context, job->std_handlers_installed);
   return NULL;
 }
 
@@ -3194,7 +3249,8 @@ static VALUE vm_m_dispose(VALUE r_self)
   // disposed=true and skips its own teardown.
   data->disposed = true;
 
-  rb_thread_call_without_gvl(vm_dispose_no_gvl, data->context, NULL, NULL);
+  struct teardown_job job = {data->context, data->std_handlers_installed};
+  rb_thread_call_without_gvl(vm_dispose_no_gvl, &job, NULL, NULL);
 
   // Drop references to user-supplied closures so Ruby GC can reclaim them
   // (and anything they captured) before the wrapping VM object itself is
