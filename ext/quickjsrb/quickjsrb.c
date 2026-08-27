@@ -2085,6 +2085,46 @@ static VALUE run_held_js_entry(VMData *data, VALUE (*body)(VALUE), VALUE arg)
   return rb_ensure(body, arg, evals_in_flight_release, (VALUE)data);
 }
 
+// Result conversion runs guest JS — getters, toJSON, a Proxy trap — and the
+// bridges that code can reach yield the GVL, so it has to be a counted JS entry
+// like every other execution. Without it a dispose! from a getter is granted
+// while the walk is still reading the context it frees (#81). The entry closes
+// before the conversion's own value is handed back, which is why these wrap the
+// conversion rather than the whole tail.
+static VALUE to_rb_return_value_held_body(VALUE r_owned)
+{
+  struct return_value *owned = (struct return_value *)r_owned;
+  return to_rb_return_value(owned->ctx, owned->j_val);
+}
+
+// The owning ensure is armed inside the entry, not around it, so that the
+// result is freed while the entry is still held — freeing it outside would
+// reopen the window this exists to close. That leaves j_val unowned if
+// run_held_js_entry itself raises, which it cannot here: these tails run on
+// the thread that produced the value, with no GVL yield since the producing
+// entry closed, so neither `disposed` nor `owner_thread` can have changed.
+static VALUE to_rb_return_value_held(VMData *data, JSValue j_val)
+{
+  struct return_value owned = {data->context, j_val};
+  return run_held_js_entry(data, to_rb_return_value_held_body, (VALUE)&owned);
+}
+
+static VALUE js_exception_held_body(VALUE r_owned)
+{
+  struct return_value *owned = (struct return_value *)r_owned;
+  return to_rb_value(owned->ctx, owned->j_val);
+}
+
+// For the tails whose value is the JS_EXCEPTION sentinel: converting it pulls
+// the pending exception and raises. Unlike to_rb_return_value_held this does
+// not own its argument, which is why it takes the sentinel rather than a
+// JSValue in general — the sentinel carries no reference to release.
+static VALUE raise_from_js_exception_held(VMData *data)
+{
+  struct return_value owned = {data->context, JS_EXCEPTION};
+  return run_held_js_entry(data, js_exception_held_body, (VALUE)&owned);
+}
+
 static VALUE eval_code_job_run_body(VALUE p)
 {
   eval_code_job_run((struct eval_code_job *)p);
@@ -2157,7 +2197,7 @@ static VALUE eval_code_release_gvl(VMData *data, VALUE r_code, const char *filen
   };
   run_gvl_release_region(data, eval_code_job_run, &job, &job.result, code_buf, filename_buf);
 
-  return to_rb_return_value(data->context, job.result);
+  return to_rb_return_value_held(data, job.result);
 }
 
 static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
@@ -2215,7 +2255,7 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
       .result = JS_UNDEFINED,
   };
   run_held_js_entry(data, eval_code_job_run_body, (VALUE)&job);
-  return to_rb_return_value(data->context, job.result);
+  return to_rb_return_value_held(data, job.result);
 }
 
 struct compile_job
@@ -2628,7 +2668,7 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_
   uint8_t *buf = (uint8_t *)copy_rstring_to_owned_buffer(r_bytecode, &buf_len, false);
   JSValue j_mod = run_bytecode_release_gvl(data, bytecode_read_job_run, buf, buf_len, true);
   if (JS_IsException(j_mod))
-    return to_rb_value(data->context, j_mod); // raises
+    return raise_from_js_exception_held(data); // raises
 
   if (JS_VALUE_GET_TAG(j_mod) != JS_TAG_MODULE)
   {
@@ -2724,11 +2764,11 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
   }
 
   if (JS_IsException(j_result))
-    return to_rb_value(data->context, j_result); // raises
+    return raise_from_js_exception_held(data); // raises
 
   JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_result, "value");
   JS_FreeValue(data->context, j_result);
-  return to_rb_return_value(data->context, j_returnedValue);
+  return to_rb_return_value_held(data, j_returnedValue);
 }
 
 // Loads pre-compiled polyfill bytecode without arming the eval timer.

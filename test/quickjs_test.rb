@@ -567,6 +567,26 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
+    # Conversion runs guest JS, so it is a JS entry like any other: dispose!
+    # reached from a getter has to be refused rather than freeing the runtime
+    # the walk is still reading.
+    it "refuses dispose! reached from a getter during result conversion" do
+      vm = Quickjs::VM.new
+      vm.define_function('bye') { vm.dispose!; 1 }
+
+      _ do
+        vm.eval_code(<<~JS)
+          const o = {};
+          Object.defineProperty(o, 'a', {enumerable: true, get() { bye(); return {z: 1} }});
+          o.b = {y: 2};
+          o;
+        JS
+      end.must_raise ThreadError
+
+      _(vm.disposed?).must_equal false
+    ensure
+      vm.dispose!
+    end
   end
 
   describe "Dispose" do
