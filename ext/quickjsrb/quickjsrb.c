@@ -1255,6 +1255,14 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   VALUE r_max_stack_size = rb_hash_aref(r_opts, ID2SYM(rb_intern("max_stack_size")));
   if (NIL_P(r_max_stack_size))
     r_max_stack_size = UINT2NUM(1024 * 1024 * 4);
+  // NUM2ULL reads a negative as SIZE_MAX, which is not a large budget but a
+  // broken one: stack_limit lands above stack_top and every eval raises
+  // "stack overflow", and only where the headroom clamp happens to catch it
+  // first does that stay hidden. Refuse it here, where the caller can still
+  // see what they typed.
+  if (!RB_INTEGER_TYPE_P(r_max_stack_size) ||
+      RTEST(rb_funcall(r_max_stack_size, rb_intern("negative?"), 0)))
+    rb_raise(rb_eArgError, "max_stack_size must be a non-negative Integer");
   VALUE r_features = rb_hash_aref(r_opts, ID2SYM(rb_intern("features")));
   if (NIL_P(r_features))
     r_features = rb_ary_new();
