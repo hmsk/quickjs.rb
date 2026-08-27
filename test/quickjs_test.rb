@@ -143,6 +143,96 @@ describe Quickjs do
       assert_code("const a = [1, 2]; a.push(a); a", [1, 2, nil])
     end
 
+    it "shared reference converts to the same Ruby object, not nil" do
+      result = ::Quickjs.eval_code("const o = {a: 1}; [o, o]")
+      _(result).must_equal [{'a' => 1}, {'a' => 1}]
+      _(result[0]).must_be_same_as result[1]
+    end
+
+    it "shared reference under distinct keys keeps both branches" do
+      assert_code("const o = {a: 1}; ({x: o, y: o})", {'x' => {'a' => 1}, 'y' => {'a' => 1}})
+    end
+
+    it "object that is both a cycle and a share keeps the cycle marker in every occurrence" do
+      result = ::Quickjs.eval_code("const o = {n: 1}; o.self = o; [o, o]")
+      _(result).must_equal [{'n' => 1, 'self' => nil}, {'n' => 1, 'self' => nil}]
+      _(result[0]).must_be_same_as result[1]
+    end
+
+    it "share whose first occurrence is nested deeper than its second" do
+      result = ::Quickjs.eval_code("const o = {n: 1}; [{deep: {o}}, o]")
+      _(result).must_equal [{'deep' => {'o' => {'n' => 1}}}, {'n' => 1}]
+      _(result[0]['deep']['o']).must_be_same_as result[1]
+    end
+
+    it "shared reference through an array element stays shared" do
+      result = ::Quickjs.eval_code("const a = [1]; ({x: a, y: a})")
+      _(result).must_equal({'x' => [1], 'y' => [1]})
+      _(result['x']).must_be_same_as result['y']
+    end
+
+    it "a DAG converts every branch instead of nilling repeats" do
+      # Each level references the same child twice, so the old visited set nil'd
+      # every right-hand branch. Sharing keeps one hash per level, and keeps the
+      # graph from being duplicated into ~2M hashes on the way.
+      result = ::Quickjs.eval_code(<<~JS)
+        let cur = {leaf: 1};
+        for (let i = 0; i < 20; i++) { cur = {l: cur, r: cur}; }
+        cur;
+      JS
+      _(result['l']).must_be_same_as result['r']
+
+      depth = 0
+      node = result
+      until node.key?('leaf')
+        node = node['r']
+        depth += 1
+      end
+      _(depth).must_equal 20
+    end
+
+    it "toJSON representation is recomputed per occurrence, not shared" do
+      # Sharing it would hand the same mutable String to both slots.
+      result = ::Quickjs.eval_code("const d = new Date(0); [d, d]")
+      _(result).must_equal ['1970-01-01T00:00:00.000Z'] * 2
+      _(result[0]).wont_be_same_as result[1]
+    end
+
+    it "toJSON returning another object shares that object's conversion" do
+      # The instance itself is not memoized, but its stand-in is `inner`, so
+      # both slots legitimately describe the same JS object.
+      result = ::Quickjs.eval_code(<<~JS)
+        const inner = {v: 1};
+        class C { toJSON() { return inner } }
+        [new C(), inner];
+      JS
+      _(result).must_equal [{'v' => 1}, {'v' => 1}]
+      _(result[0]).must_be_same_as result[1]
+    end
+
+    it "an object freed by a getter cannot be mistaken for an earlier one" do
+      # Conversion keys objects by address, so it pins every one it has seen:
+      # without that, dropping `holder[0]` frees it and the object minted by the
+      # getter can land on the same address and hit the earlier entry.
+      assert_code(<<~JS, {'a' => {'tag' => 'DEAD'}, 'b' => {'tag' => 'FRESH'}})
+        const holder = [{tag: 'DEAD'}];
+        const o = {
+          a: holder[0],
+          get b() { holder.length = 0; delete o.a; return {tag: 'FRESH'} },
+        };
+        o;
+      JS
+    end
+
+    it "a share reached first through a cycle keeps the truncated shape" do
+      # `b` is not part of a cycle at the top level, but it converted under `a`
+      # where it was, so both occurrences carry the same nil marker. The
+      # truncation point follows traversal order.
+      result = ::Quickjs.eval_code("const a = {n: 1}; const b = {a}; a.b = b; [{x: a}, b]")
+      _(result).must_equal [{'x' => {'n' => 1, 'b' => {'a' => nil}}}, {'a' => nil}]
+      _(result[0]['x']['b']).must_be_same_as result[1]
+    end
+
     it "circular non-plain object via vm.call returns the same shape" do
       vm = Quickjs::VM.new
       vm.eval_code(<<~JS)

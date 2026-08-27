@@ -34,7 +34,8 @@ static void rebase_stack_limit(VMData *data);
 
 JSValue to_js_value(JSContext *ctx, VALUE r_value);
 VALUE to_rb_value(JSContext *ctx, JSValue j_val);
-static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, VALUE r_visited);
+typedef struct ConvState ConvState;
+static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv);
 static VALUE vm_m_memoryUsage(VALUE r_self);
 static VALUE vm_m_runGC(VALUE r_self);
 static VALUE vm_m_memoryPoisoned(VALUE r_self);
@@ -259,7 +260,52 @@ static int js_is_plain_object(JSContext *ctx, JSValue j_val)
   return result;
 }
 
-static VALUE js_array_to_rb(JSContext *ctx, JSValue j_val, VALUE r_visited)
+#define CONV_PINNED_INLINE 8
+
+// State threaded through the conversion of one JS object graph.
+//
+// `r_seen` maps an object's address either to CONV_IN_PROGRESS, meaning the
+// object is an ancestor of the one being converted, or to the Ruby value it
+// finished converting to. The first case is a cycle and becomes nil; the second
+// is a shared subgraph, which converts once and stays shared on the Ruby side.
+// Only the containers this conversion builds are kept — see the toJSON branch.
+//
+// Every tracked object is pinned with JS_DupValue until the whole conversion
+// finishes. Property getters and toJSON run guest JS, which can drop the last
+// reference to an object and let a new one be allocated at the same address;
+// without the pin the map would answer for an object that no longer exists.
+struct ConvState
+{
+  JSContext *ctx;
+  JSValue j_root;
+  VALUE r_seen;
+  JSValue *pinned;
+  long pinned_count;
+  long pinned_capacity;
+  JSValue pinned_inline[CONV_PINNED_INLINE];
+};
+
+// The map is private to one conversion, so using it as its own marker cannot
+// collide with any value an object could convert to.
+#define CONV_IN_PROGRESS(conv) ((conv)->r_seen)
+
+static void conv_pin(ConvState *conv, JSValue j_val)
+{
+  if (conv->pinned_count == conv->pinned_capacity)
+  {
+    long capacity = conv->pinned_capacity * 2;
+    JSValue *pinned = xmalloc2(capacity, sizeof(JSValue));
+    JSValue *previous = conv->pinned;
+    memcpy(pinned, previous, conv->pinned_count * sizeof(JSValue));
+    conv->pinned = pinned;
+    conv->pinned_capacity = capacity;
+    if (previous != conv->pinned_inline)
+      xfree(previous);
+  }
+  conv->pinned[conv->pinned_count++] = JS_DupValue(conv->ctx, j_val);
+}
+
+static VALUE js_array_to_rb(JSContext *ctx, JSValue j_val, ConvState *conv)
 {
   JSValue j_length = JS_GetPropertyStr(ctx, j_val, "length");
   uint32_t length = 0;
@@ -270,13 +316,13 @@ static VALUE js_array_to_rb(JSContext *ctx, JSValue j_val, VALUE r_visited)
   for (uint32_t i = 0; i < length; i++)
   {
     JSValue j_elem = JS_GetPropertyUint32(ctx, j_val, i);
-    rb_ary_push(r_array, to_rb_value_inner(ctx, j_elem, r_visited));
+    rb_ary_push(r_array, to_rb_value_inner(ctx, j_elem, conv));
     JS_FreeValue(ctx, j_elem);
   }
   return r_array;
 }
 
-static VALUE js_plain_object_to_rb(JSContext *ctx, JSValue j_val, VALUE r_visited)
+static VALUE js_plain_object_to_rb(JSContext *ctx, JSValue j_val, ConvState *conv)
 {
   JSPropertyEnum *ptab;
   uint32_t plen;
@@ -288,7 +334,7 @@ static VALUE js_plain_object_to_rb(JSContext *ctx, JSValue j_val, VALUE r_visite
   {
     const char *key = JS_AtomToCString(ctx, ptab[i].atom);
     JSValue j_prop = JS_GetProperty(ctx, j_val, ptab[i].atom);
-    rb_hash_aset(r_hash, rb_str_new2(key), to_rb_value_inner(ctx, j_prop, r_visited));
+    rb_hash_aset(r_hash, rb_str_new2(key), to_rb_value_inner(ctx, j_prop, conv));
     JS_FreeCString(ctx, key);
     JS_FreeValue(ctx, j_prop);
   }
@@ -296,12 +342,36 @@ static VALUE js_plain_object_to_rb(JSContext *ctx, JSValue j_val, VALUE r_visite
   return r_hash;
 }
 
-VALUE to_rb_value(JSContext *ctx, JSValue j_val)
+static VALUE conv_run(VALUE r_conv)
 {
-  return to_rb_value_inner(ctx, j_val, Qnil);
+  ConvState *conv = (ConvState *)r_conv;
+  return to_rb_value_inner(conv->ctx, conv->j_root, conv);
 }
 
-static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, VALUE r_visited)
+static VALUE conv_release(VALUE r_conv)
+{
+  ConvState *conv = (ConvState *)r_conv;
+  for (long i = 0; i < conv->pinned_count; i++)
+    JS_FreeValue(conv->ctx, conv->pinned[i]);
+  if (conv->pinned != conv->pinned_inline)
+    xfree(conv->pinned);
+  return Qnil;
+}
+
+VALUE to_rb_value(JSContext *ctx, JSValue j_val)
+{
+  // Only object graphs need the bookkeeping, and only they can recurse, so
+  // primitives convert straight through rather than paying for the state and
+  // the ensure. Every recursive call therefore has a non-NULL `conv`.
+  if (JS_VALUE_GET_NORM_TAG(j_val) != JS_TAG_OBJECT)
+    return to_rb_value_inner(ctx, j_val, NULL);
+
+  ConvState conv = {ctx, j_val, rb_hash_new(), NULL, 0, CONV_PINNED_INLINE};
+  conv.pinned = conv.pinned_inline;
+  return rb_ensure(conv_run, (VALUE)&conv, conv_release, (VALUE)&conv);
+}
+
+static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
 {
   switch (JS_VALUE_GET_NORM_TAG(j_val))
   {
@@ -396,38 +466,64 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, VALUE r_visited)
         return r_maybe_file;
     }
 
-    // Below this point, conversion recurses into own properties / elements
-    // via to_rb_value_inner. Track JS object pointers to break cycles —
-    // re-entering the same object returns nil instead of blowing the stack.
-    if (NIL_P(r_visited))
-      r_visited = rb_hash_new();
-    VALUE r_visit_key = ULL2NUM((uintptr_t)JS_VALUE_GET_PTR(j_val));
-    if (RTEST(rb_hash_lookup(r_visited, r_visit_key)))
+    // Below this point, conversion recurses into own properties / elements via
+    // to_rb_value_inner. An object that is still on the current path is a cycle
+    // and becomes nil; one that finished converting earlier is a shared
+    // reference and yields the very same Ruby object again.
+    VALUE r_key = ULL2NUM((uintptr_t)JS_VALUE_GET_PTR(j_val));
+    VALUE r_seen = rb_hash_lookup2(conv->r_seen, r_key, Qundef);
+    if (r_seen == CONV_IN_PROGRESS(conv))
       return Qnil;
-    rb_hash_aset(r_visited, r_visit_key, Qtrue);
+    if (r_seen != Qundef)
+      return r_seen;
 
+    conv_pin(conv, j_val);
+    rb_hash_aset(conv->r_seen, r_key, CONV_IN_PROGRESS(conv));
+
+    VALUE r_result;
+    int memoize = 1;
     if (JS_IsArray(ctx, j_val))
-      return js_array_to_rb(ctx, j_val, r_visited);
-
-    if (js_is_plain_object(ctx, j_val))
-      return js_plain_object_to_rb(ctx, j_val, r_visited);
-
-    // Non-plain objects (Date, RegExp, Map, class instances, etc.).
-    // If the object opts in to a JSON representation via toJSON (e.g. Date),
-    // honour it — recurse on the returned value. Otherwise dump own enumerable
-    // string-keyed properties; this is faster than the JSON round-trip and
-    // preserves `undefined` values nested inside class instances.
-    JSValue j_toJSON = JS_GetPropertyStr(ctx, j_val, "toJSON");
-    if (JS_IsFunction(ctx, j_toJSON))
     {
-      JSValue j_jsonValue = JS_Call(ctx, j_toJSON, j_val, 0, NULL);
-      JS_FreeValue(ctx, j_toJSON);
-      VALUE r_result = to_rb_value_inner(ctx, j_jsonValue, r_visited);
-      JS_FreeValue(ctx, j_jsonValue);
-      return r_result;
+      r_result = js_array_to_rb(ctx, j_val, conv);
     }
-    JS_FreeValue(ctx, j_toJSON);
-    return js_plain_object_to_rb(ctx, j_val, r_visited);
+    else if (js_is_plain_object(ctx, j_val))
+    {
+      r_result = js_plain_object_to_rb(ctx, j_val, conv);
+    }
+    else
+    {
+      // Non-plain objects (Date, RegExp, Map, class instances, etc.).
+      // If the object opts in to a JSON representation via toJSON (e.g. Date),
+      // honour it — recurse on the returned value. Otherwise dump own enumerable
+      // string-keyed properties; this is faster than the JSON round-trip and
+      // preserves `undefined` values nested inside class instances.
+      JSValue j_toJSON = JS_GetPropertyStr(ctx, j_val, "toJSON");
+      if (JS_IsFunction(ctx, j_toJSON))
+      {
+        JSValue j_jsonValue = JS_Call(ctx, j_toJSON, j_val, 0, NULL);
+        JS_FreeValue(ctx, j_toJSON);
+        r_result = to_rb_value_inner(ctx, j_jsonValue, conv);
+        JS_FreeValue(ctx, j_jsonValue);
+        // A toJSON representation is recomputed for every occurrence instead of
+        // being shared. It is the object's stand-in value rather than a
+        // container this conversion built, so memoizing it would hand out the
+        // same mutable String for a Date reached twice, and would claim
+        // identity between two distinct JS objects whose toJSON returns the
+        // same thing. JSON.stringify also calls toJSON once per occurrence.
+        memoize = 0;
+      }
+      else
+      {
+        JS_FreeValue(ctx, j_toJSON);
+        r_result = js_plain_object_to_rb(ctx, j_val, conv);
+      }
+    }
+
+    if (memoize)
+      rb_hash_aset(conv->r_seen, r_key, r_result);
+    else
+      rb_hash_delete(conv->r_seen, r_key);
+    return r_result;
   }
   case JS_TAG_NULL:
     return Qnil;
