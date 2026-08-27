@@ -1727,8 +1727,21 @@ static void rebase_stack_limit(VMData *data)
     return;
 
   size_t headroom = current_thread_stack_headroom();
-  if (headroom == 0)
-    return; // cannot measure this stack, so do not start describing it
+
+  // A headroom under the margin is not a small budget, it is an unusable
+  // answer: there would be no room left to report the overflow with. musl
+  // makes that the normal case rather than a corner one, because its
+  // main-thread pthread_attr_getstack reports only the currently mapped part
+  // of the stack rather than what RLIMIT_STACK allows, so early on the answer
+  // is a few pages. Clamping to what is left there set stack_limit one byte
+  // below stack_top and every eval raised "stack overflow", 1 + 1 included.
+  //
+  // So this joins the zero case: an answer we cannot use leaves the VM exactly
+  // as it was, latched to its creating thread. Cross-thread handoff stays
+  // broken on such a platform, which is the pre-existing behaviour, rather
+  // than the platform breaking outright.
+  if (headroom <= QUICKJSRB_STACK_MARGIN)
+    return;
 
   JSRuntime *runtime = JS_GetRuntime(data->context);
   JS_UpdateStackTop(runtime);
@@ -1736,10 +1749,7 @@ static void rebase_stack_limit(VMData *data)
   if (data->requested_max_stack_size == 0)
     return; // caller asked for no limit; honour it
 
-  // Below the margin there is no budget worth granting: clamping to what is
-  // left makes the first check fire and raise, which beats running on into
-  // the guard page.
-  size_t usable = headroom > QUICKJSRB_STACK_MARGIN ? headroom - QUICKJSRB_STACK_MARGIN : 1;
+  size_t usable = headroom - QUICKJSRB_STACK_MARGIN;
   JS_SetMaxStackSize(runtime, usable < data->requested_max_stack_size ? usable : data->requested_max_stack_size);
 }
 
