@@ -1,0 +1,19 @@
+version: 2
+
+updates:
+  # Actions are pinned to commit SHAs in the workflows, which is what makes
+  # this file necessary rather than nice to have: a pinned SHA never picks up
+  # an upstream fix on its own, so without something to move it the pin trades
+  # supply-chain risk for staleness. Dependabot moves it and writes the new
+  # version into the trailing comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+# Deliberately not covered: the ruby:*-alpine images the musl legs run in.
+# Those legs exist to test the newest and oldest supported Ruby against musl,
+# and a pinned digest would quietly turn "newest supported" into "whatever was
+# newest on the day it was pinned", which is the coverage they are there for.
+# They are Docker Official Images, which is a weaker exposure than the actions
+# above: those are third-party repositories, and they run in every job.
