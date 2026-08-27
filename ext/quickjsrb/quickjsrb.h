@@ -9,6 +9,7 @@
 #include "quickjs-libc.h"
 #include "cutils.h"
 
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -108,6 +109,11 @@ typedef struct VMData
   // the GVL re-acquired — would hand the still-released JS a path into
   // Ruby APIs without the GVL. Only mutated while holding the GVL.
   int gvl_release_regions;
+  // The max_stack_size the caller asked for, kept so rebase_stack_limit can
+  // re-apply it on each outermost entry: the budget is re-derived per entry
+  // from the running thread's real headroom, and the request is the ceiling
+  // it clamps down from. Zero keeps QuickJS's documented "no limit".
+  size_t requested_max_stack_size;
   // Latched by quickjsrb_new_ruby_bridge whenever a C function that calls
   // into Ruby synchronously (rb_funcall & friends) WITHOUT honoring
   // gvl_released_js is installed into this context. While true,
