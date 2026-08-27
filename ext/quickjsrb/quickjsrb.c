@@ -1545,11 +1545,11 @@ static VALUE gvl_release_region_cleanup(VALUE p)
 static size_t current_thread_stack_headroom(void)
 {
   uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
-  uintptr_t low = 0;
+  uintptr_t low = 0, high = 0;
 #if defined(__APPLE__)
   pthread_t self = pthread_self();
   // Apple reports the address one past the top of the stack, growing down.
-  uintptr_t high = (uintptr_t)pthread_get_stackaddr_np(self);
+  high = (uintptr_t)pthread_get_stackaddr_np(self);
   size_t size = pthread_get_stacksize_np(self);
   if (high == 0 || size == 0 || size > high)
     return 0;
@@ -1565,10 +1565,17 @@ static size_t current_thread_stack_headroom(void)
   if (rc != 0 || base == NULL || size == 0)
     return 0;
   low = (uintptr_t)base;
+  high = low + size;
 #else
   return 0;
 #endif
-  return sp > low ? (size_t)(sp - low) : 0;
+  // Both bounds, not just the lower one. A Ruby Fiber runs on its own mmap'd
+  // stack, and where the allocator puts it relative to the thread stack is not
+  // ours to predict: below it, sp <= low and the old check already answered 0;
+  // above it, sp - low measures across unrelated mappings and reports headroom
+  // that is not there. Believing it would re-base onto the fiber with a budget
+  // sized for another stack, which is the crash this function exists to avoid.
+  return (sp > low && sp < high) ? (size_t)(sp - low) : 0;
 }
 
 // Room left for QuickJS to report the overflow and for Ruby to unwind through
