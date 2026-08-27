@@ -384,6 +384,18 @@ describe Quickjs::VM do
   end
 
   describe "Dispose" do
+# initialize writes to the runtime from its second line on, starting with
+# JS_SetContextOpaque, and had no disposed check. On a disposed VM that
+# dereferenced a context dispose! had already freed, so
+# `vm.dispose!; vm.send(:initialize)` took the process down with SIGSEGV
+# rather than raising. Private, so it needs send to reach, but reachable.
+it "refuses re-initialization of a disposed VM instead of touching the freed context" do
+  vm = Quickjs::VM.new
+  vm.dispose!
+
+  _ { vm.send(:initialize) }.must_raise Quickjs::RuntimeError
+end
+
     it "dispose! returns nil and flips disposed?" do
       vm = Quickjs::VM.new
       _(vm.disposed?).must_equal false
@@ -514,6 +526,159 @@ describe Quickjs::VM do
 
       vm.dispose!
       _(vm.disposed?).must_equal true
+    end
+  end
+
+  describe "one VM, one thread at a time" do
+    # Every wait below is bounded. A runner thread that dies before it reaches
+    # the bridge never signals, and an unbounded pop turns that into a six hour
+    # CI hang rather than a failure: #82 kills these threads on Linux with a
+    # false stack overflow, and the suite sat at the GitHub job limit three
+    # times before the cause was visible.
+    def await(queue, what)
+      queue.pop(timeout: 10) ||
+        flunk("timed out waiting for #{what}; a thread likely died before signalling (see #82)")
+    end
+
+    # QuickJS contexts have no internal locking, so two threads inside JS on
+    # one VM corrupt the heap. The bridge blocking on a Queue is what makes
+    # this deterministic: the proc yields the GVL while it waits, so the
+    # second thread genuinely runs while the first is mid-entry.
+    it "refuses a second thread while a JS entry is in flight" do
+      vm = Quickjs::VM.new(timeout_msec: 30_000)
+      entered = Queue.new
+      release = Queue.new
+      vm.define_function('pause') do
+        entered << :in
+        release.pop(timeout: 30)
+        1
+      end
+
+      runner = Thread.new { vm.eval_code('pause(); 42') }
+      await(entered, "the bridge to be entered")
+
+      err = _ { vm.eval_code('1 + 1') }.must_raise ThreadError
+      _(err.message).must_match(/from two threads at once/)
+
+      release << :go
+      _(runner.value).must_equal 42
+    end
+
+    it "refuses every entry point, not just eval_code" do
+      vm = Quickjs::VM.new(timeout_msec: 30_000)
+      entered = Queue.new
+      release = Queue.new
+      vm.define_function('pause') do
+        entered << :in
+        release.pop(timeout: 30)
+        1
+      end
+      vm.eval_code('globalThis.noop = () => 1')
+
+      runner = Thread.new { vm.eval_code('pause(); 42') }
+      await(entered, "the bridge to be entered")
+
+      _ { vm.compile('1 + 1') }.must_raise ThreadError
+      _ { vm.call('noop') }.must_raise ThreadError
+      _ { vm.drain_jobs! }.must_raise ThreadError
+      _ { vm.import('X', from: 'export default 1;') }.must_raise ThreadError
+      _ { vm.define_function('another') { 1 } }.must_raise ThreadError
+      # Private, so only send reaches it, but every line of it writes to the
+      # runtime: a second thread re-running it beside live JS is the same
+      # corruption as any other entry.
+      _ { vm.send(:initialize) }.must_raise ThreadError
+      # Not JS entries, but they walk the same runtime: JS_RunGC beside live
+      # JS is a heap corruptor, and the usage read races the allocator.
+      _ { vm.gc! }.must_raise ThreadError
+      _ { vm.memory_usage }.must_raise ThreadError
+
+      release << :go
+      _(runner.value).must_equal 42
+    end
+
+    # The counter alone cannot express the rule: same-thread nesting elevates
+    # it too, and a bridge re-entering its own VM is a supported shape.
+    it "still allows the owning thread to re-enter from a bridge" do
+      vm = Quickjs::VM.new
+      vm.define_function('nested') { vm.eval_code('1 + 1') }
+
+      _(vm.eval_code('nested()')).must_equal 2
+    end
+
+    it "still allows a VM to move between threads when nothing is in flight" do
+      vm = Quickjs::VM.new
+
+      _(Thread.new { vm.eval_code('1 + 1') }.value).must_equal 2
+      _(Thread.new { vm.eval_code('2 + 2') }.value).must_equal 4
+      _(vm.eval_code('3 + 3')).must_equal 6
+    end
+
+    # define_function resolves an array path with JS_Eval, so it holds the VM
+    # for real work. A check that only refused when someone else was already
+    # in flight would pass on an idle VM and claim nothing, letting a second
+    # thread pass the same idle check and land in JS_Eval alongside it.
+    it "claims the VM while resolving a define_function path, not just checks" do
+      vm = Quickjs::VM.new(timeout_msec: 30_000)
+      in_getter = Queue.new
+      release = Queue.new
+      vm.define_function('gate') do
+        in_getter << :in
+        release.pop(timeout: 30)
+        1
+      end
+      vm.eval_code(<<~JS)
+        globalThis._lib = {};
+        Object.defineProperty(globalThis, 'myLib', { get: () => { gate(); return _lib; } });
+        0
+      JS
+
+      definer = Thread.new { vm.define_function(%w[myLib hello]) { 42 } }
+      await(in_getter, "the path getter to be entered") # inside JS_Eval on the first segment
+
+      _ { vm.eval_code('1 + 1') }.must_raise ThreadError
+
+      release << :go
+      definer.join
+      _(vm.eval_code('_lib.hello()')).must_equal 42
+    end
+
+    # module_loader= swaps the loader on the live runtime, so doing it while
+    # another thread imports would change resolution mid-flight.
+    it "refuses module_loader= while another thread is evaluating" do
+      vm = Quickjs::VM.new(timeout_msec: 30_000)
+      entered = Queue.new
+      release = Queue.new
+      vm.define_function('pause') do
+        entered << :in
+        release.pop(timeout: 30)
+        1
+      end
+
+      runner = Thread.new { vm.eval_code('pause(); 42') }
+      await(entered, "the bridge to be entered")
+
+      _ { vm.module_loader = ->(_s, _i) { nil } }.must_raise ThreadError
+
+      release << :go
+      _(runner.value).must_equal 42
+    end
+
+    # register_module_loader_funcs dereferences the context, so this was a
+    # use-after-free rather than an exception.
+    it "refuses module_loader= on a disposed VM" do
+      vm = Quickjs::VM.new
+      vm.dispose!
+
+      _ { vm.module_loader = ->(_s, _i) { nil } }.must_raise Quickjs::RuntimeError
+    end
+
+    # A stranded owner would lock the VM to one thread for good, the same way
+    # a stranded counter would refuse dispose! forever.
+    it "releases ownership when the entry ends by raising" do
+      vm = Quickjs::VM.new
+      _ { vm.eval_code('nope()') }.must_raise Quickjs::ReferenceError
+
+      _(Thread.new { vm.eval_code('1 + 1') }.value).must_equal 2
     end
   end
 

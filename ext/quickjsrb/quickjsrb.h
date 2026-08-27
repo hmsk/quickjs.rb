@@ -100,6 +100,18 @@ typedef struct VMData
   // mid-eval. Only mutated while holding the GVL, so plain int accesses
   // are race-free.
   int evals_in_flight;
+  // The Ruby thread that opened the outermost in-flight JS entry, or Qnil
+  // when evals_in_flight is 0. A second thread entering while this is set
+  // to someone else is the "one VM, one thread at a time" rule being
+  // broken, and QuickJS contexts have no internal locking, so it is refused
+  // (ThreadError) rather than left to corrupt the heap.
+  //
+  // Keyed on the owner rather than the counter because same-thread nesting
+  // is legitimate and common: an on_log listener or a define_function proc
+  // re-entering the VM elevates evals_in_flight without any concurrency.
+  // Comparing the owner lets that through and catches only the real thing.
+  // Only mutated while holding the GVL.
+  VALUE owner_thread;
   // Number of GVL-release regions currently open on this VM (a subset of
   // evals_in_flight). Bridge-registration APIs (define_function,
   // module_loader=, on_unhandled_rejection) refuse (ThreadError) while
@@ -182,6 +194,10 @@ static void vm_mark(void *ptr)
   rb_gc_mark_movable(data->module_resolution_cache);
   rb_gc_mark_movable(data->module_source_cache);
   rb_gc_mark_movable(data->preloaded_module_names);
+  // Pinned rather than movable: it is compared by identity against
+  // rb_thread_current(), and it is only ever set for the duration of a JS
+  // entry, so there is nothing to gain from letting it move.
+  rb_gc_mark(data->owner_thread);
 }
 
 static void vm_compact(void *ptr)
@@ -237,6 +253,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->disposed = false;
   data->gvl_released_js = false;
   data->evals_in_flight = 0;
+  data->owner_thread = Qnil;
   data->gvl_release_regions = 0;
   data->has_native_ruby_bridge = false;
 
