@@ -2,7 +2,7 @@
 
 # CPU-bound JS heavy enough (~10ms at the default iteration count) that
 # eval time dominates threading overhead when measuring GVL-release
-# parallelism. Shared between `assert_run_in_parallel` tests
+# parallelism. Shared between `assert_releases_gvl` tests
 # (test_helper.rb) and benchmark/threading.rb so both measure the
 # identical workload — minitest-free on purpose so the benchmark can
 # require it too.

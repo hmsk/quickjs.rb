@@ -9,67 +9,107 @@ require_relative 'support/cpu_workload'
 module QuickjsTestHelpers
   include QuickjsCpuWorkload
 
-  # Asserts the block runs in parallel across Ruby threads, by comparing
-  # wall-clock for the same total amount of work done serially in one thread
-  # vs split across two threads. If the work releases the GVL during its hot
-  # section, the 2-thread run finishes in ~half the wall clock; if it holds
-  # the GVL, both runs take roughly the same time (ratio ≈ 1.0 plus thread
-  # overhead). The 0.8 threshold cleanly distinguishes the two: GitHub's
-  # 3-core macOS runners have been observed topping out around 1.5x
-  # speedup (ratio ~0.67), so demanding better than 1.25x keeps margin on
-  # both sides without flapping.
+  # Asserts the block releases the GVL while it works, which is the point of
+  # the GVL release work (#56, #59, #63, #75, #76).
+  #
+  # This used to be asserted through wall clock: the same work in one thread
+  # against two, required at 0.8. That measured a consequence of the property
+  # rather than the property, and the consequence depends on the core count
+  # and load of a shared runner. It flapped at 0.811 and 0.831 on macOS and
+  # 0.817 and 0.855 in a musl container, each time on a commit that was fine,
+  # and once took an unrelated pull request red.
+  #
+  # A sibling thread answers the property directly. It sleeps in a loop, and
+  # each time it wakes it needs the GVL back before it can do anything. Work
+  # that holds the GVL stops it dead; work that releases lets it tick.
+  #
+  # It is measured against a baseline rather than a fixed number, because the
+  # sibling needs a core as well as the lock. A saturated runner starves it
+  # even when the GVL is free: this same call has measured 9 ticks of 11
+  # locally and 2 of 12 on a macOS runner, on identical work. Running a
+  # deliberately GVL-held workload in the same conditions gives that number
+  # something to mean. Both windows are equal so the counts compare directly.
   #
   # The block receives an iteration count and is expected to do that many
-  # units of the operation under test (e.g. eval_code calls, VM constructions).
-  # Each thread should create its own VM internally, because QuickJS records
-  # the runtime's stack base at construction time — using a VM from a thread
-  # other than its creator trips a (false) stack-overflow guard.
-  # A whole comparison is retried rather than the trial count being raised,
-  # because the two are equivalent for flake resistance but not for cost. The
-  # margin on a busy runner is thinner than the paragraph above suggests: two
-  # different callers have flapped on macOS at 0.811 and 0.831, once taking 4
-  # of 8 jobs down while the same commit passed 8 of 8 in the sibling run, so
-  # runner-wide noise rather than the code under test. Raising `trials` to
-  # cover that costs every run (5 to 12 took the suite from 12s to 19s);
-  # re-measuring only when a comparison misses costs nothing when it passes,
-  # and a genuinely GVL-held workload still has to beat the threshold on a
-  # whole fresh comparison to slip through, which it doesn't: reverting a
-  # release under test fails all attempts.
-  #
-  # Widening the 0.8 would be the wrong lever either way. It buys false
-  # passes, and a GVL-held case can measure as low as 0.83, so there is little
-  # room above 0.8 before these stop detecting a lost release at all.
-  def assert_run_in_parallel(trials: 5, total_iterations: 8, attempts: 3, &workload)
+  # units of the operation under test. Each thread should create its own VM
+  # internally: QuickJS records the runtime's stack bounds at construction,
+  # and while #87 re-bases them onto whichever thread evaluates, a VM is
+  # still one thread at a time (#86).
+  # 1ms rather than something coarser because the releases are not one long
+  # stretch. The module bytecode caller releases in short bursts around VM
+  # construction and teardown, and at 5ms the sibling walked past most of
+  # them: 24 ticks of 30 locally but 3 of 30 on a macOS runner, one short of
+  # passing. Sampling five times as often multiplies what a releasing
+  # workload scores and leaves a holding one where it was, since there is
+  # nothing there to find however often you look: 116 of 150 against 1 of 210.
+  TICK_SECONDS = 0.001
+  MEASURE_WINDOW = 0.15
+  TICK_MARGIN = 5
+
+  Ticks = Struct.new(:count, :opportunities, :elapsed, :rounds)
+
+  # Repeats the block until the window is full, counting how often a sleeping
+  # sibling got the GVL back meanwhile. Repeating matters for callers whose
+  # unit of work is a few milliseconds, which would otherwise be measured on
+  # timer resolution.
+  def ticks_during(iterations)
+    ticks = 0
+    stop = false
+    sibling = Thread.new do
+      until stop
+        ticks += 1
+        sleep TICK_SECONDS
+      end
+    end
+    Thread.pass
+
+    before = ticks
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    rounds = 0
+    loop do
+      yield iterations
+      rounds += 1
+      break if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started >= MEASURE_WINDOW
+    end
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    observed = ticks - before
+
+    stop = true
+    sibling.join
+
+    Ticks.new(observed, (elapsed / TICK_SECONDS).floor, elapsed, rounds)
+  end
+
+  # Holds the GVL by construction: a bridge on the VM makes can_eval_gvl_free
+  # refuse to release, so every eval on it runs held. Nothing here is created
+  # or disposed inside the measured region, because both of those release the
+  # GVL themselves and would put ticks on the baseline.
+  def with_gvl_held_workload
+    vm = Quickjs::VM.new(timeout_msec: 10_000)
+    vm.define_function('bridge') { 1 }
+    vm.eval_code(cpu_workload_js) # warm up outside the measurement
+    yield ->(iterations) { iterations.times { vm.eval_code(cpu_workload_js) } }
+  ensure
+    vm&.dispose!
+  end
+
+  def assert_releases_gvl(iterations: 8, &workload)
     skip 'requires 2+ cores' if Etc.nprocessors < 2
 
-    measure = ->(&block) {
-      start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      block.call
-      Process.clock_gettime(Process::CLOCK_MONOTONIC) - start
-    }
+    workload.call(1) # warm up: JIT, page caches, bytecode caches
+    released = ticks_during(iterations) { |n| workload.call(n) }
+    held = with_gvl_held_workload { |work| ticks_during(iterations) { |n| work.call(n) } }
 
-    workload.call(1) # warmup: load JIT / page in caches before timing
-
-    attempts.times do |attempt|
-      single = trials.times.map {
-        measure.call { workload.call(total_iterations) }
-      }.min
-
-      parallel = trials.times.map {
-        measure.call {
-          threads = Array.new(2) {
-            Thread.new { workload.call(total_iterations / 2) }
-          }
-          threads.each(&:join)
-        }
-      }.min
-
-      next if parallel > single * 0.8 && attempt < attempts - 1
-
-      assert_operator parallel, :<=, single * 0.8,
-        "parallel wall clock #{(parallel * 1000).round(1)}ms not ≤ 0.8 × single #{(single * 1000).round(1)}ms — work may not be releasing the GVL (#{attempt + 1} of #{attempts} attempts)"
-      return
+    if ENV['GVL_DEBUG']
+      warn format('[gvl] released %d/%d in %.1fms (%d rounds), held %d/%d in %.1fms',
+                  released.count, released.opportunities, released.elapsed * 1000, released.rounds,
+                  held.count, held.opportunities, held.elapsed * 1000)
     end
+
+    assert_operator released.count, :>=, held.count + TICK_MARGIN,
+      "a sibling thread ticked #{released.count} times in #{(released.elapsed * 1000).round(1)}ms " \
+      "of this work, against #{held.count} in #{(held.elapsed * 1000).round(1)}ms of work known to " \
+      "hold the GVL — this work is not releasing it either"
   end
 end
 

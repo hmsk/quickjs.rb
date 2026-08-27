@@ -2456,10 +2456,24 @@ describe "Quickjs::Blocking" do
       _(results.flatten.uniq).must_equal [expected]
     end
 
+    # The negative control. assert_releases_gvl is worth nothing if it passes
+    # for work that holds the GVL, and a bridge on the VM takes the GVL-held
+    # eval path by construction, since can_eval_gvl_free refuses to release
+    # once one is registered. If this ever stops raising, the four tests below
+    # have become decorative, which is a thing a measurement cannot report
+    # about itself.
+    it "reports a workload that holds the GVL" do
+      err = with_gvl_held_workload do |held|
+        _ { assert_releases_gvl(&held) }.must_raise Minitest::Assertion
+      end
+
+      _(err.message).must_match(/not releasing it/)
+    end
+
     it "evaluates pure JS concurrently with measurable speedup" do
       timing_workload = cpu_workload_js
 
-      assert_run_in_parallel do |iterations|
+      assert_releases_gvl do |iterations|
         # The eval budget is wall-clock, so a scheduling stall on a busy CI
         # runner can push one ~10ms eval past the 100ms default and error
         # the test with InterruptedError. Parallelism is what's asserted
@@ -2479,7 +2493,7 @@ describe "Quickjs::Blocking" do
     it "runs compiled bytecode concurrently with measurable speedup" do
       runnable = Quickjs.compile(cpu_workload_js)
 
-      assert_run_in_parallel do |iterations|
+      assert_releases_gvl do |iterations|
         vm = Quickjs::VM.new(timeout_msec: 10_000)
         begin
           iterations.times { runnable.run(on: vm) }
@@ -2543,7 +2557,7 @@ describe "Quickjs::Blocking" do
     it "compiles concurrently with measurable speedup" do
       source = bulky_source
 
-      assert_run_in_parallel do |iterations|
+      assert_releases_gvl do |iterations|
         vm = Quickjs::VM.new(timeout_msec: 10_000)
 
         begin

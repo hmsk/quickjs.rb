@@ -170,7 +170,7 @@ describe "Quickjs.register_polyfill" do
     Quickjs::VM.new(features: [@feature]).dispose! # populate the bytecode cache
     bytecode = Quickjs._polyfill_for(@feature)[:bytecode]
 
-    assert_run_in_parallel do |iterations|
+    assert_releases_gvl do |iterations|
       iterations.times do
         vm = Quickjs::VM.new
         vm.send(:_load_polyfill_bytecode, bytecode)
