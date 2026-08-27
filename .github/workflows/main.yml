@@ -39,11 +39,20 @@ jobs:
   # mapped part of the stack rather than what RLIMIT_STACK allows. A change to
   # the stack-limit handling that is fine on both matrix legs above can still
   # make every eval on Alpine raise "stack overflow", which is what happened
-  # while #92 was being worked on. One job is enough to catch that shape.
+  # while #92 was being worked on.
   musl:
     runs-on: ubuntu-latest
-    name: Ruby 3.4 on alpine (musl)
-    container: ruby:3.4-alpine
+    name: Ruby ${{ matrix.ruby }} on alpine (musl)
+    container: ruby:${{ matrix.ruby }}-alpine
+    strategy:
+      matrix:
+        # Newest and oldest supported. Everything between is already covered
+        # four times over on glibc and macos, so what this leg adds is the
+        # libc; pinning it to a single Ruby would decide which end of the
+        # supported range never meets musl at all.
+        ruby:
+          - "4.0"
+          - "3.2"
 
     steps:
       - name: Install build dependencies
