@@ -59,6 +59,9 @@ jobs:
           - "4.0"
           - "3.2"
 
+    env:
+      QUICKJS_SKIP_PARALLELISM_TIMING: "1"
+
     steps:
       - name: Install build dependencies
         run: apk add --no-cache build-base linux-headers git

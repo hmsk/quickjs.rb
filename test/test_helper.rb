@@ -41,6 +41,15 @@ module QuickjsTestHelpers
   # room above 0.8 before these stop detecting a lost release at all.
   def assert_run_in_parallel(trials: 5, total_iterations: 8, attempts: 3, &workload)
     skip 'requires 2+ cores' if Etc.nprocessors < 2
+# The musl legs opt out, and the reason is the paragraph above rather than
+# anything about musl: these measure a wall-clock ratio, and they flapped
+# at 0.817 and 0.855 in the container in two of the first four runs after
+# that leg was added. Locally, at two cores, alpine and glibc both pass
+# three of three, so it is the runner and the container rather than the
+# libc. What those legs are there to cover is stack and allocator
+# behaviour; the GVL release is still asserted on eight native legs, which
+# is where a lost release would show.
+skip 'timing comparisons opted out here' if ENV['QUICKJS_SKIP_PARALLELISM_TIMING']
 
     measure = ->(&block) {
       start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
