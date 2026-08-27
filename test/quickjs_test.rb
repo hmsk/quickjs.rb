@@ -473,6 +473,102 @@ describe Quickjs::VM do
     end
   end
 
+  # A conversion that raises partway through — a Promise nested in the graph is
+  # the reachable case — must release everything it was holding on that exit.
+  # What leaks is guest-chosen and never returned, so a long-lived VM fills up
+  # at a rate the script picks.
+  describe "ConversionUnwind" do
+    # Objects and bytes both matter: obj_count does not count JSStrings, so a
+    # leak made entirely of strings would pass an object-only assertion.
+    def retained(vm, iterations)
+      # The first rounds cache shapes, intern atoms and settle whatever the
+      # previous evaluation left pending, all of which persist for the life of
+      # the VM. Measure once that has stopped moving.
+      2.times { yield }
+      vm.gc!
+      before = vm.memory_usage
+      iterations.times { yield }
+      vm.gc!
+      after = vm.memory_usage
+      {objects: after[:obj_count] - before[:obj_count],
+       bytes:   after[:malloc_size] - before[:malloc_size]}
+    end
+
+    # The expected error is named rather than swallowed: a source that stops
+    # raising — or never raised, because it was a syntax error all along —
+    # would otherwise measure nothing and pass.
+    def retained_by_eval(vm, code, iterations, raising:)
+      retained(vm, iterations) do
+        begin
+          vm.eval_code(code)
+          flunk "expected the conversion to raise #{raising}"
+        rescue raising
+        end
+      end
+    end
+
+    NOTHING = {objects: 0, bytes: 0}.freeze
+
+    it "releases the graph it was walking when the conversion raises" do
+      vm = Quickjs::VM.new
+      _(retained_by_eval(vm, '({a: {b: 1}, p: Promise.resolve(1)})', 200, raising: Quickjs::RuntimeError)).must_equal NOTHING
+    ensure
+      vm.dispose!
+    end
+
+    it "releases a toJSON result the returned value does not reference" do
+      vm = Quickjs::VM.new
+      vm.eval_code('globalThis.C = class { toJSON() { return {p: Promise.resolve(1)} } }')
+      _(retained_by_eval(vm, '({o: new C()})', 200, raising: Quickjs::RuntimeError)).must_equal NOTHING
+    ensure
+      vm.dispose!
+    end
+
+    it "releases the property table when a getter raises through a bridge" do
+      vm = Quickjs::VM.new
+      vm.define_function('boom') { raise IOError, 'boom' }
+      _(retained_by_eval(vm, '({a: {deep: 1}, get b() { boom() }})', 200, raising: IOError)).must_equal NOTHING
+    ensure
+      vm.dispose!
+    end
+
+    # Past CONV_FRAMES_INLINE, so the frame stack has to grow and still be
+    # drained by the unwind.
+    it "releases a graph nested deeper than the inline frame stack" do
+      vm = Quickjs::VM.new
+      code = "#{'{a: ' * 20}{p: Promise.resolve(1)}#{'}' * 20}"
+      _(retained_by_eval(vm, "(#{code})", 200, raising: Quickjs::RuntimeError)).must_equal NOTHING
+    ensure
+      vm.dispose!
+    end
+
+    # A function converts through its own toString, which is guest code.
+    it "releases a function whose toString throws" do
+      vm = Quickjs::VM.new
+      # Wrapped in a call so the binding is fresh on every evaluation; a bare
+      # `const h` would redeclare and turn every round after the first into a
+      # syntax error that never reaches a conversion.
+      code = "(() => { const h = () => 1; h.toString = () => { throw new RangeError('z') }; return {h} })()"
+      # ArgumentError, not a Quickjs error: JS_ToCString hands back NULL for the
+      # thrown value and rb_str_new2 refuses it before the real error is built.
+      _(retained_by_eval(vm, code, 200, raising: ArgumentError)).must_equal NOTHING
+    ensure
+      vm.dispose!
+    end
+
+    # Not a JS-level raise at all: Timeout and Thread#raise land wherever the
+    # conversion happens to be, which is the exit the result's owner covers.
+    it "releases the result when an async interrupt lands in the conversion" do
+      vm = Quickjs::VM.new
+      vm.define_function('slow') { Thread.current.raise(IOError, 'interrupted'); 1 }
+      code = "({a: {b: 1}, get c() { slow() }})"
+      _(retained_by_eval(vm, code, 200, raising: IOError)).must_equal NOTHING
+    ensure
+      vm.dispose!
+    end
+
+  end
+
   describe "Dispose" do
 # allocate is public on every Ruby class, and an object allocated but never
 # initialized still reaches vm_free. That handed js_std_free_handlers a
