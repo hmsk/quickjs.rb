@@ -1242,6 +1242,20 @@ static void finish_polyfill_load(VMData *data, JSValue j_result)
   JS_FreeValue(data->context, j_result);
 }
 
+// Both size options are read straight into a size_t, where a negative turns
+// into SIZE_MAX rather than an error: for max_stack_size that puts
+// stack_limit above stack_top so every eval raises "stack overflow", and for
+// memory_limit it reads as an enormous budget. Neither is what the caller
+// typed, so both are refused here, by name, while the name still means
+// something to them.
+static size_t size_option(VALUE r_value, const char *name)
+{
+  if (!RB_INTEGER_TYPE_P(r_value) || RTEST(rb_funcall(r_value, rb_intern("negative?"), 0)))
+    rb_raise(rb_eArgError, "%s must be a non-negative Integer", name);
+
+  return NUM2SIZET(r_value);
+}
+
 static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 {
   VALUE r_opts;
@@ -1255,14 +1269,6 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   VALUE r_max_stack_size = rb_hash_aref(r_opts, ID2SYM(rb_intern("max_stack_size")));
   if (NIL_P(r_max_stack_size))
     r_max_stack_size = UINT2NUM(1024 * 1024 * 4);
-  // NUM2ULL reads a negative as SIZE_MAX, which is not a large budget but a
-  // broken one: stack_limit lands above stack_top and every eval raises
-  // "stack overflow", and only where the headroom clamp happens to catch it
-  // first does that stay hidden. Refuse it here, where the caller can still
-  // see what they typed.
-  if (!RB_INTEGER_TYPE_P(r_max_stack_size) ||
-      RTEST(rb_funcall(r_max_stack_size, rb_intern("negative?"), 0)))
-    rb_raise(rb_eArgError, "max_stack_size must be a non-negative Integer");
   VALUE r_features = rb_hash_aref(r_opts, ID2SYM(rb_intern("features")));
   if (NIL_P(r_features))
     r_features = rb_ary_new();
@@ -1287,8 +1293,8 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   JS_SetContextOpaque(data->context, data);
   JSRuntime *runtime = JS_GetRuntime(data->context);
 
-  JS_SetMemoryLimit(runtime, NUM2UINT(r_memory_limit));
-  data->requested_max_stack_size = (size_t)NUM2ULL(r_max_stack_size);
+  JS_SetMemoryLimit(runtime, size_option(r_memory_limit, "memory_limit"));
+  data->requested_max_stack_size = size_option(r_max_stack_size, "max_stack_size");
   JS_SetMaxStackSize(runtime, data->requested_max_stack_size);
 
   register_module_loader_funcs(data);
