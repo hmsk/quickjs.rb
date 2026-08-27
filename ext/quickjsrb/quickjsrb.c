@@ -26,6 +26,7 @@ const int num_native_errors = sizeof(native_errors) / sizeof(native_errors[0]);
 
 static int dispatch_log(VMData *data, const char *severity, VALUE r_row);
 static void check_disposed(VMData *data);
+static void check_js_entry_owner(VMData *data);
 static void run_gvl_release_region(VMData *data, void *(*job_run)(void *), void *job, JSValue *j_result, void *owned_buf0, void *owned_buf1);
 // Defined below, next to the stack-bounds query it depends on; enter_js_entry
 // above needs it.
@@ -1263,6 +1264,16 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  // Reachable only through send, since initialize is private, but reachable:
+  // everything below here writes to the runtime, so this is a JS entry point
+  // in all but name and was the one place not saying so. Disposed first,
+  // because JS_SetContextOpaque on the next line dereferences a context that
+  // dispose! has already freed, which segfaults rather than raising. Then the
+  // owner, because the same writes landing beside another thread's in-flight
+  // JS_Eval is the corruption this whole file is arranged to refuse.
+  check_disposed(data);
+  check_js_entry_owner(data);
 
   data->eval_time->limit_ms = (int64_t)NUM2UINT(r_timeout_msec);
   JS_SetContextOpaque(data->context, data);

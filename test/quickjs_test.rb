@@ -384,6 +384,18 @@ describe Quickjs::VM do
   end
 
   describe "Dispose" do
+# initialize writes to the runtime from its second line on, starting with
+# JS_SetContextOpaque, and had no disposed check. On a disposed VM that
+# dereferenced a context dispose! had already freed, so
+# `vm.dispose!; vm.send(:initialize)` took the process down with SIGSEGV
+# rather than raising. Private, so it needs send to reach, but reachable.
+it "refuses re-initialization of a disposed VM instead of touching the freed context" do
+  vm = Quickjs::VM.new
+  vm.dispose!
+
+  _ { vm.send(:initialize) }.must_raise Quickjs::RuntimeError
+end
+
     it "dispose! returns nil and flips disposed?" do
       vm = Quickjs::VM.new
       _(vm.disposed?).must_equal false
@@ -571,6 +583,10 @@ describe Quickjs::VM do
       _ { vm.drain_jobs! }.must_raise ThreadError
       _ { vm.import('X', from: 'export default 1;') }.must_raise ThreadError
       _ { vm.define_function('another') { 1 } }.must_raise ThreadError
+      # Private, so only send reaches it, but every line of it writes to the
+      # runtime: a second thread re-running it beside live JS is the same
+      # corruption as any other entry.
+      _ { vm.send(:initialize) }.must_raise ThreadError
       # Not JS entries, but they walk the same runtime: JS_RunGC beside live
       # JS is a heap corruptor, and the usage read races the allocator.
       _ { vm.gc! }.must_raise ThreadError
