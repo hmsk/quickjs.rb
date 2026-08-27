@@ -384,6 +384,17 @@ describe Quickjs::VM do
   end
 
   describe "Dispose" do
+# allocate is public on every Ruby class, and an object allocated but never
+# initialized still reaches vm_free. That handed js_std_free_handlers a
+# runtime whose handlers js_std_init_handlers had never set up, and the
+# process died in the GC at exit rather than anywhere a backtrace would
+# point at.
+it "survives an allocated VM that was never initialized" do
+  Quickjs::VM.allocate
+
+  _(Quickjs::VM.new.eval_code('1 + 1')).must_equal 2
+end
+
 # initialize writes to the runtime from its second line on, starting with
 # JS_SetContextOpaque, and had no disposed check. On a disposed VM that
 # dereferenced a context dispose! had already freed, so

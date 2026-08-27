@@ -1286,6 +1286,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   register_module_loader_funcs(data);
   JS_SetHostPromiseRejectionTracker(runtime, quickjsrb_promise_rejection_tracker, NULL);
   js_std_init_handlers(runtime);
+  data->std_handlers_installed = true;
 
   JSValue j_global = JS_GetGlobalObject(data->context);
 
@@ -3200,9 +3201,16 @@ static VALUE vm_m_memoryPoisoned(VALUE r_self)
 // progressing. Safe to release because nothing in the teardown path calls
 // back into Ruby: module_loader, console, and define_function callbacks
 // only fire during JS execution, not during free.
+struct teardown_job
+{
+  JSContext *context;
+  bool std_handlers_installed;
+};
+
 static void *vm_dispose_no_gvl(void *p)
 {
-  vm_teardown_context((JSContext *)p);
+  struct teardown_job *job = (struct teardown_job *)p;
+  vm_teardown_context(job->context, job->std_handlers_installed);
   return NULL;
 }
 
@@ -3233,7 +3241,8 @@ static VALUE vm_m_dispose(VALUE r_self)
   // disposed=true and skips its own teardown.
   data->disposed = true;
 
-  rb_thread_call_without_gvl(vm_dispose_no_gvl, data->context, NULL, NULL);
+  struct teardown_job job = {data->context, data->std_handlers_installed};
+  rb_thread_call_without_gvl(vm_dispose_no_gvl, &job, NULL, NULL);
 
   // Drop references to user-supplied closures so Ruby GC can reclaim them
   // (and anything they captured) before the wrapping VM object itself is

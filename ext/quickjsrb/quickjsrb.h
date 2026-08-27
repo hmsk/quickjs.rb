@@ -125,7 +125,13 @@ typedef struct VMData
   // re-apply it on each outermost entry: the budget is re-derived per entry
   // from the running thread's real headroom, and the request is the ceiling
   // it clamps down from. Zero keeps QuickJS's documented "no limit".
-  size_t requested_max_stack_size;
+size_t requested_max_stack_size;
+// Whether initialize ran. Quickjs::VM.allocate is public on every Ruby
+// class, and an object allocated but never initialized still reaches
+// vm_free, which used to hand js_std_free_handlers a runtime whose
+// handlers js_std_init_handlers had never set up. That segfaulted at
+// process exit. Teardown consults this instead of assuming.
+bool std_handlers_installed;
   // Latched by quickjsrb_new_ruby_bridge whenever a C function that calls
   // into Ruby synchronously (rb_funcall & friends) WITHOUT honoring
   // gvl_released_js is installed into this context. While true,
@@ -153,11 +159,12 @@ static inline JSValue quickjsrb_new_ruby_bridge(JSContext *ctx, JSCFunction *fun
   return JS_NewCFunction(ctx, func, name, length);
 }
 
-static void vm_teardown_context(JSContext *ctx)
+static void vm_teardown_context(JSContext *ctx, bool std_handlers_installed)
 {
   JSRuntime *runtime = JS_GetRuntime(ctx);
   JS_SetInterruptHandler(runtime, NULL, NULL);
-  js_std_free_handlers(runtime);
+  if (std_handlers_installed)
+    js_std_free_handlers(runtime);
   JS_FreeContext(ctx);
   JS_FreeRuntime(runtime);
 }
@@ -172,7 +179,7 @@ static void vm_free(void *ptr)
     if (!JS_IsUndefined(data->j_file_proxy_creator))
       JS_FreeValue(data->context, data->j_file_proxy_creator);
 
-    vm_teardown_context(data->context);
+    vm_teardown_context(data->context, data->std_handlers_installed);
   }
 
   xfree(ptr);
@@ -254,6 +261,8 @@ static VALUE vm_alloc(VALUE r_self)
   data->gvl_released_js = false;
   data->evals_in_flight = 0;
   data->owner_thread = Qnil;
+  data->requested_max_stack_size = 0;
+  data->std_handlers_installed = false;
   data->gvl_release_regions = 0;
   data->has_native_ruby_bridge = false;
 
