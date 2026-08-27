@@ -35,9 +35,16 @@ module QuickjsTestHelpers
   # internally: QuickJS records the runtime's stack bounds at construction,
   # and while #87 re-bases them onto whichever thread evaluates, a VM is
   # still one thread at a time (#86).
-  TICK_SECONDS = 0.005
+  # 1ms rather than something coarser because the releases are not one long
+  # stretch. The module bytecode caller releases in short bursts around VM
+  # construction and teardown, and at 5ms the sibling walked past most of
+  # them: 24 ticks of 30 locally but 3 of 30 on a macOS runner, one short of
+  # passing. Sampling five times as often multiplies what a releasing
+  # workload scores and leaves a holding one where it was, since there is
+  # nothing there to find however often you look: 116 of 150 against 1 of 210.
+  TICK_SECONDS = 0.001
   MEASURE_WINDOW = 0.15
-  TICK_MARGIN = 3
+  TICK_MARGIN = 5
 
   Ticks = Struct.new(:count, :opportunities, :elapsed, :rounds)
 
