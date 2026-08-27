@@ -7,6 +7,11 @@ on:
 
   pull_request:
 
+# The repository default is already read, but the default is a setting
+# somebody can change; every job here only builds and tests.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ${{ matrix.os }}
