@@ -2456,27 +2456,19 @@ describe "Quickjs::Blocking" do
       _(results.flatten.uniq).must_equal [expected]
     end
 
-# The negative control. assert_releases_gvl is worth nothing if it passes
-# for work that holds the GVL, and a bridge on the VM takes the GVL-held
-# eval path by construction, since can_eval_gvl_free refuses to release
-# once one is registered. If this ever stops raising, the sibling-thread
-# assertion has become decorative and the other four tests here are not
-# checking what they say they are.
-it "reports a workload that holds the GVL" do
-  held = lambda do |iterations|
-    vm = Quickjs::VM.new(timeout_msec: 10_000)
-    vm.define_function('bridge') { 1 }
-    begin
-      iterations.times { vm.eval_code(cpu_workload_js) }
-    ensure
-      vm.dispose!
+    # The negative control. assert_releases_gvl is worth nothing if it passes
+    # for work that holds the GVL, and a bridge on the VM takes the GVL-held
+    # eval path by construction, since can_eval_gvl_free refuses to release
+    # once one is registered. If this ever stops raising, the four tests below
+    # have become decorative, which is a thing a measurement cannot report
+    # about itself.
+    it "reports a workload that holds the GVL" do
+      err = with_gvl_held_workload do |held|
+        _ { assert_releases_gvl(&held) }.must_raise Minitest::Assertion
+      end
+
+      _(err.message).must_match(/not releasing it/)
     end
-  end
-
-  err = _ { assert_releases_gvl(&held) }.must_raise Minitest::Assertion
-
-  _(err.message).must_match(/holding the GVL/)
-end
 
     it "evaluates pure JS concurrently with measurable speedup" do
       timing_workload = cpu_workload_js
