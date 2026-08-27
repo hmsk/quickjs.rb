@@ -278,7 +278,7 @@ describe "module bytecode primitives" do
     # all of them to produce a false failure. Widening the threshold instead
     # would buy false passes, which is the worse direction: the GVL-held case
     # measures as low as 0.83 on some machines.
-    assert_run_in_parallel(trials: 12, total_iterations: modules.size) do |iterations|
+    assert_releases_gvl(iterations: modules.size) do |iterations|
       vm = Quickjs::VM.new
 
       begin
