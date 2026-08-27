@@ -854,6 +854,24 @@ it "does not run off the end of a Fiber's stack" do
   _(raised).wont_be_kind_of SystemStackError
 end
 
+# JS_SetMemoryLimit takes a size_t, but the option was read with NUM2UINT,
+# so the ceiling was 4GB and the error naming 'unsigned int' never said
+# which option had gone wrong.
+it "accepts a memory_limit that does not fit in 32 bits" do
+  vm = Quickjs::VM.new(memory_limit: 8 * 1024**3)
+
+  _(vm.memory_usage[:malloc_limit]).must_equal 8 * 1024**3
+  _(vm.eval_code('1 + 1')).must_equal 2
+end
+
+# NUM2UINT wrapped it to UINT_MAX, so -1 was a silent 4GB cap. QuickJS uses
+# -1 for "no limit" itself, which is exactly the confusion to refuse.
+it "refuses a negative memory_limit, by name" do
+  err = _ { Quickjs::VM.new(memory_limit: -1) }.must_raise ArgumentError
+
+  _(err.message).must_match(/memory_limit/)
+end
+
     # NUM2ULL reads a negative as SIZE_MAX, which puts stack_limit above
     # stack_top and makes every eval raise "stack overflow". Only the headroom
     # clamp hid that, and only where the stack can be measured at all.
