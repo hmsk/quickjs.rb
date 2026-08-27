@@ -500,6 +500,18 @@ The rules for sharing VMs across threads:
 | `File` | → | `Quickjs::File` — `.name`, `.last_modified` + Blob attrs | requires `POLYFILL_FILE` |
 | `File` proxy | ← | `::File` | requires `POLYFILL_FILE`; applies to `define_function` return values |
 
+An object reached more than once within a single conversion becomes one Ruby object, mirroring the graph JavaScript built. Mutating one occurrence is therefore visible through the others:
+
+```rb
+result = Quickjs.eval_code('const o = {a: 1}; [o, o]')
+result[0].equal?(result[1]) #=> true
+
+result[0]['a'] = 999
+result #=> [{ 'a' => 999 }, { 'a' => 999 }]
+```
+
+A cycle has no Ruby equivalent, so the reference that closes it converts to `nil`.
+
 ## Extending: registering polyfills
 
 `Quickjs.register_polyfill(name, source:, init: nil)` adds a polyfill to a process-wide registry. Any VM constructed with `name` in its `features:` list runs the registered bundle on top of the JS runtime. Companion gems use this hook to ship additional polyfills (e.g. `Intl.Collator`, `DisplayNames`) without bundling them into the main gem.
