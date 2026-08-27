@@ -51,6 +51,7 @@ module Quickjs
       existing = declared[key]
 
       if existing.nil?
+        _refuse_unusable_global(key) if kind == :var
         # The declaration is its own eval so the caller's source is never
         # rewritten. Prepending to it would shift every line number in a
         # backtrace away from the code the caller actually wrote.
@@ -64,11 +65,49 @@ module Quickjs
           "#{key} is already defined as a const; a const cannot be redefined"
       else
         # Redeclaring would be a SyntaxError for `let`, so re-defining an
-        # existing binding assigns to it instead.
+        # existing binding assigns to it instead. A `var` we declared
+        # ourselves can have been swapped for an accessor since, so the
+        # same check applies to the assignment.
+        _refuse_unusable_global(key) if kind == :var
         eval_code("#{key} = #{literal};")
       end
 
       key
+    end
+
+    # `var` is the only form that lands on `globalThis`, so it is the only one a
+    # property already sitting there can intercept. An accessor takes the value
+    # in its setter and hands JS back whatever its getter likes; a non-writable
+    # data property swallows the assignment silently, because a declaration eval
+    # is sloppy mode. Either way the caller was told the define succeeded when it
+    # did not happen.
+    #
+    # This refuses a global that is already unusable. It is not a security
+    # boundary, and is deliberately not described as one: it asks the VM through
+    # JS, and code that has already run there can replace
+    # Object.getOwnPropertyDescriptor as easily as it can install the accessor. A
+    # VM that has evaluated untrusted JavaScript owns its own environment, and
+    # there is no way to hand a value into it unobserved. Define before running
+    # code you do not control.
+    def _refuse_unusable_global(key)
+      state = eval_code(<<~JS)
+        (() => {
+          const d = Object.getOwnPropertyDescriptor(globalThis, #{key.to_s.to_json});
+          if (!d) return 'absent';
+          if (d.get !== undefined || d.set !== undefined) return 'accessor';
+          return d.writable ? 'writable' : 'readonly';
+        })()
+      JS
+
+      case state
+      when 'accessor'
+        raise ::ArgumentError,
+          "cannot define var #{key}: globalThis.#{key} is an accessor, so the value would go to its " \
+          "setter rather than to the variable"
+      when 'readonly'
+        raise ::ArgumentError,
+          "cannot define var #{key}: globalThis.#{key} is not writable, so the assignment would be discarded"
+      end
     end
 
     def _validate_variable_name(name)

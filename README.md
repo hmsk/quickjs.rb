@@ -401,6 +401,10 @@ vm.define_var(:APP_CONFIG, { retries: 3 })
 vm.eval_code('globalThis.APP_CONFIG.retries') #=> 3
 ```
 
+**Define before you run code you do not control.** `var` is the only form that lands on `globalThis`, which is what makes it useful here and also the only one an existing property can intercept. If JavaScript has already run in the VM and left an accessor or a non-writable property under that name, the assignment would go to its setter or be discarded, so `define_var` raises `ArgumentError` rather than reporting a success that did not happen.
+
+That check reads the VM through JavaScript, so treat it as a guard against a global that is already unusable rather than as a defence: code that has run in a VM owns that VM's environment, and a value handed to it afterwards cannot be hidden from it. `define_const` and `define_let` are unaffected, since neither touches `globalThis`.
+
 Because these are real declarations rather than property assignments, a colliding declaration in your JS is a loud error instead of a silent shadow:
 
 ```rb

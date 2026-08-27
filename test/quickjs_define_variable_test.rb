@@ -255,4 +255,61 @@ describe "VM#define_const / #define_let / #define_var" do
       _(@vm.eval_code("seen")).must_equal "visible"
     end
   end
+describe "define_var onto a global that is already there" do
+  # var is the only form that lands on globalThis, so it is the only one an
+  # existing property can intercept. Both of these used to report success:
+  # the accessor took the value in its setter and handed JS back whatever
+  # its getter liked, and the non-writable property discarded the
+  # assignment silently, because a declaration eval is sloppy mode.
+  it "refuses a global that is an accessor, without handing it the value" do
+    vm = Quickjs::VM.new
+    vm.eval_code(<<~JS)
+      Object.defineProperty(globalThis, 'CONFIG', {
+        configurable: true,
+        set(v) { globalThis.captured = JSON.stringify(v); },
+        get() { return 'guest'; }
+      });
+    JS
+
+    err = _ { vm.define_var(:CONFIG, { secret: 'value' }) }.must_raise ArgumentError
+
+    _(err.message).must_match(/accessor/)
+    _(vm.eval_code('globalThis.captured')).must_equal Quickjs::Value::UNDEFINED
+  end
+
+  it "refuses a global that is not writable" do
+    vm = Quickjs::VM.new
+    vm.eval_code("Object.defineProperty(globalThis, 'LOCKED', { value: 'theirs', writable: false });")
+
+    err = _ { vm.define_var(:LOCKED, 'mine') }.must_raise ArgumentError
+
+    _(err.message).must_match(/not writable/)
+    _(vm.eval_code('globalThis.LOCKED')).must_equal 'theirs'
+  end
+
+  it "still defines over an ordinary global" do
+    vm = Quickjs::VM.new
+    vm.eval_code('globalThis.plain = 1;')
+
+    _(vm.define_var(:plain, 42)).must_equal :plain
+    _(vm.eval_code('plain')).must_equal 42
+  end
+
+  # Neither lexical form touches globalThis, so an accessor there cannot see
+  # the value or change what the name resolves to.
+  it "leaves const and let alone" do
+    vm = Quickjs::VM.new
+    vm.eval_code(<<~JS)
+      Object.defineProperty(globalThis, 'K', {
+        configurable: true, set(v) { globalThis.seen = true; }, get() { return 'guest'; }
+      });
+    JS
+
+    vm.define_const(:K, 'mine')
+
+    _(vm.eval_code('K')).must_equal 'mine'
+    _(vm.eval_code('globalThis.seen')).must_equal Quickjs::Value::UNDEFINED
+  end
+end
+
 end
