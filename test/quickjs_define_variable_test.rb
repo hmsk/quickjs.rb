@@ -312,4 +312,50 @@ describe "define_var onto a global that is already there" do
   end
 end
 
+describe "a value that expands past what the VM could hold" do
+  # A structure reaching the same object twice is written out twice, so each
+  # level referencing the level below twice doubles the output. Twenty-five
+  # of those is a third of a gigabyte from a handful of Ruby objects, which
+  # YAML aliases and Marshal round-trips produce without anyone meaning to.
+  def doubling(levels)
+    (1..levels).reduce({ n: 1 }) { |inner, _| [inner, inner] }
+  end
+
+  it "refuses it, naming the limit it would not fit in" do
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+    err = _ { vm.define_const(:big, doubling(25)) }.must_raise ArgumentError
+
+    _(err.message).must_match(/memory_limit/)
+    _(err.message).must_match(/1048576/)
+  end
+
+  # The check is a ceiling on the source, so a flat value large enough on its
+  # own is refused too, not only one that got there by expanding.
+  it "refuses a single value larger than the limit" do
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+    _ { vm.define_const(:s, 'x' * 2_000_000) }.must_raise ArgumentError
+  end
+
+  # Sharing is only a problem when it compounds. One object under two keys
+  # is ordinary and stays allowed.
+  it "leaves an ordinary shared reference alone" do
+    vm = Quickjs::VM.new
+    shared = { n: 1 }
+
+    vm.define_const(:pair, { x: shared, y: shared })
+
+    _(vm.eval_code('JSON.stringify(pair)')).must_equal '{"x":{"n":1},"y":{"n":1}}'
+  end
+
+  it "leaves values that fit alone" do
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+    vm.define_const(:fits, doubling(8))
+
+    _(vm.eval_code('fits.length')).must_equal 2
+  end
+end
+
 end

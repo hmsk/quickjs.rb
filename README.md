@@ -405,6 +405,11 @@ vm.eval_code('globalThis.APP_CONFIG.retries') #=> 3
 
 That check reads the VM through JavaScript, so treat it as a guard against a global that is already unusable rather than as a defence: code that has run in a VM owns that VM's environment, and a value handed to it afterwards cannot be hidden from it. `define_const` and `define_let` are unaffected, since neither touches `globalThis`.
 
+**A value is written out once per occurrence.** A Ruby structure that reaches the same object twice serializes it twice rather than sharing it, so a graph whose branches repeat expands as it nests. Values built from YAML aliases or a `Marshal` round-trip are the ones that hit this without meaning to. Serializing stops if the result would exceed the VM's `memory_limit`, since a source larger than the whole JS heap budget could not be evaluated anyway, and raises `ArgumentError` naming the option.
+
+This is a ceiling and not a prediction. Object-heavy JavaScript costs several times its source size once parsed, so a value well under `memory_limit` can still exhaust the VM when it runs.
+
+
 Because these are real declarations rather than property assignments, a colliding declaration in your JS is a loud error instead of a silent shadow:
 
 ```rb

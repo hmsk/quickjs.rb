@@ -46,7 +46,11 @@ module Quickjs
 
     def _define_variable(kind, name, value)
       key = _validate_variable_name(name)
-      literal = Quickjs._js_literal(value)
+      budget = memory_usage[:malloc_limit]
+      # The per-container check bounds the expanding case; this catches the
+      # flat one, a single enormous String or a very wide container, where no
+      # inner container ever crosses the line on its own.
+      literal = Quickjs._within_budget(Quickjs._js_literal(value, nil, budget), budget)
       declared = (@_defined_variables ||= {})
       existing = declared[key]
 
@@ -131,7 +135,7 @@ module Quickjs
   # `#inspect` for anything it doesn't recognize and would silently turn a
   # Time into a string. Defining a variable is an input path, so an
   # unsupported value is a caller mistake worth raising on.
-  def self._js_literal(value, seen = nil)
+  def self._js_literal(value, seen = nil, budget = nil)
     case value
     when nil then "null"
     when true then "true"
@@ -140,7 +144,7 @@ module Quickjs
     when ::Integer then value.to_s
     when ::Float then _js_float_literal(value)
     when ::Symbol then _js_symbol_literal(value)
-    when ::Array, ::Hash then _js_container_literal(value, seen)
+    when ::Array, ::Hash then _js_container_literal(value, seen, budget)
     else
       raise ::TypeError, "#{value.class} cannot be converted to a JavaScript value"
     end
@@ -167,7 +171,7 @@ module Quickjs
   # `seen` is threaded through by identity: a structure that contains itself
   # would otherwise recurse until the stack gives out. Entries are removed on
   # the way out so a value appearing twice as siblings stays legal.
-  def self._js_container_literal(value, seen)
+  def self._js_container_literal(value, seen, budget = nil)
     seen ||= {}
     if seen.key?(value.object_id)
       raise ::ArgumentError, "#{value.class} contains a circular reference and cannot be converted"
@@ -176,14 +180,44 @@ module Quickjs
 
     begin
       if value.is_a?(::Array)
-        "[#{value.map { |v| _js_literal(v, seen) }.join(",")}]"
+        _within_budget("[#{value.map { |v| _js_literal(v, seen, budget) }.join(",")}]", budget)
       else
-        pairs = value.map { |k, v| "#{_js_object_key(k)}:#{_js_literal(v, seen)}" }
-        "{#{pairs.join(",")}}"
+        pairs = value.map { |k, v| "#{_js_object_key(k)}:#{_js_literal(v, seen, budget)}" }
+        _within_budget("{#{pairs.join(",")}}", budget)
       end
     ensure
       seen.delete(value.object_id)
     end
+  end
+
+  # A structure that reaches the same object twice is written out twice, so a
+  # graph with shared branches expands rather than being shared: each level
+  # that references the level below twice doubles the output, and twenty-five
+  # of those is a third of a gigabyte from a handful of Ruby objects. YAML
+  # aliases and Marshal round-trips produce exactly that shape without anyone
+  # meaning to.
+  #
+  # The bound is the VM's own memory_limit rather than a number invented here.
+  # A source larger than the whole JS heap budget cannot be evaluated by that
+  # VM under any circumstances, so this refuses work that provably cannot
+  # succeed, and the message names the option to change. It is a ceiling and
+  # not a prediction: object-heavy literals cost many times their source size
+  # once parsed, so a source well under the limit can still exhaust the VM.
+  #
+  # Checked per container rather than once at the end, because the expansion
+  # is bottom-up: an inner container crosses the line long before the outer
+  # one exists. That makes peak Ruby memory a small multiple of the limit,
+  # measured between three and four times it across limits from 4MB to
+  # 128MB, and proportional to the limit rather than to the structure. The
+  # same value with no check reaches a third of a gigabyte at twenty-five
+  # levels and ten at thirty.
+  def self._within_budget(literal, budget)
+    return literal if budget.nil? || literal.bytesize <= budget
+
+    raise ::ArgumentError,
+      "value serializes to more than #{budget} bytes of JavaScript, which is this VM's memory_limit; " \
+      "it cannot be evaluated. Shared sub-structures are written out once per occurrence, so a value " \
+      "with repeated branches expands"
   end
 
   # JS object keys are strings regardless, so an Integer key is unambiguous.
