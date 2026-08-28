@@ -261,6 +261,23 @@ static int js_is_plain_object(JSContext *ctx, JSValue j_val)
 }
 
 #define CONV_PINNED_INLINE 8
+#define CONV_FRAMES_INLINE 8
+
+// One frame per object the walk has entered. The walk borrows JS references —
+// the property table, and the element, property or toJSON result currently
+// being converted — and holds them across a recursive call. A Ruby exception
+// raised anywhere below longjmps straight past the frees, so the frame holds
+// those references on the walk's behalf and conv_release hands them back.
+//
+// The references live in the frame rather than being pointed at, because the C
+// frames that borrowed them are already unwound by the time the ensure runs.
+typedef struct
+{
+  JSPropertyEnum *ptab; // property table this frame owns, NULL when it has none
+  uint32_t plen;
+  JSValue j_borrowed;   // value being converted, JS_UNDEFINED when between two
+  const char *key;      // property name being converted, NULL when between two
+} ConvFrame;
 
 // State threaded through the conversion of one JS object graph.
 //
@@ -283,7 +300,15 @@ struct ConvState
   long pinned_count;
   long pinned_capacity;
   JSValue pinned_inline[CONV_PINNED_INLINE];
+  ConvFrame *frames;
+  long frame_count;
+  long frame_capacity;
+  ConvFrame frames_inline[CONV_FRAMES_INLINE];
 };
+
+// Frames move when the stack grows, so a walk holds its depth and re-derives
+// the pointer rather than keeping one across a recursive call.
+#define CONV_FRAME(conv, depth) (&(conv)->frames[depth])
 
 // The map is private to one conversion, so using it as its own marker cannot
 // collide with any value an object could convert to.
@@ -305,40 +330,116 @@ static void conv_pin(ConvState *conv, JSValue j_val)
   conv->pinned[conv->pinned_count++] = JS_DupValue(conv->ctx, j_val);
 }
 
+static long conv_frame_push(ConvState *conv)
+{
+  if (conv->frame_count == conv->frame_capacity)
+  {
+    long capacity = conv->frame_capacity * 2;
+    ConvFrame *frames = xmalloc2(capacity, sizeof(ConvFrame));
+    ConvFrame *previous = conv->frames;
+    memcpy(frames, previous, conv->frame_count * sizeof(ConvFrame));
+    conv->frames = frames;
+    conv->frame_capacity = capacity;
+    if (previous != conv->frames_inline)
+      xfree(previous);
+  }
+  long depth = conv->frame_count++;
+  ConvFrame *frame = CONV_FRAME(conv, depth);
+  frame->ptab = NULL;
+  frame->plen = 0;
+  frame->j_borrowed = JS_UNDEFINED;
+  frame->key = NULL;
+  return depth;
+}
+
+// Hand a freshly acquired reference to the frame, which owns it until the walk
+// returns it or the conversion unwinds. Returns it for the caller to use.
+static JSValue conv_borrow(ConvState *conv, long depth, JSValue j_val)
+{
+  CONV_FRAME(conv, depth)->j_borrowed = j_val;
+  return j_val;
+}
+
+static const char *conv_borrow_key(ConvState *conv, long depth, const char *key)
+{
+  CONV_FRAME(conv, depth)->key = key;
+  return key;
+}
+
+// Release whatever the frame is currently holding, leaving it ready for the
+// next iteration. Freeing JS_UNDEFINED is a no-op, so this is safe to call on a
+// frame that borrowed only one of the two.
+static void conv_return(ConvState *conv, long depth)
+{
+  ConvFrame *frame = CONV_FRAME(conv, depth);
+  if (frame->key != NULL)
+  {
+    JS_FreeCString(conv->ctx, frame->key);
+    frame->key = NULL;
+  }
+  JS_FreeValue(conv->ctx, frame->j_borrowed);
+  frame->j_borrowed = JS_UNDEFINED;
+}
+
+static void conv_frame_pop(ConvState *conv)
+{
+  long depth = --conv->frame_count;
+  conv_return(conv, depth);
+  ConvFrame *frame = CONV_FRAME(conv, depth);
+  if (frame->ptab != NULL)
+  {
+    JS_FreePropertyEnum(conv->ctx, frame->ptab, frame->plen);
+    frame->ptab = NULL;
+  }
+}
+
 static VALUE js_array_to_rb(JSContext *ctx, JSValue j_val, ConvState *conv)
 {
-  JSValue j_length = JS_GetPropertyStr(ctx, j_val, "length");
+  long depth = conv_frame_push(conv);
+
+  JSValue j_length = conv_borrow(conv, depth, JS_GetPropertyStr(ctx, j_val, "length"));
   uint32_t length = 0;
   JS_ToUint32(ctx, &length, j_length);
-  JS_FreeValue(ctx, j_length);
+  conv_return(conv, depth);
 
   VALUE r_array = rb_ary_new_capa(length);
   for (uint32_t i = 0; i < length; i++)
   {
-    JSValue j_elem = JS_GetPropertyUint32(ctx, j_val, i);
+    JSValue j_elem = conv_borrow(conv, depth, JS_GetPropertyUint32(ctx, j_val, i));
     rb_ary_push(r_array, to_rb_value_inner(ctx, j_elem, conv));
-    JS_FreeValue(ctx, j_elem);
+    conv_return(conv, depth);
   }
+
+  conv_frame_pop(conv);
   return r_array;
 }
 
 static VALUE js_plain_object_to_rb(JSContext *ctx, JSValue j_val, ConvState *conv)
 {
+  // The frame is pushed before the table exists so that nothing can raise
+  // between acquiring it and handing it over.
+  long depth = conv_frame_push(conv);
+
   JSPropertyEnum *ptab;
   uint32_t plen;
   if (JS_GetOwnPropertyNames(ctx, &ptab, &plen, j_val, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0)
+  {
+    conv_frame_pop(conv);
     return rb_hash_new();
+  }
+  CONV_FRAME(conv, depth)->ptab = ptab;
+  CONV_FRAME(conv, depth)->plen = plen;
 
   VALUE r_hash = rb_hash_new();
   for (uint32_t i = 0; i < plen; i++)
   {
-    const char *key = JS_AtomToCString(ctx, ptab[i].atom);
-    JSValue j_prop = JS_GetProperty(ctx, j_val, ptab[i].atom);
+    const char *key = conv_borrow_key(conv, depth, JS_AtomToCString(ctx, ptab[i].atom));
+    JSValue j_prop = conv_borrow(conv, depth, JS_GetProperty(ctx, j_val, ptab[i].atom));
     rb_hash_aset(r_hash, rb_str_new2(key), to_rb_value_inner(ctx, j_prop, conv));
-    JS_FreeCString(ctx, key);
-    JS_FreeValue(ctx, j_prop);
+    conv_return(conv, depth);
   }
-  JS_FreePropertyEnum(ctx, ptab, plen);
+
+  conv_frame_pop(conv);
   return r_hash;
 }
 
@@ -351,6 +452,11 @@ static VALUE conv_run(VALUE r_conv)
 static VALUE conv_release(VALUE r_conv)
 {
   ConvState *conv = (ConvState *)r_conv;
+  // Innermost first, mirroring the order the walk would have released them.
+  while (conv->frame_count > 0)
+    conv_frame_pop(conv);
+  if (conv->frames != conv->frames_inline)
+    xfree(conv->frames);
   for (long i = 0; i < conv->pinned_count; i++)
     JS_FreeValue(conv->ctx, conv->pinned[i]);
   if (conv->pinned != conv->pinned_inline)
@@ -368,6 +474,9 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
 
   ConvState conv = {ctx, j_val, rb_hash_new(), NULL, 0, CONV_PINNED_INLINE};
   conv.pinned = conv.pinned_inline;
+  conv.frames = conv.frames_inline;
+  conv.frame_count = 0;
+  conv.frame_capacity = CONV_FRAMES_INLINE;
   return rb_ensure(conv_run, (VALUE)&conv, conv_release, (VALUE)&conv);
 }
 
@@ -417,13 +526,16 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
 
     if (JS_IsFunction(ctx, j_val))
     {
-      JSValue j_toStringFunc = JS_GetPropertyStr(ctx, j_val, "toString");
+      // A user-defined toString is guest code and can reach a Ruby bridge that
+      // raises, so the frame owns the function across the call.
+      long depth = conv_frame_push(conv);
+      JSValue j_toStringFunc = conv_borrow(conv, depth, JS_GetPropertyStr(ctx, j_val, "toString"));
       JSValue j_source = JS_Call(ctx, j_toStringFunc, j_val, 0, NULL);
-      JS_FreeValue(ctx, j_toStringFunc);
-      const char *source = JS_ToCString(ctx, j_source);
-      JS_FreeValue(ctx, j_source);
+      conv_return(conv, depth);
+      conv_borrow(conv, depth, j_source);
+      const char *source = conv_borrow_key(conv, depth, JS_ToCString(ctx, j_source));
       VALUE r_source = rb_str_new2(source);
-      JS_FreeCString(ctx, source);
+      conv_frame_pop(conv);
       return rb_funcall(rb_path2class("Quickjs::Function"), rb_intern("new"), 1, r_source);
     }
 
@@ -497,13 +609,18 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
       // honour it — recurse on the returned value. Otherwise dump own enumerable
       // string-keyed properties; this is faster than the JSON round-trip and
       // preserves `undefined` values nested inside class instances.
-      JSValue j_toJSON = JS_GetPropertyStr(ctx, j_val, "toJSON");
+      long depth = conv_frame_push(conv);
+      JSValue j_toJSON = conv_borrow(conv, depth, JS_GetPropertyStr(ctx, j_val, "toJSON"));
       if (JS_IsFunction(ctx, j_toJSON))
       {
+        // toJSON is guest code and can reach a Ruby bridge that raises, so the
+        // frame holds the function across the call and the result across the
+        // recursion.
         JSValue j_jsonValue = JS_Call(ctx, j_toJSON, j_val, 0, NULL);
-        JS_FreeValue(ctx, j_toJSON);
+        conv_return(conv, depth);
+        conv_borrow(conv, depth, j_jsonValue);
         r_result = to_rb_value_inner(ctx, j_jsonValue, conv);
-        JS_FreeValue(ctx, j_jsonValue);
+        conv_return(conv, depth);
         // A toJSON representation is recomputed for every occurrence instead of
         // being shared. It is the object's stand-in value rather than a
         // container this conversion built, so memoizing it would hand out the
@@ -514,9 +631,10 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
       }
       else
       {
-        JS_FreeValue(ctx, j_toJSON);
+        conv_return(conv, depth);
         r_result = js_plain_object_to_rb(ctx, j_val, conv);
       }
+      conv_frame_pop(conv);
     }
 
     if (memoize)
@@ -1499,18 +1617,41 @@ static int interrupt_handler(JSRuntime *runtime, void *opaque)
   return elapsed_ms >= eval_time->limit_ms ? 1 : 0;
 }
 
-static VALUE to_rb_return_value(JSContext *ctx, JSValue j_val)
+// The result of an evaluation, owned for as long as it takes to convert.
+struct return_value
 {
-  if (JS_VALUE_GET_NORM_TAG(j_val) == JS_TAG_OBJECT && JS_PromiseState(ctx, j_val) != -1)
+  JSContext *ctx;
+  JSValue j_val;
+};
+
+static VALUE to_rb_return_value_body(VALUE r_owned)
+{
+  struct return_value *owned = (struct return_value *)r_owned;
+  if (JS_VALUE_GET_NORM_TAG(owned->j_val) == JS_TAG_OBJECT && JS_PromiseState(owned->ctx, owned->j_val) != -1)
   {
-    JS_FreeValue(ctx, j_val);
     VALUE r_error_message = rb_str_new2("An unawaited Promise was returned to the top-level");
     rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_NO_AWAIT_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
     return Qnil;
   }
-  VALUE result = to_rb_value(ctx, j_val);
-  JS_FreeValue(ctx, j_val);
-  return result;
+  return to_rb_value(owned->ctx, owned->j_val);
+}
+
+static VALUE to_rb_return_value_release(VALUE r_owned)
+{
+  struct return_value *owned = (struct return_value *)r_owned;
+  JS_FreeValue(owned->ctx, owned->j_val);
+  return Qnil;
+}
+
+// Converting a result runs guest JS — getters, toJSON — and raises on values
+// with no Ruby equivalent, so the reference has to outlive every exit rather
+// than being freed after a conversion that may never return. A nested Promise
+// is the reachable case: the walk raises, and without this the whole graph the
+// result holds is retained for the life of the VM.
+static VALUE to_rb_return_value(JSContext *ctx, JSValue j_val)
+{
+  struct return_value owned = {ctx, j_val};
+  return rb_ensure(to_rb_return_value_body, (VALUE)&owned, to_rb_return_value_release, (VALUE)&owned);
 }
 
 static void check_oom_poisoned(VMData *data)
@@ -1721,9 +1862,9 @@ static VALUE gvl_release_region_cleanup(VALUE p)
   free(region->owned_bufs[0]);
   free(region->owned_bufs[1]);
   // Frees the result when the interrupt landed after the job ran but
-  // before the run function marked completion. An interrupt during the
-  // caller's subsequent Ruby conversion can still leak the result — the
-  // same (accepted) exposure every GVL-held path has always had.
+  // before the run function marked completion. Once the result reaches the
+  // caller it is to_rb_return_value's to own, including when an interrupt
+  // lands during the conversion.
   if (!region->completed)
     JS_FreeValue(data->context, *region->j_result);
   return Qnil;
@@ -1944,6 +2085,46 @@ static VALUE run_held_js_entry(VMData *data, VALUE (*body)(VALUE), VALUE arg)
   return rb_ensure(body, arg, evals_in_flight_release, (VALUE)data);
 }
 
+// Result conversion runs guest JS — getters, toJSON, a Proxy trap — and the
+// bridges that code can reach yield the GVL, so it has to be a counted JS entry
+// like every other execution. Without it a dispose! from a getter is granted
+// while the walk is still reading the context it frees (#81). The entry closes
+// before the conversion's own value is handed back, which is why these wrap the
+// conversion rather than the whole tail.
+static VALUE to_rb_return_value_held_body(VALUE r_owned)
+{
+  struct return_value *owned = (struct return_value *)r_owned;
+  return to_rb_return_value(owned->ctx, owned->j_val);
+}
+
+// The owning ensure is armed inside the entry, not around it, so that the
+// result is freed while the entry is still held — freeing it outside would
+// reopen the window this exists to close. That leaves j_val unowned if
+// run_held_js_entry itself raises, which it cannot here: these tails run on
+// the thread that produced the value, with no GVL yield since the producing
+// entry closed, so neither `disposed` nor `owner_thread` can have changed.
+static VALUE to_rb_return_value_held(VMData *data, JSValue j_val)
+{
+  struct return_value owned = {data->context, j_val};
+  return run_held_js_entry(data, to_rb_return_value_held_body, (VALUE)&owned);
+}
+
+static VALUE js_exception_held_body(VALUE r_owned)
+{
+  struct return_value *owned = (struct return_value *)r_owned;
+  return to_rb_value(owned->ctx, owned->j_val);
+}
+
+// For the tails whose value is the JS_EXCEPTION sentinel: converting it pulls
+// the pending exception and raises. Unlike to_rb_return_value_held this does
+// not own its argument, which is why it takes the sentinel rather than a
+// JSValue in general — the sentinel carries no reference to release.
+static VALUE raise_from_js_exception_held(VMData *data)
+{
+  struct return_value owned = {data->context, JS_EXCEPTION};
+  return run_held_js_entry(data, js_exception_held_body, (VALUE)&owned);
+}
+
 static VALUE eval_code_job_run_body(VALUE p)
 {
   eval_code_job_run((struct eval_code_job *)p);
@@ -2016,7 +2197,7 @@ static VALUE eval_code_release_gvl(VMData *data, VALUE r_code, const char *filen
   };
   run_gvl_release_region(data, eval_code_job_run, &job, &job.result, code_buf, filename_buf);
 
-  return to_rb_return_value(data->context, job.result);
+  return to_rb_return_value_held(data, job.result);
 }
 
 static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
@@ -2074,7 +2255,7 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
       .result = JS_UNDEFINED,
   };
   run_held_js_entry(data, eval_code_job_run_body, (VALUE)&job);
-  return to_rb_return_value(data->context, job.result);
+  return to_rb_return_value_held(data, job.result);
 }
 
 struct compile_job
@@ -2487,7 +2668,7 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_
   uint8_t *buf = (uint8_t *)copy_rstring_to_owned_buffer(r_bytecode, &buf_len, false);
   JSValue j_mod = run_bytecode_release_gvl(data, bytecode_read_job_run, buf, buf_len, true);
   if (JS_IsException(j_mod))
-    return to_rb_value(data->context, j_mod); // raises
+    return raise_from_js_exception_held(data); // raises
 
   if (JS_VALUE_GET_TAG(j_mod) != JS_TAG_MODULE)
   {
@@ -2583,11 +2764,11 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
   }
 
   if (JS_IsException(j_result))
-    return to_rb_value(data->context, j_result); // raises
+    return raise_from_js_exception_held(data); // raises
 
   JSValue j_returnedValue = JS_GetPropertyStr(data->context, j_result, "value");
   JS_FreeValue(data->context, j_result);
-  return to_rb_return_value(data->context, j_returnedValue);
+  return to_rb_return_value_held(data, j_returnedValue);
 }
 
 // Loads pre-compiled polyfill bytecode without arming the eval timer.
