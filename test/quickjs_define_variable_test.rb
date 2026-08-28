@@ -358,4 +358,58 @@ describe "a value that expands past what the VM could hold" do
   end
 end
 
+describe "a Hash key named __proto__" do
+  # `{"__proto__": v}` in an object literal sets the prototype rather than
+  # defining a property, quoted or not, so the entry used to disappear and
+  # its contents became inherited members of the object instead.
+  it "becomes a property rather than the prototype" do
+    vm = Quickjs::VM.new
+
+    vm.define_const(:o, { '__proto__' => { 'p' => 1 } })
+
+    _(vm.eval_code('Object.getOwnPropertyNames(o).length')).must_equal 1
+    _(vm.eval_code('JSON.stringify(o)')).must_equal '{"__proto__":{"p":1}}'
+    _(vm.eval_code('o.p')).must_equal Quickjs::Value::UNDEFINED
+  end
+
+  it "survives a round trip" do
+    vm = Quickjs::VM.new
+    sent = { 'name' => 'bob', '__proto__' => { 'isAdmin' => true } }
+
+    vm.define_const(:r, sent)
+
+    _(vm.eval_code('r')).must_equal sent
+  end
+
+  # The key can sit at any depth, which is what makes a host-side check on
+  # the top level insufficient: in Ruby it reads as an ordinary key with a
+  # Hash under it, and in JS it used to arrive as members of the object.
+  it "does not inject through a nested key" do
+    vm = Quickjs::VM.new
+
+    vm.define_const(:payload, { 'user' => { '__proto__' => { 'isAdmin' => true } } })
+
+    _(vm.eval_code('payload.user.isAdmin')).must_equal Quickjs::Value::UNDEFINED
+    _(vm.eval_code('Object.getOwnPropertyNames(payload.user).length')).must_equal 1
+  end
+
+  # A null prototype used to break ordinary guest code on the object.
+  it "does not produce a null-prototype object" do
+    vm = Quickjs::VM.new
+
+    vm.define_const(:np, { '__proto__' => nil })
+
+    _(vm.eval_code("np.hasOwnProperty('__proto__')")).must_equal true
+  end
+
+  # Only the generated source changes. JavaScript written by hand keeps the
+  # semantics the language gives it.
+  it "leaves JS written by the guest alone" do
+    vm = Quickjs::VM.new
+
+    _(vm.eval_code('Object.getOwnPropertyNames({__proto__: {p: 1}}).length')).must_equal 0
+    _(vm.eval_code('({__proto__: {p: 1}}).p')).must_equal 1
+  end
+end
+
 end

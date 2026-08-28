@@ -224,10 +224,28 @@ module Quickjs
   # Anything else would rely on `#to_s` producing something meaningful, which
   # is the silent coercion this converter exists to avoid.
   def self._js_object_key(key)
-    case key
-    when ::String, ::Symbol, ::Integer then key.to_s.to_json
-    else
-      raise ::TypeError, "#{key.class} cannot be used as a JavaScript object key"
-    end
+    literal = case key
+              when ::String, ::Symbol, ::Integer then key.to_s.to_json
+              else
+                raise ::TypeError, "#{key.class} cannot be used as a JavaScript object key"
+              end
+
+    # In an object literal `__proto__: v` sets the prototype rather than
+    # defining a property, and quoting the key does not opt out of that. A Hash
+    # key of that name would otherwise vanish: the entry becomes the object's
+    # prototype, `Object.keys` never lists it, and the value round-trips back
+    # from JS as if it had never been sent.
+    #
+    # That is a difference between what Ruby holds and what JS then sees, which
+    # is the shape a host-side check can be walked past: a request body with a
+    # nested "__proto__" passes inspection in Ruby, where it is an ordinary key
+    # with a Hash under it, and arrives in JS as inherited members of the object
+    # the host handed over.
+    #
+    # A computed key is not the special form, so this emits the property that
+    # was asked for. Only this one name needs it; nothing else in an object
+    # literal means anything other than itself. JS written by hand is untouched:
+    # a guest writing `{__proto__: x}` still sets a prototype, as it should.
+    literal == '"__proto__"' ? "[#{literal}]" : literal
   end
 end
