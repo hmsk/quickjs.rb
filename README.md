@@ -410,11 +410,18 @@ That check reads the VM through JavaScript, so treat it as a guard against a glo
 This is a ceiling and not a prediction. Object-heavy JavaScript costs several times its source size once parsed, so a value well under `memory_limit` can still exhaust the VM when it runs.
 
 
-Because these are real declarations rather than property assignments, a colliding declaration in your JS is a loud error instead of a silent shadow:
+Because these are real declarations rather than property assignments, a colliding declaration at the top level of your JS is a loud error instead of a silent shadow:
 
 ```rb
 vm.define_const(:user, 1)
 vm.eval_code('let user = 2;') #=> raise Quickjs::SyntaxError ("redeclaration of 'user'")
+```
+
+Scopes below the top level shadow as JavaScript always does, silently. That includes module scope, so a module you import can declare the same name without hearing about it:
+
+```rb
+vm.define_const(:injected, 1)
+vm.eval_code('(function () { let injected = 2; return injected })()') #=> 2, the outer one is untouched
 ```
 
 Defining an existing `let` or `var` again assigns to it. A `const` can't be redefined, and neither can a name switch binding form:
@@ -431,11 +438,20 @@ vm.define_var(:counter, 3)    #=> raise ArgumentError (already defined as a let)
 
 The name is a `String` or `Symbol` and comes back as a `Symbol`. It has to match `/\A[A-Za-z_$][A-Za-z0-9_$]*\z/` and not be a reserved word. That is narrower than JavaScript itself, which also accepts Unicode identifiers like `値`: the name is concatenated into source that gets evaluated, so the pattern is what stops one from smuggling in arbitrary JS.
 
-Values are converted the same way as elsewhere in the gem — `Hash`, `Array`, `String`, numerics, `true`/`false`/`nil`, plus `Quickjs::Value::UNDEFINED` and `Quickjs::Value::NAN`. Anything else raises `TypeError` rather than being silently stringified:
+Values are `Hash`, `Array`, `String`, numerics, `true`/`false`/`nil`, plus `Quickjs::Value::UNDEFINED` and `Quickjs::Value::NAN`. Anything else raises `TypeError` rather than being silently stringified:
 
 ```rb
 vm.define_const(:at, Time.now) #=> raise TypeError
 ```
+
+This is a narrower set than the converter used for `define_function` return values, which also handles `File` and `Exception`. Defining is an input path, so an unsupported value is treated as a mistake worth hearing about rather than something to coerce.
+
+A few edges are worth knowing before they surprise you:
+
+- **Strings are taken as text, not as bytes.** An `ASCII-8BIT` string whose bytes happen to be valid UTF-8 is reinterpreted as those characters, so `"\xC3\xA9".b` arrives as `"é"` with length 1. Bytes that are not valid UTF-8 raise `JSON::GeneratorError`, and a name in an encoding that cannot be compared against ASCII raises `Encoding::CompatibilityError`; both are unsupported values reported by the layer that noticed rather than as `TypeError`.
+- **Integers beyond JavaScript's range become `Infinity`**, not a rounded value. `10 ** 400` is `Infinity` on the JS side.
+- **Hash keys are compared after `to_s`.** `{ 'a' => 1, a: 2 }` and `{ 1 => 'x', '1' => 'y' }` each produce one JS key, and the last value wins, as they would in a JS object literal.
+- **Reserved words are rejected, built-ins are not.** The name check refuses `class`, `return` and the rest, because QuickJS would too and the failure reads better from Ruby. It does not stop you replacing something that already exists: `define_var(:eval, 1)` succeeds and `typeof eval` becomes `"number"`.
 
 The value is a snapshot taken when you define it, not a live reference. Mutating the Ruby object afterwards won't change what JS sees. Use [`define_function`](#quickjsvmdefine_function--define-a-global-function-for-js-by-ruby) when you want JS to read the current Ruby value on every access:
 
