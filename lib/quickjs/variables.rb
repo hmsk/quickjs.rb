@@ -18,8 +18,10 @@ module Quickjs
     # this check is what stops a name from smuggling in arbitrary JS.
     NAME_PATTERN = /\A[A-Za-z_$][A-Za-z0-9_$]*\z/
 
-    # Rejected here only so the failure names the offending word on the Ruby
-    # side; QuickJS refuses them anyway, just less legibly.
+    # The full spec list. QuickJS refuses some of these itself, but not all:
+    # a declaration eval is sloppy mode, so `var static = 1` and the other
+    # strict-mode-only words evaluate cleanly there. Rejecting the whole list
+    # keeps the answer the same whichever word it was.
     RESERVED_WORDS = %w[
       await break case catch class const continue debugger default delete do
       else enum export extends false finally for function if implements import
@@ -46,7 +48,11 @@ module Quickjs
 
     def _define_variable(kind, name, value)
       key = _validate_variable_name(name)
+      # JSMemoryUsage.malloc_limit is an int64_t, so a limit at or above 2**63
+      # comes back negative. Treat anything that is not a usable size as no
+      # budget rather than as a budget of minus nine quintillion.
       budget = memory_usage[:malloc_limit]
+      budget = nil unless budget.is_a?(::Integer) && budget.positive?
       # The per-container check bounds the expanding case; this catches the
       # flat one, a single enormous String or a very wide container, where no
       # inner container ever crosses the line on its own.
@@ -96,6 +102,10 @@ module Quickjs
     def _refuse_unusable_global(key)
       state = eval_code(<<~JS)
         (() => {
+          // globalThis can itself have been replaced by an earlier define_var,
+          // in which case the lookup below answers for whatever took its place
+          // and reports a clean global that is not there.
+          if (typeof globalThis !== 'object' || globalThis === null) return 'broken';
           const d = Object.getOwnPropertyDescriptor(globalThis, #{key.to_s.to_json});
           if (!d) return 'absent';
           if (d.get !== undefined || d.set !== undefined) return 'accessor';
@@ -104,6 +114,8 @@ module Quickjs
       JS
 
       case state
+      when 'absent', 'writable'
+        nil
       when 'accessor'
         raise ::ArgumentError,
           "cannot define var #{key}: globalThis.#{key} is an accessor, so the value would go to its " \
@@ -111,7 +123,22 @@ module Quickjs
       when 'readonly'
         raise ::ArgumentError,
           "cannot define var #{key}: globalThis.#{key} is not writable, so the assignment would be discarded"
+      else
+        # The probe reads globalThis and Object, so a caller who has already
+        # replaced either of those has taken the check away from itself. That
+        # is reachable from Ruby alone: define_var(:globalThis, 1) makes every
+        # later probe answer for a Number and report a clean global, and
+        # define_var(:Object, 1) makes it throw. Refusing an answer we do not
+        # recognise turns both into a refusal rather than into a define that
+        # reports success it did not have.
+        raise ::ArgumentError,
+          "cannot define var #{key}: this VM cannot be asked about its globals, so whether the " \
+          "assignment would take effect is unknown. Replacing globalThis or Object does this"
       end
+    rescue Quickjs::TypeError, Quickjs::ReferenceError => e
+      raise ::ArgumentError,
+        "cannot define var #{key}: asking this VM about its globals failed with #{e.class}. " \
+        "Replacing globalThis or Object does this"
     end
 
     def _validate_variable_name(name)
@@ -135,16 +162,20 @@ module Quickjs
   # `#inspect` for anything it doesn't recognize and would silently turn a
   # Time into a string. Defining a variable is an input path, so an
   # unsupported value is a caller mistake worth raising on.
-  def self._js_literal(value, seen = nil, budget = nil)
+  def self._js_literal(value, seen = nil, budget = nil, depth = 0)
     case value
     when nil then "null"
     when true then "true"
     when false then "false"
-    when ::String then value.to_json
+    # to_s first, so a String subclass overriding to_json cannot decide what
+    # goes into the source. Everything here is data being written into a
+    # syntactic position, and the escaping has to be ours rather than the
+    # value's. _js_object_key already does this; the value path did not.
+    when ::String then value.to_s.to_json
     when ::Integer then value.to_s
     when ::Float then _js_float_literal(value)
     when ::Symbol then _js_symbol_literal(value)
-    when ::Array, ::Hash then _js_container_literal(value, seen, budget)
+    when ::Array, ::Hash then _js_container_literal(value, seen, budget, depth)
     else
       raise ::TypeError, "#{value.class} cannot be converted to a JavaScript value"
     end
@@ -171,7 +202,15 @@ module Quickjs
   # `seen` is threaded through by identity: a structure that contains itself
   # would otherwise recurse until the stack gives out. Entries are removed on
   # the way out so a value appearing twice as siblings stays legal.
-  def self._js_container_literal(value, seen, budget = nil)
+  MAX_DEPTH = 1000
+
+  def self._js_container_literal(value, seen, budget = nil, depth = 0)
+    if depth >= MAX_DEPTH
+      raise ::ArgumentError,
+        "value nests deeper than #{MAX_DEPTH} levels; serializing it would exhaust the Ruby stack, " \
+        "which raises SystemStackError rather than something a caller can rescue"
+    end
+
     seen ||= {}
     if seen.key?(value.object_id)
       raise ::ArgumentError, "#{value.class} contains a circular reference and cannot be converted"
@@ -179,11 +218,22 @@ module Quickjs
     seen[value.object_id] = true
 
     begin
+      parts = []
+      used = 2
       if value.is_a?(::Array)
-        _within_budget("[#{value.map { |v| _js_literal(v, seen, budget) }.join(",")}]", budget)
+        value.each do |v|
+          parts << (piece = _js_literal(v, seen, budget, depth + 1))
+          used += piece.bytesize + 1
+          _over_budget!(budget) if budget && used > budget
+        end
+        "[#{parts.join(",")}]"
       else
-        pairs = value.map { |k, v| "#{_js_object_key(k)}:#{_js_literal(v, seen, budget)}" }
-        _within_budget("{#{pairs.join(",")}}", budget)
+        value.each do |k, v|
+          parts << (piece = "#{_js_object_key(k)}:#{_js_literal(v, seen, budget, depth + 1)}")
+          used += piece.bytesize + 1
+          _over_budget!(budget) if budget && used > budget
+        end
+        "{#{parts.join(",")}}"
       end
     ensure
       seen.delete(value.object_id)
@@ -204,16 +254,28 @@ module Quickjs
   # not a prediction: object-heavy literals cost many times their source size
   # once parsed, so a source well under the limit can still exhaust the VM.
   #
-  # Checked per container rather than once at the end, because the expansion
-  # is bottom-up: an inner container crosses the line long before the outer
-  # one exists. That makes peak Ruby memory a small multiple of the limit,
-  # measured between three and four times it across limits from 4MB to
-  # 128MB, and proportional to the limit rather than to the structure. The
-  # same value with no check reaches a third of a gigabyte at twenty-five
-  # levels and ten at thirty.
+  # Counted as each element is produced rather than after a container is
+  # built, which is the difference between bounding the source and bounding
+  # the host. Checking a finished container still lets `map` and `join`
+  # materialise the whole thing first, so a single wide container walks past
+  # any budget: three hundred references to one twenty-thousand-element array
+  # reached 103MB of Ruby against a 4MB limit that never fired in time. The
+  # same value stops at 6MB now.
+  #
+  # It is still a multiple of the limit rather than the limit. Nesting builds
+  # each inner literal in full before the level above can check it, so peak
+  # Ruby memory measured four to eight times the limit for the doubling shape,
+  # falling as the limit rises, and about one and a half times it for the wide
+  # one. What it is no longer is proportional to the structure: the same value
+  # with no check at all reaches a third of a gigabyte at twenty-five levels
+  # and ten gigabytes at thirty.
   def self._within_budget(literal, budget)
     return literal if budget.nil? || literal.bytesize <= budget
 
+    _over_budget!(budget)
+  end
+
+  def self._over_budget!(budget)
     raise ::ArgumentError,
       "value serializes to more than #{budget} bytes of JavaScript, which is this VM's memory_limit; " \
       "it cannot be evaluated. Shared sub-structures are written out once per occurrence, so a value " \

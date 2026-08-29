@@ -412,4 +412,83 @@ describe "a Hash key named __proto__" do
   end
 end
 
+describe "values the serializer must not take at face value" do
+  # to_json is dispatched on the caller's object, so a String subclass could
+  # decide what went into the source. The key path was already written as
+  # to_s.to_json; the value path was not, and this executed.
+  it "does not let a String subclass write the source" do
+    evil = Class.new(String) do
+      def to_json(*) = %q{1; globalThis.PWNED = 'yes'; var zz = 1}
+    end
+    vm = Quickjs::VM.new
+
+    vm.define_let(:v, evil.new('hi'))
+
+    _(vm.eval_code('v')).must_equal 'hi'
+    _(vm.eval_code('globalThis.PWNED')).must_equal Quickjs::Value::UNDEFINED
+  end
+
+  # A wide container walks past a check that only runs on the finished
+  # container, since map and join materialise it first.
+  it "stops on a wide container rather than after building it" do
+    leaf = Array.new(5_000) { |i| i }
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+    _ { vm.define_let(:v, { 'items' => Array.new(300) { leaf } }) }.must_raise ArgumentError
+  end
+
+  # Deep but finite structures used to raise SystemStackError, which is not a
+  # StandardError, so `rescue => e` in a caller would not catch it.
+  it "refuses a structure deeper than it can serialize" do
+    deep = (1..1_500).reduce({ n: 1 }) { |inner, _| { n: inner } }
+    vm = Quickjs::VM.new
+
+    err = _ { vm.define_const(:deep, deep) }.must_raise ArgumentError
+
+    _(err.message).must_match(/deeper than/)
+  end
+
+  it "still takes a structure within that depth" do
+    deep = (1..500).reduce({ n: 1 }) { |inner, _| { n: inner } }
+    vm = Quickjs::VM.new
+
+    vm.define_const(:ok, deep)
+
+    _(vm.eval_code('typeof ok')).must_equal 'object'
+  end
+
+  # malloc_limit is an int64_t, so a limit at or above 2**63 reads back
+  # negative and every define compared against it.
+  it "works on a VM whose memory_limit reads back negative" do
+    vm = Quickjs::VM.new(memory_limit: 2**63)
+
+    vm.define_let(:a, 1)
+
+    _(vm.eval_code('a')).must_equal 1
+  end
+end
+
+describe "when the VM can no longer answer about its own globals" do
+  # The guard reads globalThis and Object through JS, so a caller that has
+  # replaced either has taken the check away from itself. Both used to end in
+  # a define that reported success it did not have, or in an error naming
+  # nothing.
+  it "refuses once globalThis has been replaced" do
+    vm = Quickjs::VM.new
+    vm.eval_code("Object.defineProperty(globalThis, 'acc', { configurable: true, set(v) {}, get() { return 7 } });")
+    vm.define_var(:globalThis, 1)
+
+    _ { vm.define_var(:acc, 5) }.must_raise ArgumentError
+  end
+
+  it "refuses once Object has been replaced, and says why" do
+    vm = Quickjs::VM.new
+    vm.define_var(:Object, 1)
+
+    err = _ { vm.define_var(:anything, 1) }.must_raise ArgumentError
+
+    _(err.message).must_match(/globals/)
+  end
+end
+
 end
