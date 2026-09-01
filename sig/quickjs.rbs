@@ -50,7 +50,9 @@ module Quickjs
 
     def module_loader=: (module_loader_proc | nil) -> (module_loader_proc | nil)
 
-    def on_unhandled_rejection: () { (Quickjs::RuntimeError) -> void } -> nil
+    # Normally a Quickjs::*Error built from the reason; a bridge raising while
+    # the reason is read is handed through as itself.
+    def on_unhandled_rejection: () { (Exception) -> void } -> nil
 
     def on_log: () { (Log) -> void } -> nil
 

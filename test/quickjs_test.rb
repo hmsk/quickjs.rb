@@ -833,6 +833,257 @@ describe Quickjs::VM do
     end
   end
 
+  # The renderer that turns a pending JS exception into a Ruby one is also the
+  # one that announces an uncaught error to the console and condemns a VM that
+  # ran out of memory. A conversion that fails part-way through a value the
+  # evaluation did return borrows the rendering and none of the rest: that
+  # error is on its way to the caller, and nothing about it went uncaught.
+  describe "ConversionErrorRouting" do
+    it "does not announce a failed conversion to the log listener" do
+      vm = Quickjs::VM.new
+      logged = []
+      vm.on_log {|log| logged << log.to_s }
+
+      _ { vm.eval_code("BigInt.prototype.toString = () => { throw new RangeError('q') }; 1n") }.must_raise Quickjs::RangeError
+
+      _(logged).must_equal []
+    ensure
+      vm.dispose!
+    end
+
+    # Worse than an extra row: the announcement unwound the row being built, so
+    # the one row the listener did get described an uncaught error that was on
+    # its way to the caller. The console.log row is lost either way — its
+    # argument is what refused to convert — but silence is the honest outcome.
+    it "does not announce over the console row it was building" do
+      vm = Quickjs::VM.new
+      logged = []
+      vm.on_log {|log| logged << log.to_s }
+
+      _ { vm.eval_code("const h = () => 1; h.toString = () => { throw new RangeError('z') }; console.log({h}); 1") }.must_raise Quickjs::RangeError
+
+      _(logged).must_equal []
+    ensure
+      vm.dispose!
+    end
+
+    # Reached through a property read rather than one of the branches this
+    # changed, so it says the split follows where the exception was met and not
+    # which conversion happened to meet it.
+    it "does not announce a getter that threw while its object was being walked" do
+      vm = Quickjs::VM.new
+      logged = []
+      vm.on_log {|log| logged << log.to_s }
+
+      _ { vm.eval_code("({get x() { throw new RangeError('g') }})") }.must_raise Quickjs::RangeError
+
+      _(logged).must_equal []
+    ensure
+      vm.dispose!
+    end
+
+    it "still announces an error that reached the top level uncaught" do
+      vm = Quickjs::VM.new
+      logged = []
+      vm.on_log {|log| logged << log.to_s }
+
+      _ { vm.eval_code("throw new RangeError('top level')") }.must_raise Quickjs::RangeError
+
+      _(logged.size).must_equal 1
+      _(logged.first).must_match(/\AUncaught RangeError: top level/)
+    ensure
+      vm.dispose!
+    end
+
+    # The one thing the uncaught path does not keep to itself. Running out of
+    # memory is a fact about the heap rather than about who was asking, and this
+    # is the shape that proves the split cannot own it: the evaluation returns
+    # its object and the allocation that fails is in a getter read afterwards.
+    it "still condemns the VM for an out-of-memory a getter hit during conversion" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      _ { vm.eval_code('({get x() { return new Array(2_000_000).fill(0) }})') }.must_raise Quickjs::RuntimeError
+
+      _(vm.memory_poisoned?).must_equal true
+      err = _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
+      _(err.message).must_match(/poisoned/)
+    end
+
+    # Substituting for a read the deadline outlived loses the only evidence the
+    # run overran: rendering happens after the evaluation, so there is no next
+    # interrupt check to raise it again.
+    it "reports the timeout that lapsed inside the error it was rendering" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+
+      _ do
+        vm.eval_code(<<~JS)
+          const e = new Error('m');
+          Object.defineProperty(e, 'name', {get() { const t = Date.now(); while (Date.now() - t < 1000) {}; return 'X' }});
+          throw e;
+        JS
+      end.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
+    it "reports the timeout that lapsed while rendering an error met mid-conversion" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+
+      _ do
+        vm.eval_code(<<~JS)
+          ({get x() {
+            const e = new Error('m');
+            Object.defineProperty(e, 'name', {get() { const t = Date.now(); while (Date.now() - t < 1000) {}; return 'X' }});
+            throw e;
+          }})
+        JS
+      end.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
+    # The budget is read off the clock rather than off the thrown error's name
+    # and message, both of which a script writes for itself. Recognising it by
+    # those strings let a guest relabel its own error as a timeout on a VM with
+    # almost its whole budget left, and destroy the real message doing it.
+    it "does not take a guest-written InternalError for a lapsed budget" do
+      vm = Quickjs::VM.new(timeout_msec: 60_000)
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          const ev = new Error('nothing was interrupted');
+          ev.name = 'InternalError';
+          const e = new Error('the real error survives');
+          Object.defineProperty(e, 'name', {get() { throw ev }});
+          throw e;
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.class).must_equal Quickjs::RuntimeError
+      _(error.message).must_match(/the real error survives/)
+    ensure
+      vm.dispose!
+    end
+
+    # Reading name and message off a discarded throw runs that object's getters,
+    # and a getter reaching a bridge hands back a Ruby exception the discard has
+    # nowhere to put: find_ruby_error is the only thing that takes one out of
+    # alive_objects, so it stayed there until dispose!, once per evaluation and
+    # at a rate the guest picks. Nothing guest-written runs on that throw now.
+    it "runs nothing on a throw it discards, and so pins nothing" do
+      marker = Class.new(StandardError)
+      calls = 0
+      vm = Quickjs::VM.new
+      vm.define_function('boom') { calls += 1; raise marker, 'host failure' }
+      code = <<~JS
+        const ev = new Error('e');
+        Object.defineProperty(ev, 'name', {get() { boom() }});
+        throw {toString() { throw ev }};
+      JS
+
+      3.times { vm.eval_code(code) rescue nil }
+      GC.start
+      before = ObjectSpace.each_object(marker).count
+      200.times { vm.eval_code(code) rescue nil }
+      GC.start
+
+      _(calls).must_equal 0
+      _(ObjectSpace.each_object(marker).count - before).must_equal 0
+    ensure
+      vm.dispose!
+    end
+
+    it "leaves js_name unset when the name could not be read" do
+      vm = Quickjs::VM.new
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          const e = new Error('the message survives');
+          Object.defineProperty(e, 'name', {get() { throw new RangeError('z') }});
+          throw e;
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.js_name).must_be_nil
+      _(error.message).must_match(/the message survives/)
+    ensure
+      vm.dispose!
+    end
+
+    it "leaves js_name unset on a rejection reason whose name could not be read" do
+      vm = Quickjs::VM.new
+      captured = []
+      vm.on_unhandled_rejection {|err| captured << err }
+      vm.eval_code(<<~JS)
+        const e = new Error('the reason survives');
+        Object.defineProperty(e, 'name', {get() { throw new RangeError('z') }});
+        void Promise.reject(e);
+      JS
+
+      _(captured.first.js_name).must_be_nil
+    ensure
+      vm.dispose!
+    end
+
+    # The rejection was reportable — only one read of it was not — so the
+    # listener hears the host failure rather than nothing at all.
+    it "hands the listener a bridge failure met while converting a reason" do
+      vm = Quickjs::VM.new
+      captured = []
+      vm.on_unhandled_rejection {|err| captured << err }
+      vm.define_function('boom') { raise IOError, 'host failure' }
+      vm.eval_code(<<~JS)
+        const e = new Error('r');
+        Object.defineProperty(e, 'name', {get() { boom() }});
+        void Promise.reject(e);
+      JS
+
+      _(captured.size).must_equal 1
+      _(captured.first).must_be_kind_of IOError
+      _(captured.first.message).must_equal 'host failure'
+      _($!).must_be_nil
+    ensure
+      vm.dispose!
+    end
+
+    # rb_protect reports a Ruby `throw` the same way it reports a raise, but
+    # errinfo then holds internal throw data rather than an exception, and a
+    # listener handed that meets a raw VALUE as "method 'object_id' called on
+    # unexpected T_IMEMO". What the block receives has to be an exception on
+    # every route into it, whatever the route did on the way.
+    it "never hands the listener something that is not an exception" do
+      vm = Quickjs::VM.new
+      seen = []
+      vm.on_unhandled_rejection {|err| seen << err }
+      vm.define_function('jump') { throw :out }
+
+      catch(:out) do
+        vm.eval_code(<<~JS)
+          const e = new Error('r');
+          Object.defineProperty(e, 'name', {get() { jump() }});
+          void Promise.reject(e);
+        JS
+      end
+
+      seen.each {|err| _(err).must_be_kind_of Exception }
+      _($!).must_be_nil
+      _(vm.eval_code('40 + 2')).must_equal 42
+    ensure
+      vm.dispose!
+    end
+
+    it "still drops a raise from the listener itself, having nowhere to put it" do
+      vm = Quickjs::VM.new
+      vm.on_unhandled_rejection {|err| raise IOError, 'from the listener' }
+      vm.eval_code("void Promise.reject(new Error('r'))")
+
+      _($!).must_be_nil
+      _(vm.eval_code('40 + 2')).must_equal 42
+    ensure
+      vm.dispose!
+    end
+  end
+
   describe "Dispose" do
 # allocate is public on every Ruby class, and an object allocated but never
 # initialized still reaches vm_free. That handed js_std_free_handlers a
