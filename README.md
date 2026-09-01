@@ -405,12 +405,11 @@ vm.eval_code('globalThis.APP_CONFIG.retries') #=> 3
 
 That check reads the VM through JavaScript, so treat it as a guard against a global that is already unusable rather than as a defence: code that has run in a VM owns that VM's environment, and a value handed to it afterwards cannot be hidden from it. `define_const` and `define_let` are unaffected, since neither touches `globalThis`.
 
-**A value is written out once per occurrence.** A Ruby structure that reaches the same object twice serializes it twice rather than sharing it, so a graph whose branches repeat expands as it nests. Values built from YAML aliases or a `Marshal` round-trip are the ones that hit this without meaning to. Serializing stops if the result would exceed the VM's `memory_limit`, since a source larger than the whole JS heap budget could not be evaluated anyway, and raises `ArgumentError` naming the option.
+**The value is converted, not written into source.** It goes to the same converter that handles a `define_function` return value and is bound to the name, so nothing about it becomes program text: there is no literal for a value to escape from and no source string to grow. What a value costs is what the resulting JavaScript objects cost, which `memory_limit` bounds as it bounds anything else in the VM. A value needing more than that raises `ArgumentError`.
 
-This is a ceiling and not a prediction. Object-heavy JavaScript costs several times its source size once parsed, so a value well under `memory_limit` can still exhaust the VM when it runs.
+Depth is bounded by the stack the value is walked on rather than by a fixed number, since a Ruby thread's machine stack is a fraction of the main thread's and the same structure can be fine on one and not on the other. Running out raises `ArgumentError` rather than `SystemStackError`, which is not a `StandardError` and would slip past a caller's `rescue => e`.
 
-The bound is on the JavaScript being built, not on the Ruby memory used to build it, and serializing stops partway rather than after the whole thing exists. Peak host memory is a multiple of `memory_limit` rather than equal to it, measured between one and a half and eight times depending on the shape. Values nest at most 1000 deep; past that they raise `ArgumentError` instead of exhausting the Ruby stack with a `SystemStackError` that `rescue => e` would not catch.
-
+A structure that reaches the same object twice is converted twice, so shared branches are duplicated rather than shared on the JavaScript side. A genuine cycle raises `ArgumentError`.
 
 Because these are real declarations rather than property assignments, a colliding declaration at the top level of your JS is a loud error instead of a silent shadow:
 
@@ -446,11 +445,11 @@ Values are `Hash`, `Array`, `String`, numerics, `true`/`false`/`nil`, plus `Quic
 vm.define_const(:at, Time.now) #=> raise TypeError
 ```
 
-This is a narrower set than the converter used for `define_function` return values, which also handles `File` and `Exception`. Defining is an input path, so an unsupported value is treated as a mistake worth hearing about rather than something to coerce.
+Values reach JavaScript through the same converter as a `define_function` return value, so what arrives is identical either way. The list above is checked first, because that converter falls back to `#inspect` for anything it does not know: defining is an input path, and a `Time` quietly becoming its inspect string is a mistake worth hearing about rather than something to coerce.
 
 A few edges are worth knowing before they surprise you:
 
-- **Strings are taken as text, not as bytes.** An `ASCII-8BIT` string whose bytes happen to be valid UTF-8 is reinterpreted as those characters, so `"\xC3\xA9".b` arrives as `"é"` with length 1. Bytes that are not valid UTF-8 raise `JSON::GeneratorError`, and a name in an encoding that cannot be compared against ASCII raises `Encoding::CompatibilityError`; both are unsupported values reported by the layer that noticed rather than as `TypeError`.
+- **Strings are taken as text, not as bytes.** An `ASCII-8BIT` string whose bytes happen to be valid UTF-8 is reinterpreted as those characters, so `"\xC3\xA9".b` arrives as `"é"` with length 1. A name in an encoding that cannot be compared against ASCII raises `Encoding::CompatibilityError`, which is the layer that noticed rather than the `TypeError` the contract promises.
 - **Integers beyond JavaScript's range become `Infinity`**, not a rounded value. `10 ** 400` is `Infinity` on the JS side.
 - **Hash keys are compared after `to_s`.** `{ 'a' => 1, a: 2 }` and `{ 1 => 'x', '1' => 'y' }` each produce one JS key, and the last value wins, as they would in a JS object literal.
 - **A name defined here shadows a `define_function` of the same name**, in either order and without an error. `define_const(:svc, 1)` followed by `define_function('svc')` leaves `typeof svc` as `"number"`, with the function reachable only as `globalThis.svc`.

@@ -327,7 +327,6 @@ describe "a value that expands past what the VM could hold" do
     err = _ { vm.define_const(:big, doubling(25)) }.must_raise ArgumentError
 
     _(err.message).must_match(/memory_limit/)
-    _(err.message).must_match(/1048576/)
   end
 
   # The check is a ceiling on the source, so a flat value large enough on its
@@ -437,25 +436,43 @@ describe "values the serializer must not take at face value" do
     _ { vm.define_let(:v, { 'items' => Array.new(300) { leaf } }) }.must_raise ArgumentError
   end
 
-  # Deep but finite structures used to raise SystemStackError, which is not a
-  # StandardError, so `rescue => e` in a caller would not catch it.
-  it "refuses a structure deeper than it can serialize" do
-    deep = (1..1_500).reduce({ n: 1 }) { |inner, _| { n: inner } }
-    vm = Quickjs::VM.new
+    # Depth costs whatever the stack it is walked on can hold, and a Ruby thread
+    # has a fraction of the main thread's, so no constant stands in for it. What
+    # matters is that running out arrives as something a caller can rescue:
+    # SystemStackError is not a StandardError, so `rescue => e` would miss it and
+    # take the thread down.
+    it "refuses a structure too deep for the stack it is walked on" do
+      deep = (1..200_000).reduce({ n: 1 }) { |inner, _| { n: inner } }
+      vm = Quickjs::VM.new
 
-    err = _ { vm.define_const(:deep, deep) }.must_raise ArgumentError
+      err = _ { vm.define_const(:deep, deep) }.must_raise ArgumentError
 
-    _(err.message).must_match(/deeper than/)
-  end
+      _(err.message).must_match(/nests too deeply/)
+    end
 
-  it "still takes a structure within that depth" do
-    deep = (1..500).reduce({ n: 1 }) { |inner, _| { n: inner } }
-    vm = Quickjs::VM.new
+    it "refuses on a thread at a depth the main thread takes" do
+      deep = (1..900).reduce(1) { |inner, _| [inner] }
 
-    vm.define_const(:ok, deep)
+      raised = Thread.new do
+        begin
+          Quickjs::VM.new.define_const(:deep, deep)
+          nil
+        rescue Exception => e
+          e
+        end
+      end.value
 
-    _(vm.eval_code('typeof ok')).must_equal 'object'
-  end
+      _(raised).must_be_kind_of ArgumentError
+    end
+
+    it "still takes a structure the stack can hold" do
+      deep = (1..500).reduce({ n: 1 }) { |inner, _| { n: inner } }
+      vm = Quickjs::VM.new
+
+      vm.define_const(:ok, deep)
+
+      _(vm.eval_code('typeof ok')).must_equal 'object'
+    end
 
   # malloc_limit is an int64_t, so a limit at or above 2**63 reads back
   # negative and every define compared against it.

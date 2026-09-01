@@ -48,15 +48,6 @@ module Quickjs
 
     def _define_variable(kind, name, value)
       key = _validate_variable_name(name)
-      # JSMemoryUsage.malloc_limit is an int64_t, so a limit at or above 2**63
-      # comes back negative. Treat anything that is not a usable size as no
-      # budget rather than as a budget of minus nine quintillion.
-      budget = memory_usage[:malloc_limit]
-      budget = nil unless budget.is_a?(::Integer) && budget.positive?
-      # The per-container check bounds the expanding case; this catches the
-      # flat one, a single enormous String or a very wide container, where no
-      # inner container ever crosses the line on its own.
-      literal = Quickjs._within_budget(Quickjs._js_literal(value, nil, budget), budget)
       declared = (@_defined_variables ||= {})
       existing = declared[key]
 
@@ -65,7 +56,7 @@ module Quickjs
         # The declaration is its own eval so the caller's source is never
         # rewritten. Prepending to it would shift every line number in a
         # backtrace away from the code the caller actually wrote.
-        eval_code("#{kind} #{key} = #{literal};")
+        _guard_stack { _bind_declaration(kind, key, value) }
         declared[key] = kind
       elsif existing != kind
         raise ::ArgumentError,
@@ -79,7 +70,7 @@ module Quickjs
         # ourselves can have been swapped for an accessor since, so the
         # same check applies to the assignment.
         _refuse_unusable_global(key) if kind == :var
-        eval_code("#{key} = #{literal};")
+        _guard_stack { _bind_declaration(nil, key, value) }
       end
 
       key
@@ -99,6 +90,49 @@ module Quickjs
     # VM that has evaluated untrusted JavaScript owns its own environment, and
     # there is no way to hand a value into it unobserved. Define before running
     # code you do not control.
+# The value is handed to the C converter and bound to a temporary global,
+# then the declaration reads it and drops it. Nothing of the value reaches
+# the program text: the only thing interpolated is the name, which
+# _validate_variable_name has already constrained to an identifier.
+    # The value goes to the C converter as a value and is bound to a slot the
+    # declaration then reads. Nothing of it reaches the program text: the only
+    # thing interpolated is the name, which _validate_variable_name has already
+    # constrained to an identifier. There is no literal, so there is nothing for
+    # a value to escape from.
+    def _bind_declaration(kind, key, value)
+      Quickjs._validate_value!(value)
+
+      slot = "__quickjsrb_bind_#{key}"
+      _set_global_value(slot, value)
+      # QuickJS can run out of memory while the converter is building the value and
+      # report nothing: the call returns, the slot is simply not there, and the
+      # declaration below then fails naming an internal name. Asking whether the
+      # slot exists, rather than what it holds, turns that into a sentence about
+      # the value, and keeps working for a value that is itself undefined.
+      unless eval_code("#{slot.to_json} in globalThis")
+        raise ::ArgumentError,
+          "value could not be built inside this VM, most likely because it needs more than its memory_limit"
+      end
+
+      begin
+        eval_code(kind ? "#{kind} #{key} = #{slot};" : "#{key} = #{slot};")
+      ensure
+        eval_code("delete globalThis.#{slot};") rescue nil
+      end
+    end
+
+    # Both the validation walk and the C converter recurse, so a deep enough
+    # value exhausts one stack or the other. That arrives as SystemStackError,
+    # which is not a StandardError, so a caller's `rescue => e` does not catch it
+    # and the thread goes down. A fixed depth limit cannot stand in for this:
+    # what a structure costs depends on the stack it is walked on, and a Ruby
+    # thread has a fraction of the main thread's.
+    def _guard_stack
+      yield
+    rescue ::SystemStackError
+      raise ::ArgumentError, "value nests too deeply to convert on this thread's stack"
+    end
+
     def _refuse_unusable_global(key)
       state = eval_code(<<~JS)
         (() => {
@@ -158,156 +192,48 @@ module Quickjs
     end
   end
 
-  # Serialized here rather than through the C converter, which falls back to
-  # `#inspect` for anything it doesn't recognize and would silently turn a
-  # Time into a string. Defining a variable is an input path, so an
-  # unsupported value is a caller mistake worth raising on.
-  def self._js_literal(value, seen = nil, budget = nil, depth = 0)
+  # Checked rather than serialized. The value goes to the C converter as a
+  # value, so nothing about it reaches the program text and there is no
+  # literal to escape from; what is left to do here is refuse what that
+  # converter would otherwise coerce, and refuse a shape it cannot walk.
+  #
+  # Unsupported types are the reason this exists at all. The converter falls
+  # back to #inspect, which would turn a Time into its inspect string without
+  # saying so, and defining is an input path where that is a mistake worth
+  # hearing about rather than something to paper over.
+  def self._validate_value!(value, seen = nil)
     case value
-    when nil then "null"
-    when true then "true"
-    when false then "false"
-    # to_s first, so a String subclass overriding to_json cannot decide what
-    # goes into the source. Everything here is data being written into a
-    # syntactic position, and the escaping has to be ours rather than the
-    # value's. _js_object_key already does this; the value path did not.
-    when ::String then value.to_s.to_json
-    when ::Integer then value.to_s
-    when ::Float then _js_float_literal(value)
-    when ::Symbol then _js_symbol_literal(value)
-    when ::Array, ::Hash then _js_container_literal(value, seen, budget, depth)
+    when nil, true, false, ::String, ::Integer, ::Float, ::Symbol
+      nil
+    when ::Array, ::Hash
+      seen ||= {}
+      if seen.key?(value.object_id)
+        raise ::ArgumentError, "#{value.class} contains a circular reference and cannot be converted"
+      end
+
+      # Removed on the way out, so the same object appearing twice as siblings
+      # is fine and only an actual cycle is refused. The C converter has no
+      # cycle detection of its own and would recurse until the stack went, so
+      # this check is what stands between a self-referential Hash and a
+      # process that stops.
+      seen[value.object_id] = true
+      begin
+        if value.is_a?(::Array)
+          value.each { |v| _validate_value!(v, seen) }
+        else
+          value.each do |k, v|
+            unless k.is_a?(::String) || k.is_a?(::Symbol) || k.is_a?(::Integer)
+              raise ::TypeError, "#{k.class} cannot be used as a JavaScript object key"
+            end
+
+            _validate_value!(v, seen)
+          end
+        end
+      ensure
+        seen.delete(value.object_id)
+      end
     else
       raise ::TypeError, "#{value.class} cannot be converted to a JavaScript value"
     end
-  end
-
-  def self._js_float_literal(value)
-    return "NaN" if value.nan?
-    return value.positive? ? "Infinity" : "-Infinity" if value.infinite?
-
-    value.to_s
-  end
-
-  # `Quickjs::Value::UNDEFINED` and `NAN` are plain Symbols, so they have to
-  # be recognized before the generic Symbol case. Every other Symbol becomes
-  # a string, matching how the C converter treats Symbols returned from a
-  # `define_function` block.
-  def self._js_symbol_literal(value)
-    return "undefined" if value == Value::UNDEFINED
-    return "NaN" if value == Value::NAN
-
-    value.to_s.to_json
-  end
-
-  # `seen` is threaded through by identity: a structure that contains itself
-  # would otherwise recurse until the stack gives out. Entries are removed on
-  # the way out so a value appearing twice as siblings stays legal.
-  MAX_DEPTH = 1000
-
-  def self._js_container_literal(value, seen, budget = nil, depth = 0)
-    if depth >= MAX_DEPTH
-      raise ::ArgumentError,
-        "value nests deeper than #{MAX_DEPTH} levels; serializing it would exhaust the Ruby stack, " \
-        "which raises SystemStackError rather than something a caller can rescue"
-    end
-
-    seen ||= {}
-    if seen.key?(value.object_id)
-      raise ::ArgumentError, "#{value.class} contains a circular reference and cannot be converted"
-    end
-    seen[value.object_id] = true
-
-    begin
-      parts = []
-      used = 2
-      if value.is_a?(::Array)
-        value.each do |v|
-          parts << (piece = _js_literal(v, seen, budget, depth + 1))
-          used += piece.bytesize + 1
-          _over_budget!(budget) if budget && used > budget
-        end
-        "[#{parts.join(",")}]"
-      else
-        value.each do |k, v|
-          parts << (piece = "#{_js_object_key(k)}:#{_js_literal(v, seen, budget, depth + 1)}")
-          used += piece.bytesize + 1
-          _over_budget!(budget) if budget && used > budget
-        end
-        "{#{parts.join(",")}}"
-      end
-    ensure
-      seen.delete(value.object_id)
-    end
-  end
-
-  # A structure that reaches the same object twice is written out twice, so a
-  # graph with shared branches expands rather than being shared: each level
-  # that references the level below twice doubles the output, and twenty-five
-  # of those is a third of a gigabyte from a handful of Ruby objects. YAML
-  # aliases and Marshal round-trips produce exactly that shape without anyone
-  # meaning to.
-  #
-  # The bound is the VM's own memory_limit rather than a number invented here.
-  # A source larger than the whole JS heap budget cannot be evaluated by that
-  # VM under any circumstances, so this refuses work that provably cannot
-  # succeed, and the message names the option to change. It is a ceiling and
-  # not a prediction: object-heavy literals cost many times their source size
-  # once parsed, so a source well under the limit can still exhaust the VM.
-  #
-  # Counted as each element is produced rather than after a container is
-  # built, which is the difference between bounding the source and bounding
-  # the host. Checking a finished container still lets `map` and `join`
-  # materialise the whole thing first, so a single wide container walks past
-  # any budget: three hundred references to one twenty-thousand-element array
-  # reached 103MB of Ruby against a 4MB limit that never fired in time. The
-  # same value stops at 6MB now.
-  #
-  # It is still a multiple of the limit rather than the limit. Nesting builds
-  # each inner literal in full before the level above can check it, so peak
-  # Ruby memory measured four to eight times the limit for the doubling shape,
-  # falling as the limit rises, and about one and a half times it for the wide
-  # one. What it is no longer is proportional to the structure: the same value
-  # with no check at all reaches a third of a gigabyte at twenty-five levels
-  # and ten gigabytes at thirty.
-  def self._within_budget(literal, budget)
-    return literal if budget.nil? || literal.bytesize <= budget
-
-    _over_budget!(budget)
-  end
-
-  def self._over_budget!(budget)
-    raise ::ArgumentError,
-      "value serializes to more than #{budget} bytes of JavaScript, which is this VM's memory_limit; " \
-      "it cannot be evaluated. Shared sub-structures are written out once per occurrence, so a value " \
-      "with repeated branches expands"
-  end
-
-  # JS object keys are strings regardless, so an Integer key is unambiguous.
-  # Anything else would rely on `#to_s` producing something meaningful, which
-  # is the silent coercion this converter exists to avoid.
-  def self._js_object_key(key)
-    literal = case key
-              when ::String, ::Symbol, ::Integer then key.to_s.to_json
-              else
-                raise ::TypeError, "#{key.class} cannot be used as a JavaScript object key"
-              end
-
-    # In an object literal `__proto__: v` sets the prototype rather than
-    # defining a property, and quoting the key does not opt out of that. A Hash
-    # key of that name would otherwise vanish: the entry becomes the object's
-    # prototype, `Object.keys` never lists it, and the value round-trips back
-    # from JS as if it had never been sent.
-    #
-    # That is a difference between what Ruby holds and what JS then sees, which
-    # is the shape a host-side check can be walked past: a request body with a
-    # nested "__proto__" passes inspection in Ruby, where it is an ordinary key
-    # with a Hash under it, and arrives in JS as inherited members of the object
-    # the host handed over.
-    #
-    # A computed key is not the special form, so this emits the property that
-    # was asked for. Only this one name needs it; nothing else in an object
-    # literal means anything other than itself. JS written by hand is untouched:
-    # a guest writing `{__proto__: x}` still sets a prototype, as it should.
-    literal == '"__proto__"' ? "[#{literal}]" : literal
-  end
+end
 end
