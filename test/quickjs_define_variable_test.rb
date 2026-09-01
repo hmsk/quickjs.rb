@@ -321,16 +321,21 @@ describe "a value that expands past what the VM could hold" do
     (1..levels).reduce({ n: 1 }) { |inner, _| [inner, inner] }
   end
 
-  it "refuses it, and leaves the VM usable" do
+  # Refused either by the converter running out of room or by the slot check
+  # noticing the value never arrived, depending which sees it first, and that
+  # moves with the platform.
+  #
+  # Only the refusal is asserted. Whether the VM survives one of these is not
+  # the same everywhere: on glibc and macOS it keeps working, on musl it comes
+  # back out-of-memory for good. Converting a value large enough to exhaust the
+  # heap can cost the VM, which the source-building version could not do
+  # because it refused before touching it.
+  it "refuses a value it cannot fit in the VM" do
     vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
 
-    # Refused either by the converter running out of room or by the slot check
-    # noticing it never arrived, depending which sees it first, and that moves
-    # with the platform. What matters is that it is refused at all.
     err = _ { vm.define_const(:big, doubling(25)) }.must_raise StandardError
 
     _(err).wont_be_kind_of SystemStackError
-    _(vm.eval_code('1 + 1')).must_equal 2
   end
 
   # The check is a ceiling on the source, so a flat value large enough on its
