@@ -515,6 +515,26 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code('typeof ok')).must_equal 'object'
   end
 
+  # A refused value must not leave the name half declared. Every check that
+  # can refuse one runs before the declaration is evaluated, so the caller can
+  # fix the value and use the same name. The one exception is running out of
+  # memory mid-eval, which poisons the whole VM rather than one binding.
+  it "leaves the name usable after refusing a value" do
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+    refused = [
+      { 'a' => Array.new(300) { Array.new(5_000) { |i| i } } },
+      Time.now,
+      (1..100_000).reduce({ n: 1 }) { |inner, _| { n: inner } },
+    ]
+
+    refused.each do |value|
+      _ { vm.define_let(:v, value) }.must_raise StandardError
+    end
+    vm.define_let(:v, 'fine')
+
+    _(vm.eval_code('v')).must_equal 'fine'
+  end
+
   # malloc_limit is an int64_t, so a limit at or above 2**63 reads back
   # negative and every define compared against it.
   it "works on a VM whose memory_limit reads back negative" do
