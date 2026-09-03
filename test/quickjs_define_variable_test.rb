@@ -321,21 +321,13 @@ describe "a value that expands past what the VM could hold" do
     (1..levels).reduce({ n: 1 }) { |inner, _| [inner, inner] }
   end
 
-  # Refused either by the converter running out of room or by the slot check
-  # noticing the value never arrived, depending which sees it first, and that
-  # moves with the platform.
-  #
-  # Only the refusal is asserted. Whether the VM survives one of these is not
-  # the same everywhere: on glibc and macOS it keeps working, on musl it comes
-  # back out-of-memory for good. Converting a value large enough to exhaust the
-  # heap can cost the VM, which the source-building version could not do
-  # because it refused before touching it.
-  it "refuses a value it cannot fit in the VM" do
+  it "refuses it, naming the limit it would not fit in" do
     vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
 
-    err = _ { vm.define_const(:big, doubling(25)) }.must_raise StandardError
+    err = _ { vm.define_const(:big, doubling(25)) }.must_raise ArgumentError
 
-    _(err).wont_be_kind_of SystemStackError
+    _(err.message).must_match(/memory_limit/)
+    _(err.message).must_match(/1048576/)
   end
 
   # The check is a ceiling on the source, so a flat value large enough on its
@@ -445,48 +437,25 @@ describe "values the serializer must not take at face value" do
     _ { vm.define_let(:v, { 'items' => Array.new(300) { leaf } }) }.must_raise ArgumentError
   end
 
-    # Depth costs whatever the stack it is walked on can hold, and a Ruby thread
-    # has a fraction of the main thread's, so no constant stands in for it. What
-    # matters is that running out arrives as something a caller can rescue:
-    # SystemStackError is not a StandardError, so `rescue => e` would miss it and
-    # take the thread down.
-    it "refuses a structure too deep for the stack it is walked on" do
-      deep = (1..200_000).reduce({ n: 1 }) { |inner, _| { n: inner } }
-      vm = Quickjs::VM.new
+  # Deep but finite structures used to raise SystemStackError, which is not a
+  # StandardError, so `rescue => e` in a caller would not catch it.
+  it "refuses a structure deeper than it can serialize" do
+    deep = (1..1_500).reduce({ n: 1 }) { |inner, _| { n: inner } }
+    vm = Quickjs::VM.new
 
-      err = _ { vm.define_const(:deep, deep) }.must_raise ArgumentError
+    err = _ { vm.define_const(:deep, deep) }.must_raise ArgumentError
 
-      _(err.message).must_match(/nests too deeply/)
-    end
-
-  # Not a depth: how much stack a thread has, and what a frame costs, differ
-  # per machine, and a number that fails here passes on CI. What has to hold is
-  # that running out on a thread stays rescuable, since SystemStackError is not
-  # a StandardError and would take the thread down instead.
-  it "fails rescuably on a thread rather than taking it down" do
-    deep = (1..200_000).reduce(1) { |inner, _| [inner] }
-
-    raised = Thread.new do
-      begin
-        Quickjs::VM.new.define_const(:deep, deep)
-        nil
-      rescue Exception => e
-        e
-      end
-    end.value
-
-    _(raised).must_be_kind_of StandardError
-    _(raised).wont_be_kind_of SystemStackError
+    _(err.message).must_match(/deeper than/)
   end
 
-    it "still takes a structure the stack can hold" do
-      deep = (1..500).reduce({ n: 1 }) { |inner, _| { n: inner } }
-      vm = Quickjs::VM.new
+  it "still takes a structure within that depth" do
+    deep = (1..500).reduce({ n: 1 }) { |inner, _| { n: inner } }
+    vm = Quickjs::VM.new
 
-      vm.define_const(:ok, deep)
+    vm.define_const(:ok, deep)
 
-      _(vm.eval_code('typeof ok')).must_equal 'object'
-    end
+    _(vm.eval_code('typeof ok')).must_equal 'object'
+  end
 
   # malloc_limit is an int64_t, so a limit at or above 2**63 reads back
   # negative and every define compared against it.

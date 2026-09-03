@@ -86,14 +86,7 @@ static int rb_hash_entry_to_js(VALUE r_key, VALUE r_val, VALUE extra)
     VALUE r_key_str = rb_funcall(r_key, rb_intern("to_s"), 0);
     key_cstr = StringValueCStr(r_key_str);
   }
-// Defined rather than set: JS_SetPropertyStr walks the prototype chain, so a
-// key of "__proto__" reaches Object.prototype's accessor and replaces the
-// object's prototype instead of adding the property the caller asked for.
-// The entry then vanishes from Object.keys and from JSON.stringify, and what
-// was under it becomes inherited members of the object instead. Defining also
-// steps over any other accessor a prototype happens to carry.
-JS_DefinePropertyValueStr(arg->ctx, arg->j_obj, key_cstr,
-                          to_js_value(arg->ctx, r_val), JS_PROP_C_W_E);
+  JS_SetPropertyStr(arg->ctx, arg->j_obj, key_cstr, to_js_value(arg->ctx, r_val));
   return ST_CONTINUE;
 }
 
@@ -3691,53 +3684,6 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   return run_held_js_entry(data, call_global_function_body, (VALUE)&call);
 }
 
-// Binds a converted Ruby value to a global name, so a caller can define a
-// JS variable without the value ever being written into source. The name is
-// the only thing that reaches the program text, and the Ruby layer has
-// already constrained it to an identifier.
-//
-// Spike for the "do not serialize values into source" question: this is
-// what the define_* path would use instead of building a literal.
-static VALUE vm_m_setGlobalValue(VALUE r_self, VALUE r_name, VALUE r_value)
-{
-  VMData *data;
-  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
-
-  Check_Type(r_name, T_STRING);
-  const char *name = StringValueCStr(r_name);
-
-  check_disposed(data);
-  check_oom_poisoned(data);
-  check_js_entry_owner(data);
-  check_no_gvl_release_in_flight(data);
-
-  JSValue j_value = to_js_value(data->context, r_value);
-  // Building the value can exhaust memory_limit before anything is bound, and
-  // an unchecked exception here surfaced as a ReferenceError about the slot
-  // name, which says nothing about what went wrong.
-  if (JS_IsException(j_value))
-  {
-    JSValue j_exception = JS_GetException(data->context);
-    return js_exception_to_rb(data, j_exception); // raises
-  }
-
-  JSValue j_global = JS_GetGlobalObject(data->context);
-  // Defined rather than set for the same reason: a setter already sitting on
-  // this name would otherwise be handed the value on its way in, which is the
-  // interception define_var refuses and which const and let have never been
-  // open to.
-  int defined = JS_DefinePropertyValueStr(data->context, j_global, name, j_value,
-                                          JS_PROP_C_W_E);
-  JS_FreeValue(data->context, j_global);
-  if (defined < 0)
-  {
-    JSValue j_exception = JS_GetException(data->context);
-    return js_exception_to_rb(data, j_exception); // raises
-  }
-
-  return Qnil;
-}
-
 static VALUE vm_m_set_module_loader(VALUE r_self, VALUE r_loader)
 {
   VMData *data;
@@ -3925,7 +3871,6 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_alloc_func(r_class_vm, vm_alloc);
   rb_define_method(r_class_vm, "initialize", vm_m_initialize, -1);
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, -1);
-  rb_define_private_method(r_class_vm, "_set_global_value", vm_m_setGlobalValue, 2);
   rb_define_private_method(r_class_vm, "_compile_to_bytecode", vm_m_compile, -1);
   rb_define_private_method(r_class_vm, "_compile_module_to_bytecode", vm_m_compileModule, 2);
   rb_define_private_method(r_class_vm, "_preload_module_bytecode", vm_m_preloadModuleBytecode, 2);
