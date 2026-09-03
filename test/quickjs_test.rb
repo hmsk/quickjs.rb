@@ -1025,6 +1025,22 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
+    # A listener that raises unwinds past whatever follows it in the row
+    # builder, so the lapse has to be recorded before the listener runs — and
+    # it outranks the listener's raise on the way out, or the guest is handed a
+    # catchable error to repeat the overrun behind.
+    it "reports the logged-value timeout even when the listener raises" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+      vm.on_log {|log| raise IOError, 'listener' }
+      spinner = "({toString() { const t = Date.now(); while (Date.now() - t < 1000) {}; return 'x' }})"
+
+      _ do
+        vm.eval_code("let caught = 0; for (let i = 0; i < 20; i++) { try { console.log(#{spinner}) } catch (e) { caught++ } }; caught")
+      end.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
     it "hands the listener the timeout that lapsed inside a rejection reason" do
       vm = Quickjs::VM.new(timeout_msec: 50)
       seen = []

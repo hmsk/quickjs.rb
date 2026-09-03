@@ -1605,12 +1605,14 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
   js_hold_init(&build.hold, call->ctx);
   VALUE r_row = rb_ensure(r_build_log_row, (VALUE)&build, js_hold_release, (VALUE)&build.hold);
 
-  r_call_log_listener(rb_ary_new3(2, data->log_listener, r_log_new(call->severity, r_row)));
   // Carried out rather than raised here: a Ruby exception would be bridged
   // into a catchable JS Error, and a guest wrapping console.log in try/catch
   // could swallow the timeout and pin one InterruptedError in alive_objects
   // per catch. The caller throws it as the interrupt QuickJS itself would.
+  // Copied before the listener runs, since a listener that raises unwinds
+  // past everything after it.
   call->interrupted = build.hold.interrupted;
+  r_call_log_listener(rb_ary_new3(2, data->log_listener, r_log_new(call->severity, r_row)));
   return Qnil;
 }
 
@@ -1622,20 +1624,26 @@ static JSValue js_quickjsrb_log_inner(JSContext *ctx, int argc, JSValueConst *ar
   struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED, false};
   int error;
   rb_protect(r_build_and_dispatch_log, (VALUE)&call, &error);
+  if (call.interrupted)
+  {
+    // The lapse outranks a raise from the listener, as it does in the uncaught
+    // renderer, where dispatch_log swallows the listener's raise on its own:
+    // the budget is gone, and reporting the listener instead would hand the
+    // guest a catchable error to repeat the overrun behind.
+    if (error)
+      rb_set_errinfo(Qnil);
+    // The same two calls js_poll_interrupts makes, so the guest cannot catch it
+    // and the top-level renderer classifies it exactly as a native timeout.
+    JS_ThrowInternalError(ctx, "interrupted");
+    JS_SetUncatchableException(ctx, TRUE);
+    return JS_EXCEPTION;
+  }
   if (error)
   {
     VALUE r_error = rb_errinfo();
     rb_set_errinfo(Qnil);
     JSValue j_error = j_error_from_ruby_error(ctx, r_error);
     return JS_Throw(ctx, j_error);
-  }
-  if (call.interrupted)
-  {
-    // The same two calls js_poll_interrupts makes, so the guest cannot catch it
-    // and the top-level renderer classifies it exactly as a native timeout.
-    JS_ThrowInternalError(ctx, "interrupted");
-    JS_SetUncatchableException(ctx, TRUE);
-    return JS_EXCEPTION;
   }
   return JS_UNDEFINED;
 }
