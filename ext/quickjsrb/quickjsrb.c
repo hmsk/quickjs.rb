@@ -687,13 +687,16 @@ static VALUE js_hold_release(VALUE r_hold)
 // unlike the log path there is no next interrupt check to report it again: let
 // the substituted read stand on its own and the caller is handed a plain
 // RuntimeError for a run that ran out of time.
+static VALUE r_interrupted_error(void)
+{
+  VALUE r_message = rb_str_new2("Code evaluation is interrupted by the timeout or something");
+  return rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR), rb_intern("new"), 2, r_message, Qnil);
+}
+
 static void raise_if_interrupted(JsHold *hold)
 {
-  if (!hold->interrupted)
-    return;
-
-  VALUE r_message = rb_str_new2("Code evaluation is interrupted by the timeout or something");
-  rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR), rb_intern("new"), 2, r_message, Qnil));
+  if (hold->interrupted)
+    rb_exc_raise(r_interrupted_error());
 }
 
 struct js_exception_render
@@ -1293,7 +1296,11 @@ static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason)
   conversion.ctx = ctx;
   conversion.j_reason = j_reason;
   js_hold_init(&conversion.hold, ctx);
-  return rb_ensure(js_reason_conversion_run, (VALUE)&conversion, js_hold_release, (VALUE)&conversion.hold);
+  VALUE r_exc = rb_ensure(js_reason_conversion_run, (VALUE)&conversion, js_hold_release, (VALUE)&conversion.hold);
+  // The flag outlives the release, which is why it is sticky: a budget that
+  // lapsed while the reason was read is what the listener hears about, since
+  // the tracker cannot raise out and there may be no next interrupt check.
+  return conversion.hold.interrupted ? r_interrupted_error() : r_exc;
 }
 
 struct rejection_reason_args
@@ -1526,6 +1533,9 @@ struct quickjsrb_log_call
   JSValueConst *argv;
   const char *severity;
   JSValue result;
+  // Set when the budget lapsed inside one of the logged values; read back on
+  // the QuickJS side of the protect, where it can be thrown as the interrupt.
+  bool interrupted;
 };
 
 struct log_row_build
@@ -1596,6 +1606,11 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
   VALUE r_row = rb_ensure(r_build_log_row, (VALUE)&build, js_hold_release, (VALUE)&build.hold);
 
   r_call_log_listener(rb_ary_new3(2, data->log_listener, r_log_new(call->severity, r_row)));
+  // Carried out rather than raised here: a Ruby exception would be bridged
+  // into a catchable JS Error, and a guest wrapping console.log in try/catch
+  // could swallow the timeout and pin one InterruptedError in alive_objects
+  // per catch. The caller throws it as the interrupt QuickJS itself would.
+  call->interrupted = build.hold.interrupted;
   return Qnil;
 }
 
@@ -1604,7 +1619,7 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
 // JS exception instead of a cross-boundary longjmp.
 static JSValue js_quickjsrb_log_inner(JSContext *ctx, int argc, JSValueConst *argv, const char *severity)
 {
-  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED};
+  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED, false};
   int error;
   rb_protect(r_build_and_dispatch_log, (VALUE)&call, &error);
   if (error)
@@ -1613,6 +1628,14 @@ static JSValue js_quickjsrb_log_inner(JSContext *ctx, int argc, JSValueConst *ar
     rb_set_errinfo(Qnil);
     JSValue j_error = j_error_from_ruby_error(ctx, r_error);
     return JS_Throw(ctx, j_error);
+  }
+  if (call.interrupted)
+  {
+    // The same two calls js_poll_interrupts makes, so the guest cannot catch it
+    // and the top-level renderer classifies it exactly as a native timeout.
+    JS_ThrowInternalError(ctx, "interrupted");
+    JS_SetUncatchableException(ctx, TRUE);
+    return JS_EXCEPTION;
   }
   return JS_UNDEFINED;
 }
@@ -2195,6 +2218,13 @@ static void enter_js_entry(VMData *data)
 // Balances enter_js_entry. Clearing the owner only as the outermost entry
 // closes is what lets a VM be handed between threads sequentially, which
 // the README allows and pool warmers depend on.
+//
+// eval_timer_armed deliberately does not drop here. An evaluation is two
+// counted regions, the run and then the conversion of its result, and the
+// budget spans both: a getter that outlives it while the result is being
+// rendered has to be reported, and the count is already back at zero by then.
+// The flag therefore means "some entry armed this clock", and each entry point
+// that renders is responsible for arming above the work it renders.
 static void leave_js_entry(VMData *data)
 {
   if (--data->evals_in_flight == 0)
@@ -3046,6 +3076,13 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_
   // for the life of the context, so unregistering on interrupt isn't worth it.
   size_t buf_len;
   uint8_t *buf = (uint8_t *)copy_rstring_to_owned_buffer(r_bytecode, &buf_len, false);
+  // The read runs no JS, so there is nothing here to budget — but a failed read
+  // is rendered, and rendering reads name off a SyntaxError whose prototype the
+  // guest may have given a throwing getter. That render must not run on the
+  // clock a previous entry left behind. Conditional as in vm_m_compile: nested
+  // under a bridge, the enclosing eval's budget governs.
+  if (data->evals_in_flight == 0)
+    arm_eval_timer(data);
   JSValue j_mod = run_bytecode_release_gvl(data, bytecode_read_job_run, buf, buf_len, true);
   if (JS_IsException(j_mod))
     return raise_from_js_exception_held(data); // raises
@@ -3486,6 +3523,15 @@ static VALUE call_global_function_body(VALUE p)
     rb_raise(rb_eTypeError, "function's name should be a Symbol or a String");
   }
 
+  // Armed above the resolution, for the reason define_global_function_body and
+  // vm_m_import give: resolving the path runs JS — the JS_Eval of the first
+  // segment, then a property read per segment, any of which can be a getter —
+  // and it ran under whatever the previous entry point left behind. A lapsed
+  // clock interrupted it spuriously; none at all, after a polyfill load's
+  // disarm, left it unbounded. Armed again below, beside the JS_Call, so that
+  // converting the Ruby arguments in between is not charged to the budget.
+  arm_eval_timer(data);
+
   {
     long path_len = RARRAY_LEN(r_path);
 
@@ -3547,6 +3593,9 @@ static VALUE call_global_function_body(VALUE p)
       j_args[i] = to_js_value(data->context, argv[i + 1]);
   }
 
+  // A fresh clock for the call itself. The conversion above is Ruby work —
+  // inspect on the caller's objects, allocation, a GVL yield to another thread
+  // — and none of it is the guest's to pay for.
   arm_eval_timer(data);
 
   JSValue j_result = JS_Call(data->context, j_func, j_this, nargs, (JSValueConst *)j_args);

@@ -907,6 +907,8 @@ describe Quickjs::VM do
       _(vm.memory_poisoned?).must_equal true
       err = _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
       _(err.message).must_match(/poisoned/)
+    ensure
+      vm.dispose!
     end
 
     # Substituting for a read the deadline outlived loses the only evidence the
@@ -938,6 +940,102 @@ describe Quickjs::VM do
           }})
         JS
       end.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
+    # started_at belongs to the entry that armed it. call resolved its path and
+    # rendered any failure before arming, so a render there read the previous
+    # entry's clock — which had simply aged past the budget while nothing ran.
+    # call now arms above its resolution like its two siblings; the flag itself
+    # cannot drop between entries, since an evaluation is two counted regions
+    # and its budget spans both.
+    it "does not report a timeout off a clock the previous entry left behind" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+      vm.eval_code("globalThis.a = {get b() { throw Symbol('nope') }}; 1")
+      sleep 0.15
+
+      error = _ { vm.call('a.b') }.must_raise Quickjs::RuntimeError
+
+      _(error.class).must_equal Quickjs::RuntimeError
+      _(error.message).must_match(/unrenderable/)
+    ensure
+      vm.dispose!
+    end
+
+    # The clock for the call itself starts beside the JS_Call, after the Ruby
+    # arguments are converted: inspect on the caller's objects, allocation, a
+    # yield to another thread — none of it is the guest's to pay for.
+    it "does not charge converting the arguments of call to the budget" do
+      slow = Class.new { def inspect = (sleep 0.15; 'slow') }
+      vm = Quickjs::VM.new(timeout_msec: 100)
+      vm.eval_code('globalThis.f = (x) => { let n = 0; for (let i = 0; i < 50000; i++) n += i; return n }')
+
+      _(vm.call('f', slow.new)).must_equal 1249975000
+    ensure
+      vm.dispose!
+    end
+
+    # The bytecode read runs no JS, but a failed read is rendered, and the guest
+    # can give SyntaxError.prototype a name getter that throws. That render ran
+    # on whatever clock the previous entry left behind.
+    it "does not report a timeout off a stale clock when a preload fails" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+      vm.eval_code("Object.defineProperty(SyntaxError.prototype, 'name', {get() { throw Symbol('x') }}); 1")
+      sleep 0.15
+
+      error = _ { vm.send(:_preload_module_bytecode, 'garbage', 'm') }.must_raise Quickjs::RuntimeError
+
+      _(error.class).must_equal Quickjs::RuntimeError
+    ensure
+      vm.dispose!
+    end
+
+    # A logged argument whose toString outlives the budget was substituted and
+    # forgotten, and the evaluation returned normally having spent several times
+    # its budget: the row's hold recorded the lapse and nothing read it.
+    it "reports the timeout that lapsed inside a logged value" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+      vm.on_log {|log| }
+
+      _ do
+        vm.eval_code("console.log({toString() { const t = Date.now(); while (Date.now() - t < 1000) {}; return 'x' }}); 1")
+      end.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
+    # Thrown from the bridge as the interrupt QuickJS itself throws — uncatchable
+    # — rather than bridged as a Ruby exception a try/catch could swallow, which
+    # would also have pinned one InterruptedError in alive_objects per catch.
+    it "throws the logged-value timeout as an interrupt the guest cannot catch" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+      vm.on_log {|log| }
+      spinner = "({toString() { const t = Date.now(); while (Date.now() - t < 1000) {}; return 'x' }})"
+
+      GC.start
+      before = ObjectSpace.each_object(Quickjs::InterruptedError).count
+      _ do
+        vm.eval_code("let caught = 0; for (let i = 0; i < 20; i++) { try { console.log(#{spinner}) } catch (e) { caught++ } }; caught")
+      end.must_raise Quickjs::InterruptedError
+      GC.start
+
+      _(ObjectSpace.each_object(Quickjs::InterruptedError).count - before).must_be :<=, 1
+    ensure
+      vm.dispose!
+    end
+
+    it "hands the listener the timeout that lapsed inside a rejection reason" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+      seen = []
+      vm.on_unhandled_rejection {|err| seen << err }
+      vm.eval_code(<<~JS)
+        const e = new Error('r');
+        Object.defineProperty(e, 'name', {get() { const t = Date.now(); while (Date.now() - t < 1000) {}; return 'X' }});
+        void Promise.reject(e);
+      JS
+
+      _(seen.map(&:class)).must_equal [Quickjs::InterruptedError]
     ensure
       vm.dispose!
     end
