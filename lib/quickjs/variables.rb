@@ -56,7 +56,20 @@ module Quickjs
       # The per-container check bounds the expanding case; this catches the
       # flat one, a single enormous String or a very wide container, where no
       # inner container ever crosses the line on its own.
-      literal = Quickjs._within_budget(Quickjs._js_literal(value, nil, budget), budget)
+      #
+      # Depth is left to the stack rather than to a constant. What a walk
+      # costs depends on the stack it runs on, and a Ruby thread's is a
+      # fraction of the main thread's, so the same 900 levels are fine on one
+      # and fatal on the other. SystemStackError is not a StandardError
+      # either, so a caller's `rescue => e` would miss it and the thread would
+      # go down.
+      literal =
+        begin
+          Quickjs._within_budget(Quickjs._js_literal(value, nil, budget), budget)
+        rescue ::SystemStackError
+          raise ::ArgumentError, "value nests too deeply to convert on this thread's stack"
+        end
+
       declared = (@_defined_variables ||= {})
       existing = declared[key]
 
@@ -162,7 +175,7 @@ module Quickjs
   # `#inspect` for anything it doesn't recognize and would silently turn a
   # Time into a string. Defining a variable is an input path, so an
   # unsupported value is a caller mistake worth raising on.
-  def self._js_literal(value, seen = nil, budget = nil, depth = 0)
+  def self._js_literal(value, seen = nil, budget = nil)
     case value
     when nil then "null"
     when true then "true"
@@ -176,7 +189,7 @@ module Quickjs
     when ::Integer then value.to_s
     when ::Float then _js_float_literal(value)
     when ::Symbol then _js_symbol_literal(value)
-    when ::Array, ::Hash then _js_container_literal(value, seen, budget, depth)
+    when ::Array, ::Hash then _js_container_literal(value, seen, budget)
     else
       raise ::TypeError, "#{value.class} cannot be converted to a JavaScript value"
     end
@@ -203,15 +216,7 @@ module Quickjs
   # `seen` is threaded through by identity: a structure that contains itself
   # would otherwise recurse until the stack gives out. Entries are removed on
   # the way out so a value appearing twice as siblings stays legal.
-  MAX_DEPTH = 1000
-
-  def self._js_container_literal(value, seen, budget = nil, depth = 0)
-    if depth >= MAX_DEPTH
-      raise ::ArgumentError,
-        "value nests deeper than #{MAX_DEPTH} levels; serializing it would exhaust the Ruby stack, " \
-        "which raises SystemStackError rather than something a caller can rescue"
-    end
-
+  def self._js_container_literal(value, seen, budget = nil)
     seen ||= {}
     if seen.key?(value.object_id)
       raise ::ArgumentError, "#{value.class} contains a circular reference and cannot be converted"
@@ -223,14 +228,14 @@ module Quickjs
       used = 2
       if value.is_a?(::Array)
         value.each do |v|
-          parts << (piece = _js_literal(v, seen, budget, depth + 1))
+          parts << (piece = _js_literal(v, seen, budget))
           used += piece.bytesize + 1
           _over_budget!(budget) if budget && used > budget
         end
         "[#{parts.join(",")}]"
       else
         value.each do |k, v|
-          parts << (piece = "#{_js_object_key(k)}:#{_js_literal(v, seen, budget, depth + 1)}")
+          parts << (piece = "#{_js_object_key(k)}:#{_js_literal(v, seen, budget)}")
           used += piece.bytesize + 1
           _over_budget!(budget) if budget && used > budget
         end

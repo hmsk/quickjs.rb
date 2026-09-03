@@ -477,18 +477,36 @@ describe "values the serializer must not take at face value" do
     _ { vm.define_let(:v, { 'items' => Array.new(300) { leaf } }) }.must_raise ArgumentError
   end
 
-  # Deep but finite structures used to raise SystemStackError, which is not a
-  # StandardError, so `rescue => e` in a caller would not catch it.
-  it "refuses a structure deeper than it can serialize" do
-    deep = (1..1_500).reduce({ n: 1 }) { |inner, _| { n: inner } }
+  # A depth constant cannot be right: a Ruby thread's stack is a fraction of the
+  # main thread's, so the same 900 levels are fine on one and fatal on the
+  # other. The guard is the stack itself, and SystemStackError is not a
+  # StandardError, so a caller's `rescue => e` would miss it.
+  it "refuses a structure deeper than the stack it is walked on" do
+    deep = (1..100_000).reduce({ n: 1 }) { |inner, _| { n: inner } }
     vm = Quickjs::VM.new
 
     err = _ { vm.define_const(:deep, deep) }.must_raise ArgumentError
 
-    _(err.message).must_match(/deeper than/)
+    _(err.message).must_match(/deeply/)
   end
 
-  it "still takes a structure within that depth" do
+  it "refuses it on a small stack too, rather than killing the fiber" do
+    deep = (1..100_000).reduce({ n: 1 }) { |inner, _| { n: inner } }
+    vm = Quickjs::VM.new
+
+    result = Fiber.new do
+      begin
+        vm.define_const(:deep, deep)
+        :accepted
+      rescue ArgumentError
+        :refused
+      end
+    end.resume
+
+    _(result).must_equal :refused
+  end
+
+  it "still takes a structure a normal stack can hold" do
     deep = (1..500).reduce({ n: 1 }) { |inner, _| { n: inner } }
     vm = Quickjs::VM.new
 
