@@ -428,6 +428,46 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code('globalThis.PWNED')).must_equal Quickjs::Value::UNDEFINED
   end
 
+  # Answering that with to_s.to_json only moved the dispatch one method along:
+  # to_s belongs to the caller's object as much as to_json does, in the value
+  # position and in the key position alike.
+  it "does not let a String subclass write the source through to_s either" do
+    evil = Class.new(String) do
+      def to_s
+        obj = Object.new
+        def obj.to_json(*) = %q{1; globalThis.PWNED = 'yes'; var zz = 1}
+        obj
+      end
+    end
+    vm = Quickjs::VM.new
+
+    vm.define_let(:v, evil.new('hi'))
+    vm.define_let(:h, { 'a' => 0, evil.new('k') => 1 })
+
+    _(vm.eval_code('v')).must_equal 'hi'
+    _(vm.eval_code('JSON.stringify(h)')).must_equal '{"a":0,"k":1}'
+    _(vm.eval_code('globalThis.PWNED')).must_equal Quickjs::Value::UNDEFINED
+  end
+
+  # No hostile value is needed at all when a gem has replaced String#to_json
+  # process-wide. The escaping has to be ours.
+  it "escapes strings itself rather than through String#to_json" do
+    vm = Quickjs::VM.new
+    String.class_eval { def to_json(*) = '"replaced"' }
+
+    begin
+      vm.define_let(:v, 'kept')
+      vm.define_let(:s, :also_kept)
+      vm.define_let(:h, { 'k' => 'kept too' })
+    ensure
+      String.class_eval { remove_method :to_json }
+    end
+
+    _(vm.eval_code('v')).must_equal 'kept'
+    _(vm.eval_code('s')).must_equal 'also_kept'
+    _(vm.eval_code('JSON.stringify(h)')).must_equal %q({"k":"kept too"})
+  end
+
   # A wide container walks past a check that only runs on the finished
   # container, since map and join materialise it first.
   it "stops on a wide container rather than after building it" do

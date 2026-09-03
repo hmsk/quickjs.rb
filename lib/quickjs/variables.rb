@@ -106,7 +106,7 @@ module Quickjs
           // in which case the lookup below answers for whatever took its place
           // and reports a clean global that is not there.
           if (typeof globalThis !== 'object' || globalThis === null) return 'broken';
-          const d = Object.getOwnPropertyDescriptor(globalThis, #{key.to_s.to_json});
+          const d = Object.getOwnPropertyDescriptor(globalThis, #{::JSON.generate(::String.new(key.to_s))});
           if (!d) return 'absent';
           if (d.get !== undefined || d.set !== undefined) return 'accessor';
           return d.writable ? 'writable' : 'readonly';
@@ -167,11 +167,12 @@ module Quickjs
     when nil then "null"
     when true then "true"
     when false then "false"
-    # to_s first, so a String subclass overriding to_json cannot decide what
-    # goes into the source. Everything here is data being written into a
-    # syntactic position, and the escaping has to be ours rather than the
-    # value's. _js_object_key already does this; the value path did not.
-    when ::String then value.to_s.to_json
+    # Neither to_json nor to_s: both are dispatched on the caller's object, so
+    # a subclass overriding either would decide what goes into the source, and
+    # a gem replacing String#to_json process-wide needs no hostile value at all.
+    # String.new copies the bytes without asking the object anything, and
+    # JSON.generate does the escaping here, where a monkey patch cannot reach it.
+    when ::String then ::JSON.generate(::String.new(value))
     when ::Integer then value.to_s
     when ::Float then _js_float_literal(value)
     when ::Symbol then _js_symbol_literal(value)
@@ -196,7 +197,7 @@ module Quickjs
     return "undefined" if value == Value::UNDEFINED
     return "NaN" if value == Value::NAN
 
-    value.to_s.to_json
+    ::JSON.generate(::String.new(value.to_s))
   end
 
   # `seen` is threaded through by identity: a structure that contains itself
@@ -287,7 +288,11 @@ module Quickjs
   # is the silent coercion this converter exists to avoid.
   def self._js_object_key(key)
     literal = case key
-              when ::String, ::Symbol, ::Integer then key.to_s.to_json
+              when ::String, ::Symbol, ::Integer
+                # Same reason as the value: a key whose to_s answers with
+                # something other than a String is refused by String.new
+                # rather than written into the source.
+                ::JSON.generate(::String.new(key.is_a?(::String) ? key : key.to_s))
               else
                 raise ::TypeError, "#{key.class} cannot be used as a JavaScript object key"
               end
