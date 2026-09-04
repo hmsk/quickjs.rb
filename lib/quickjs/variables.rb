@@ -155,11 +155,17 @@ module Quickjs
     end
 
     def _validate_variable_name(name)
-      unless name.is_a?(::String) || name.is_a?(::Symbol)
+      # `===` rather than `name.is_a?`, which the object answers for itself.
+      unless ::String === name || ::Symbol === name
         raise ::TypeError, "variable's name should be a Symbol or a String, got #{name.class}"
       end
 
-      str = name.to_s
+      # A copy of the bytes, for the same reason the value path takes one.
+      # `to_s` and `to_sym` are both dispatched on the caller's object, so a
+      # String subclass could satisfy the pattern below with one and hand a
+      # different name to the interpolation with the other. Everything after
+      # this line works on a plain String that answers only for itself.
+      str = ::String.new(name.to_s)
       unless NAME_PATTERN.match?(str)
         raise ::ArgumentError, "#{str.inspect} is not a valid JavaScript identifier"
       end

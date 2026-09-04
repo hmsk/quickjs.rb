@@ -113,6 +113,34 @@ describe "VM#define_const / #define_let / #define_var" do
       _(@vm.eval_code("typeof globalThis.pwned")).must_equal "undefined"
     end
 
+    # The name is the one thing interpolated into the source, so the check on
+    # it has to hold against an object that answers for itself. Passing the
+    # pattern with to_s and then handing a different name to to_sym is the
+    # same escape the value path had, one method along.
+    it "refuses a name that answers the pattern and the interpolation differently" do
+      bomb = Class.new(String) do
+        def to_s = self
+        def to_sym = :"ok = 1; globalThis.pwned = 1; var zz"
+      end
+
+      key = @vm.define_const(bomb.new("ok"), 1)
+
+      _(key).must_equal :ok
+      _(@vm.eval_code("typeof globalThis.pwned")).must_equal "undefined"
+      _(@vm.eval_code("ok")).must_equal 1
+    end
+
+    it "refuses a name from an object that only claims to be a String" do
+      liar = Object.new
+      def liar.is_a?(_) = true
+      def liar.kind_of?(_) = true
+      def liar.to_s = "ok"
+      def liar.to_sym = :"ok = 1; globalThis.pwned = 1; var zz"
+
+      _ { @vm.define_const(liar, 1) }.must_raise TypeError
+
+      _(@vm.eval_code("typeof globalThis.pwned")).must_equal "undefined"
+    end
     it "allows $ and _ as identifier characters" do
       @vm.define_const(:$_x1, 1)
 
