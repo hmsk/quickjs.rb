@@ -125,20 +125,6 @@ module Quickjs
       key.to_sym
     end
 
-    # `var` is the only form that lands on `globalThis`, so it is the only one a
-    # property already sitting there can intercept. An accessor takes the value
-    # in its setter and hands JS back whatever its getter likes; a non-writable
-    # data property swallows the assignment silently, because a declaration eval
-    # is sloppy mode. Either way the caller was told the define succeeded when it
-    # did not happen.
-    #
-    # This refuses a global that is already unusable. It is not a security
-    # boundary, and is deliberately not described as one: it asks the VM through
-    # JS, and code that has already run there can replace
-    # Object.getOwnPropertyDescriptor as easily as it can install the accessor. A
-    # VM that has evaluated untrusted JavaScript owns its own environment, and
-    # there is no way to hand a value into it unobserved. Define before running
-    # code you do not control.
     # memory_usage walks the whole JS heap, and the limit it reports is fixed
     # when the VM is built, so reading it per call made every define cost a
     # heap walk: 8us on an empty VM against 1.5ms on one holding a few hundred
@@ -154,6 +140,20 @@ module Quickjs
       @_js_source_budget = limit.is_a?(::Integer) && limit.positive? ? limit : nil
     end
 
+    # `var` is the only form that lands on `globalThis`, so it is the only one a
+    # property already sitting there can intercept. An accessor takes the value
+    # in its setter and hands JS back whatever its getter likes; a non-writable
+    # data property swallows the assignment silently, because a declaration eval
+    # is sloppy mode. Either way the caller was told the define succeeded when it
+    # did not happen.
+    #
+    # This refuses a global that is already unusable. It is not a security
+    # boundary, and is deliberately not described as one: it asks the VM through
+    # JS, and code that has already run there can replace
+    # Object.getOwnPropertyDescriptor as easily as it can install the accessor. A
+    # VM that has evaluated untrusted JavaScript owns its own environment, and
+    # there is no way to hand a value into it unobserved. Define before running
+    # code you do not control.
     def _refuse_unusable_global(key)
       state = eval_code(<<~JS)
         (() => {
@@ -207,7 +207,7 @@ module Quickjs
       # String subclass could satisfy the pattern below with one and hand a
       # different name to the interpolation with the other. Everything after
       # this line works on a plain String that answers only for itself.
-      str = ::String.new(name.to_s)
+      str = ::String === name ? ::String.new(name) : ::String.new(name.to_s)
       unless NAME_PATTERN.match?(str)
         raise ::ArgumentError, "#{str.inspect} is not a valid JavaScript identifier"
       end
@@ -270,6 +270,7 @@ module Quickjs
     # cannot be redirected after they are taken here, and they write the
     # shortest form that reads back as the same number rather than the widest.
     INTEGER_TO_S = ::Integer.instance_method(:to_s)
+    BIT_LENGTH = ::Integer.instance_method(:bit_length)
     FLOAT_TO_S = ::Float.instance_method(:to_s)
 
     def self._js_string_literal(value, budget)
@@ -283,14 +284,16 @@ module Quickjs
     # cannot come in under it. Deliberately loose: this refuses only what is
     # certainly too large, and the finished literal is measured as before.
     def self._js_integer_literal(value, budget)
-      _over_budget!(budget) if budget && value.bit_length / 4 > budget
+      _over_budget!(budget) if budget && BIT_LENGTH.bind_call(value) / 4 > budget
 
       INTEGER_TO_S.bind_call(value)
     end
-    def self._js_float_literal(value)
-      return "NaN" if value.nan?
-      return value.positive? ? "Infinity" : "-Infinity" if value.infinite?
 
+    # nan?, infinite? and positive? were each dispatched on the caller's Float
+    # to pick between three fixed strings, which is a branch the value decided.
+    # They were also unnecessary: Float#to_s already spells those three exactly
+    # as JavaScript does.
+    def self._js_float_literal(value)
       FLOAT_TO_S.bind_call(value)
     end
 
@@ -298,9 +301,14 @@ module Quickjs
     # be recognized before the generic Symbol case. Every other Symbol becomes
     # a string, matching how the C converter treats Symbols returned from a
     # `define_function` block.
+    JS_SPELLED_SYMBOLS = { Value::UNDEFINED => "undefined", Value::NAN => "NaN" }
+                          .compare_by_identity.freeze
+
     def self._js_symbol_literal(value)
-      return "undefined" if value == Value::UNDEFINED
-      return "NaN" if value == Value::NAN
+      # Looked up by identity rather than compared with ==, which a Symbol
+      # answers for itself and could use to make any Symbol undefined.
+      spelled = JS_SPELLED_SYMBOLS[value]
+      return spelled if spelled
 
       ::JSON.generate(::String.new(value.to_s))
     end

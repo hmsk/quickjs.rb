@@ -186,6 +186,19 @@ describe "VM#define_const / #define_let / #define_var" do
       _(@vm.eval_code("typeof globalThis.pwned")).must_equal "undefined"
       _ { @vm.define_const(:safe, 99) }.must_raise ArgumentError
     end
+    # The value path copies a String subclass rather than calling to_s on it.
+    # The name path was still asking, so the class author picked the identifier
+    # and the caller's own bytes were never used.
+    it "uses a String name's own bytes rather than what it says they are" do
+      sub = Class.new(String) { def to_s = "HIJACKED" }
+
+      key = @vm.define_let(sub.new("nm"), 1)
+
+      _(key).must_equal :nm
+      _(@vm.eval_code("nm")).must_equal 1
+      _(@vm.eval_code("typeof HIJACKED")).must_equal "undefined"
+    end
+
     it "refuses a name from an object that only claims to be a String" do
       liar = Object.new
       def liar.is_a?(_) = true
@@ -648,6 +661,54 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code("i")).must_equal 424_242
     _(vm.eval_code("f")).must_equal 1.5
     _(vm.eval_code("typeof globalThis.PWNED")).must_equal "undefined"
+  end
+
+  # nan?, infinite? and positive? each decided which of three fixed strings was
+  # written, and each was the caller's Float to answer. Float#to_s spells all
+  # three the way JavaScript does, so the branches went rather than moving.
+  it "does not let a Float choose which literal it is written as" do
+    vm = Quickjs::VM.new
+    ::Float.class_eval do
+      alias_method :_orig_nan?, :nan?
+      def nan? = self == 1.5 ? true : _orig_nan?
+    end
+
+    begin
+      vm.define_let(:f, 1.5)
+    ensure
+      ::Float.class_eval { remove_method(:nan?); alias_method :nan?, :_orig_nan?; remove_method :_orig_nan? }
+    end
+
+    _(vm.eval_code("f")).must_equal 1.5
+  end
+
+  it "still spells the three Floats JavaScript has words for" do
+    vm = Quickjs::VM.new
+
+    vm.define_let(:n, Float::NAN)
+    vm.define_let(:i, Float::INFINITY)
+    vm.define_let(:m, -Float::INFINITY)
+
+    _(vm.eval_code("Number.isNaN(n)")).must_equal true
+    _(vm.eval_code("i")).must_equal Float::INFINITY
+    _(vm.eval_code("m")).must_equal(-Float::INFINITY)
+  end
+
+  # The two special Symbols were recognised with ==, which a Symbol answers.
+  it "does not let a Symbol claim to be the undefined marker" do
+    vm = Quickjs::VM.new
+    ::Symbol.class_eval do
+      alias_method :_orig_eq, :==
+      def ==(_) = true
+    end
+
+    begin
+      vm.define_let(:s, :hello)
+    ensure
+      ::Symbol.class_eval { remove_method(:==); alias_method :==, :_orig_eq; remove_method :_orig_eq }
+    end
+
+    _(vm.eval_code("s")).must_equal "hello"
   end
 
   # format looked like it read the number rather than asking it, but it is
