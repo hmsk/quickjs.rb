@@ -359,11 +359,41 @@ describe "a value that expands past what the VM could hold" do
   end
 
   # The check is a ceiling on the source, so a flat value large enough on its
-  # own is refused too, not only one that got there by expanding.
+  # own is refused too, not only one that got there by expanding. A flat value
+  # is one value, so the per-element check never sees it: it is measured up
+  # front instead, before the copy and the escaping that would otherwise cost
+  # twice its size to find out.
   it "refuses a single value larger than the limit" do
     vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
 
     _ { vm.define_const(:s, 'x' * 2_000_000) }.must_raise ArgumentError
+  end
+
+  # Measured through an unbound String#bytesize, so a subclass answering that
+  # one low cannot buy itself the expensive copy.
+  it "refuses one that under-reports its own size" do
+    liar = Class.new(String) { def bytesize = 0 }
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+    _ { vm.define_const(:s, liar.new('x' * 2_000_000)) }.must_raise ArgumentError
+  end
+
+  # An Integer costs its digits to render, so the same check applies before
+  # rendering rather than to the finished literal.
+  it "refuses an Integer with more digits than the limit" do
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+    _ { vm.define_const(:n, 2**(8 * 1024 * 1024)) }.must_raise ArgumentError
+  end
+
+  # That check is deliberately loose, so what matters is that it refuses only
+  # what is certainly too large. A bignum whose digits fit still goes through.
+  it "leaves an Integer whose digits fit alone" do
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+    vm.define_const(:n, 10**300_000)
+
+    _(vm.eval_code("n")).must_equal Float::INFINITY
   end
 
   # Sharing is only a problem when it compounds. One object under two keys

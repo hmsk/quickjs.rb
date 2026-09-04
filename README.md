@@ -409,7 +409,7 @@ That check reads the VM through JavaScript, so treat it as a guard against a glo
 
 This is a ceiling and not a prediction. Object-heavy JavaScript costs several times its source size once parsed, so a value well under `memory_limit` can still exhaust the VM when it runs.
 
-The bound is on the JavaScript being built, not on the Ruby memory used to build it, and serializing stops partway rather than after the whole thing exists. Peak host memory is a multiple of `memory_limit` rather than equal to it, measured between one and a half and eight times depending on the shape. How deep a value may nest is whatever the calling thread's stack allows, which is why no number is quoted here: a Ruby thread gets a fraction of the main thread's stack, so the same structure can convert on one and not the other. Running out raises `ArgumentError` rather than the `SystemStackError` that `rescue => e` would not catch.
+The bound is on the JavaScript being built, not on the Ruby memory used to build it, and serializing stops partway rather than after the whole thing exists. Peak host memory is a multiple of `memory_limit` rather than equal to it, since the source exists in Ruby before it is evaluated and a structure is walked before it is refused. How deep a value may nest is whatever the calling thread's stack allows, which is why no number is quoted here: a Ruby thread gets a fraction of the main thread's stack, so the same structure can convert on one and not the other. Running out raises `ArgumentError` rather than the `SystemStackError` that `rescue => e` would not catch.
 
 
 Because these are real declarations rather than property assignments, a colliding declaration at the top level of your JS is a loud error instead of a silent shadow:

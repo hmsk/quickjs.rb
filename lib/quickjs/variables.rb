@@ -196,8 +196,8 @@ module Quickjs
       # a gem replacing String#to_json process-wide needs no hostile value at all.
       # String.new copies the bytes without asking the object anything, and
       # JSON.generate does the escaping here, where a monkey patch cannot reach it.
-      when ::String then ::JSON.generate(::String.new(value))
-      when ::Integer then format("%d", value)
+      when ::String then _js_string_literal(value, budget)
+      when ::Integer then _js_integer_literal(value, budget)
       when ::Float then _js_float_literal(value)
       when ::Symbol then _js_symbol_literal(value)
       when ::Array, ::Hash then _js_container_literal(value, seen, budget)
@@ -206,6 +206,31 @@ module Quickjs
       end
     end
 
+    # Measured before the copy rather than after the literal exists. The
+    # per-container check bounds a structure that expands as it nests, but a
+    # single enormous String is one value, so nothing checked it until it had
+    # been copied once and escaped once. A caller holding 300MB got 900MB.
+    #
+    # bytesize through an unbound method, since a subclass answering that one
+    # low is exactly how a value would get past a cheap check into an
+    # expensive copy.
+    BYTESIZE = ::String.instance_method(:bytesize)
+
+    def self._js_string_literal(value, budget)
+      _over_budget!(budget) if budget && BYTESIZE.bind_call(value) > budget
+
+      ::JSON.generate(::String.new(value))
+    end
+
+    # A bignum costs its digits to render, and it takes more than four bits to
+    # carry a decimal digit, so anything past four times the budget in bits
+    # cannot come in under it. Deliberately loose: this refuses only what is
+    # certainly too large, and the finished literal is measured as before.
+    def self._js_integer_literal(value, budget)
+      _over_budget!(budget) if budget && value.bit_length / 4 > budget
+
+      format("%d", value)
+    end
     # `format` rather than `to_s` for the same reason as the String path: it
     # reads the number itself instead of asking the object to describe it. The
     # cost is a longer literal, since %.17g always prints enough digits to name
