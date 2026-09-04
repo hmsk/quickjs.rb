@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "timeout"
 
 describe "VM#define_const / #define_let / #define_var" do
   before do
@@ -198,7 +199,6 @@ describe "VM#define_const / #define_let / #define_var" do
       _(@vm.eval_code("nm")).must_equal 1
       _(@vm.eval_code("typeof HIJACKED")).must_equal "undefined"
     end
-
     it "refuses a name from an object that only claims to be a String" do
       liar = Object.new
       def liar.is_a?(_) = true
@@ -710,7 +710,6 @@ describe "values the serializer must not take at face value" do
 
     _(vm.eval_code("s")).must_equal "hello"
   end
-
   # format looked like it read the number rather than asking it, but it is
   # replaceable too, and unlike Array#join and String#initialize it fails open:
   # whatever the patch returns goes into the source.
@@ -815,6 +814,32 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code('v')).must_equal 'fine'
   end
 
+  # eval_code is a C call, so a pending Timeout or Thread#raise is delivered at
+  # the first Ruby checkpoint after it returns. That checkpoint used to be the
+  # gap between a binding that now exists in the VM and the line that records
+  # it, which is where such an exception lands rather than a narrow race.
+  it "does not lose the record when a Timeout lands on the declaration" do
+    bricked = 0
+
+    6.times do
+      vm = Quickjs::VM.new
+      value = Array.new(120_000) { |i| i }
+      begin
+        Timeout.timeout(0.05) { vm.define_let(:tv, value) }
+      rescue Timeout::Error
+      end
+      next if vm.eval_code("typeof tv") == "undefined"
+
+      begin
+        vm.define_let(:tv, 1)
+      rescue Quickjs::SyntaxError
+        bricked += 1
+      rescue ArgumentError
+      end
+    end
+
+    _(bricked).must_equal 0
+  end
   # An interrupt lands after QuickJS has created the binding and before it is
   # initialized, so the name stays in the temporal dead zone for the life of an
   # otherwise healthy VM. Nothing can undo that; what it must not do is report

@@ -89,22 +89,36 @@ module Quickjs
         # The declaration is its own eval so the caller's source is never
         # rewritten. Prepending to it would shift every line number in a
         # backtrace away from the code the caller actually wrote.
-        begin
-          eval_code("#{JS_KEYWORDS.fetch(kind)} #{key} = #{literal};")
-        rescue Quickjs::InterruptedError
-          # QuickJS created the binding and the interrupt landed before it was
-          # initialized, so a let or const name stays in the temporal dead zone
-          # for the life of the VM: reading it, assigning to it and redeclaring
-          # it all raise. Nothing here can undo that. Recording it is what stops
-          # the next define from reporting a redeclaration the caller never
-          # wrote, on a VM that is otherwise perfectly healthy.
-          #
-          # A var is left out, since redeclaring one is legal JS and works, so
-          # there is nothing to remember.
-          declared[key] = :interrupted unless kind == :var
-          raise
+        #
+        # The declaration and the line that records it run with interrupts held
+        # off. eval_code is a C call, so a pending Timeout or Thread#raise
+        # cannot be delivered inside it: it arrives at the first Ruby
+        # checkpoint after it returns, which is the gap between a binding that
+        # now exists in the VM and the registry entry that says so. That is not
+        # a narrow race, it is where such an exception lands, and it left the
+        # name declared in JS, absent from the registry, and reporting a
+        # redeclaration nobody wrote for the life of the VM.
+        #
+        # Nothing in here was interruptible anyway, so holding them off costs
+        # the caller no responsiveness it had.
+        ::Thread.handle_interrupt(::Exception => :never) do
+          begin
+            eval_code("#{JS_KEYWORDS.fetch(kind)} #{key} = #{literal};")
+          rescue Quickjs::InterruptedError
+            # QuickJS created the binding and the interrupt landed before it was
+            # initialized, so a let or const name stays in the temporal dead zone
+            # for the life of the VM: reading it, assigning to it and redeclaring
+            # it all raise. Nothing here can undo that. Recording it is what stops
+            # the next define from reporting a redeclaration the caller never
+            # wrote, on a VM that is otherwise perfectly healthy.
+            #
+            # A var is left out, since redeclaring one is legal JS and works, so
+            # there is nothing to remember.
+            declared[key] = :interrupted unless kind == :var
+            raise
+          end
+          declared[key] = kind
         end
-        declared[key] = kind
       elsif existing != kind
         raise ::ArgumentError,
           "#{key} is already defined as a #{existing}; it cannot be redefined as a #{kind}"
