@@ -197,7 +197,7 @@ module Quickjs
       # String.new copies the bytes without asking the object anything, and
       # JSON.generate does the escaping here, where a monkey patch cannot reach it.
       when ::String then ::JSON.generate(::String.new(value))
-      when ::Integer then value.to_s
+      when ::Integer then format("%d", value)
       when ::Float then _js_float_literal(value)
       when ::Symbol then _js_symbol_literal(value)
       when ::Array, ::Hash then _js_container_literal(value, seen, budget)
@@ -206,11 +206,16 @@ module Quickjs
       end
     end
 
+    # `format` rather than `to_s` for the same reason as the String path: it
+    # reads the number itself instead of asking the object to describe it. The
+    # cost is a longer literal, since %.17g always prints enough digits to name
+    # the double exactly rather than the shortest that round-trips, so 0.1 is
+    # written as 0.10000000000000001. Both parse back to the same double.
     def self._js_float_literal(value)
       return "NaN" if value.nan?
       return value.positive? ? "Infinity" : "-Infinity" if value.infinite?
 
-      value.to_s
+      format("%.17g", value)
     end
 
     # `Quickjs::Value::UNDEFINED` and `NAN` are plain Symbols, so they have to

@@ -496,6 +496,45 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code('JSON.stringify(h)')).must_equal %q({"k":"kept too"})
   end
 
+  # Integer and Float cannot be subclassed, so this one needs a process-wide
+  # patch rather than a hostile value. That is the same tier as replacing
+  # String#to_json, which the String path already answers, and these two were
+  # still describing themselves.
+  it "reads numbers itself rather than asking them to describe themselves" do
+    vm = Quickjs::VM.new
+    Integer.class_eval do
+      alias_method :_orig_to_s, :to_s
+      def to_s(*args) = self == 424_242 ? "1; globalThis.PWNED = 1; var zz" : _orig_to_s(*args)
+    end
+    Float.class_eval do
+      alias_method :_orig_to_s, :to_s
+      def to_s(*args) = self == 1.5 ? "1; globalThis.PWNED = 1; var zz" : _orig_to_s(*args)
+    end
+
+    begin
+      vm.define_let(:i, 424_242)
+      vm.define_let(:f, 1.5)
+    ensure
+      Integer.class_eval { remove_method(:to_s); alias_method :to_s, :_orig_to_s; remove_method :_orig_to_s }
+      Float.class_eval { remove_method(:to_s); alias_method :to_s, :_orig_to_s; remove_method :_orig_to_s }
+    end
+
+    _(vm.eval_code("i")).must_equal 424_242
+    _(vm.eval_code("f")).must_equal 1.5
+    _(vm.eval_code("typeof globalThis.PWNED")).must_equal "undefined"
+  end
+
+  # %.17g names the double exactly rather than the shortest form that reads
+  # back as it, so the literal is longer than Float#to_s would write. What has
+  # to hold is that it parses back to the same double.
+  it "round-trips floats through the longer literal" do
+    vm = Quickjs::VM.new
+    values = [0.1, 1.5, -2.25, 1e20, 1e-7, 1e308, 5e-324, 3.141592653589793, 1.0 / 3]
+
+    values.each_with_index { |f, i| vm.define_let(:"f#{i}", f) }
+
+    values.each_with_index { |f, i| _(vm.eval_code("f#{i}")).must_equal f }
+  end
   # A wide container walks past a check that only runs on the finished
   # container, since map and join materialise it first.
   it "stops on a wide container rather than after building it" do
