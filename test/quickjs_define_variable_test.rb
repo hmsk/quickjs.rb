@@ -440,15 +440,29 @@ describe "a value that expands past what the VM could hold" do
 
   # Measured through an unbound String#bytesize, so a subclass answering that
   # one low cannot buy itself the expensive copy.
-  it "refuses one that under-reports its own size" do
+  #
+  # The bytes are not valid UTF-8, which is what makes this test able to fail.
+  # Refusing the value is not on its own evidence of anything: the check on the
+  # finished literal refuses it too, just after paying for it. Escaping is what
+  # would notice the encoding, so ArgumentError says the value was turned away
+  # before that ran, and JSON::GeneratorError would say it was not.
+  it "refuses one that under-reports its own size, before escaping it" do
     liar = Class.new(String) { def bytesize = 0 }
+    invalid = (+"\xC3").b * 2_000_000
     vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
 
-    _ { vm.define_const(:s, liar.new('x' * 2_000_000)) }.must_raise ArgumentError
+    _ { vm.define_const(:s, liar.new(invalid.force_encoding("UTF-8"))) }.must_raise ArgumentError
   end
 
   # An Integer costs its digits to render, so the same check applies before
   # rendering rather than to the finished literal.
+  #
+  # Unlike the String above, nothing here distinguishes the two paths in what
+  # the caller sees: without the up-front check the digits get rendered and the
+  # check on the finished literal refuses the same value with the same error.
+  # Only the cost differs, measured at 1.16s for a 40 Mbit value against zero,
+  # and a wall-clock assertion on CI is not worth the flake. So this pins the
+  # refusal and not where it came from.
   it "refuses an Integer with more digits than the limit" do
     vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
 
