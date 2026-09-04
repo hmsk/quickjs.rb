@@ -517,6 +517,10 @@ typedef struct
   // fired inside it. Sticky for the life of the hold rather than per-read: the
   // fact it records is about the evaluation, not about one property.
   bool interrupted;
+  // Set when a conversion was substituted away because the heap ran out inside
+  // it. The VM is condemned at the moment it is noticed; this is for the
+  // renderer to say so rather than report the substituted read.
+  bool oom;
   JsHeld held_inline[JS_HOLD_INLINE];
 } JsHold;
 
@@ -527,6 +531,7 @@ static void js_hold_init(JsHold *hold, JSContext *ctx)
   hold->count = 0;
   hold->capacity = JS_HOLD_INLINE;
   hold->interrupted = false;
+  hold->oom = false;
 }
 
 // The deepest block below holds eight references at once — an exception, three
@@ -578,6 +583,53 @@ static bool eval_budget_lapsed(VMData *data)
   return data->eval_timer_armed && eval_elapsed_ms(data->eval_time) >= data->eval_time->limit_ms;
 }
 
+// Whether a throw is QuickJS reporting that the heap ran out. Recognised by
+// the message alone, and only as an own data property: a real out-of-memory
+// error is built with `message` defined directly on it, and reading an own
+// data property runs nothing — where reading `name` walks the prototype and
+// either could be an accessor the guest installed, which is the hazard
+// eval_budget_lapsed was written to avoid. A Proxy is not JS_IsError, so its
+// traps never run either. Still forgeable with a plain data property, which is
+// the pre-existing weakness #111 records; what matters here is that nothing
+// guest-written runs on a throw that is about to be discarded.
+static bool js_is_out_of_memory(JSContext *ctx, JSValueConst j_val)
+{
+  if (!JS_IsError(ctx, j_val))
+    return false;
+
+  JSAtom message_atom = JS_NewAtom(ctx, "message");
+  JSPropertyDescriptor desc;
+  int found = JS_GetOwnProperty(ctx, &desc, j_val, message_atom);
+  JS_FreeAtom(ctx, message_atom);
+  if (found <= 0)
+    return false;
+
+  bool oom = false;
+  if ((desc.flags & JS_PROP_TMASK) == JS_PROP_NORMAL && JS_IsString(desc.value))
+  {
+    const char *message = JS_ToCString(ctx, desc.value);
+    if (message != NULL)
+    {
+      oom = strstr(message, "out of memory") != NULL;
+      JS_FreeCString(ctx, message);
+    }
+    else
+    {
+      // The value is already a string, so the only way this conversion fails
+      // is allocation — flattening a rope, transcoding non-ASCII — which on a
+      // heap that just ran out is the same news one level deeper. QuickJS's
+      // own message is flat ASCII and converts without allocating, so this
+      // branch is only ever the inspection itself running out.
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      oom = true;
+    }
+  }
+  JS_FreeValue(ctx, desc.value);
+  JS_FreeValue(ctx, desc.getter);
+  JS_FreeValue(ctx, desc.setter);
+  return oom;
+}
+
 // JS_ToCString converts through the value's own toString, so it answers NULL
 // whenever that throws — a getter that raises, a Symbol, a Proxy that refuses —
 // and not only when it runs out of memory. This keeps the NULL, for the two
@@ -605,8 +657,20 @@ static const char *js_hold_cstring_or_null(JsHold *hold, JSValue j_val)
   if (!NIL_P(r_ruby_error))
     rb_exc_raise(r_ruby_error);
 
-  if (eval_budget_lapsed(JS_GetContextOpaque(hold->ctx)))
+  VMData *data = JS_GetContextOpaque(hold->ctx);
+  if (eval_budget_lapsed(data))
     hold->interrupted = true;
+
+  // A heap that ran out inside the read is the one throw here that must not
+  // be quietly substituted: the latch check_oom_poisoned depends on would
+  // otherwise never set, and the next evaluation would run on the heap the
+  // latch exists to refuse. Latched here, at every hold, rather than left to
+  // the renderer, since the log row and the rejection reason have no renderer.
+  if (js_is_out_of_memory(hold->ctx, j_pending))
+  {
+    data->oom_poisoned = true;
+    hold->oom = true;
+  }
 
   return NULL;
 }
@@ -699,6 +763,21 @@ static void raise_if_interrupted(JsHold *hold)
     rb_exc_raise(r_interrupted_error());
 }
 
+// The heap running out inside a read outranks both the read and the budget:
+// the VM is already condemned, and the caller is told what a top-level
+// out-of-memory tells it, so the advice to recreate the VM reads the same.
+static VALUE r_out_of_memory_error(void)
+{
+  VALUE r_message = rb_str_new2("out of memory");
+  return rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_message, Qnil);
+}
+
+static void raise_if_out_of_memory(JsHold *hold)
+{
+  if (hold->oom)
+    rb_exc_raise(r_out_of_memory_error());
+}
+
 struct js_exception_render
 {
   JSContext *ctx;
@@ -732,6 +811,7 @@ static VALUE js_exception_render_run(VALUE r_render)
       VALUE r_headline = rb_str_new2(js_hold_format(hold, "Uncaught '%s'", errorMessage));
       dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
     }
+    raise_if_out_of_memory(hold);
     raise_if_interrupted(hold);
 
     rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, rb_str_new2(errorMessage), Qnil));
@@ -763,6 +843,7 @@ static VALUE js_exception_render_run(VALUE r_render)
     VALUE r_headline = rb_str_new2(js_hold_format(hold, "Uncaught %s: %s\n%s", errorClassName, errorClassMessage, stackTrace));
     dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
   }
+  raise_if_out_of_memory(hold);
   raise_if_interrupted(hold);
 
   VALUE r_error_class, r_error_message = rb_str_new2(errorClassMessage);
@@ -1297,9 +1378,12 @@ static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason)
   conversion.j_reason = j_reason;
   js_hold_init(&conversion.hold, ctx);
   VALUE r_exc = rb_ensure(js_reason_conversion_run, (VALUE)&conversion, js_hold_release, (VALUE)&conversion.hold);
-  // The flag outlives the release, which is why it is sticky: a budget that
-  // lapsed while the reason was read is what the listener hears about, since
-  // the tracker cannot raise out and there may be no next interrupt check.
+  // The flags outlive the release, which is why they are sticky: a heap that
+  // ran out or a budget that lapsed while the reason was read is what the
+  // listener hears about, since the tracker cannot raise out and there may be
+  // no next interrupt check. The same precedence as the renderer.
+  if (conversion.hold.oom)
+    return r_out_of_memory_error();
   return conversion.hold.interrupted ? r_interrupted_error() : r_exc;
 }
 

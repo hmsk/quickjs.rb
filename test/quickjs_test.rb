@@ -920,6 +920,75 @@ describe Quickjs::VM do
     # memory is a fact about the heap rather than about who was asking, and this
     # is the shape that proves the split cannot own it: the evaluation returns
     # its object and the allocation that fails is in a getter read afterwards.
+    # The heap can run out inside one of the renderer's own reads. The getter
+    # here succeeds — big + big is a rope — and it is the read's own
+    # JS_ToCString, flattening it, that runs out. That throw took the
+    # substitution path like any other, so the caller got a normal-looking
+    # RuntimeError, the latch never set, and the next evaluation ran on the
+    # heap the latch exists to refuse.
+    it "condemns the VM for an out-of-memory met inside a read it was rendering" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          const big = 'x'.repeat(480 * 1024);
+          const e = new Error('m');
+          Object.defineProperty(e, 'message', {get() { return big + big }});
+          throw e;
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_match(/out of memory/)
+      _(vm.memory_poisoned?).must_equal true
+      err = _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
+      _(err.message).must_match(/poisoned/)
+    ensure
+      vm.dispose!
+    end
+
+    # One level deeper: the discarded throw says "out of memory" as an own data
+    # property, but converting that message to look at it is itself an
+    # allocation — a non-ASCII string transcodes — and it fails on the same
+    # exhausted heap. A string that will not convert is the heap running out.
+    it "condemns the VM when inspecting the discarded throw itself runs out of memory" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          const big = 'x'.repeat(600 * 1024);
+          const e = new Error('m');
+          Object.defineProperty(e, 'message', {get() {
+            const inner = new Error('q');
+            inner.message = 'out of memory ' + 'é'.repeat(150 * 1024);
+            throw inner;
+          }});
+          throw e;
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_match(/out of memory/)
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
+    it "hands the listener the out-of-memory met while a rejection reason was read" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      seen = []
+      vm.on_unhandled_rejection {|err| seen << err }
+      vm.eval_code(<<~JS)
+        const big = 'x'.repeat(480 * 1024);
+        const e = new Error('r');
+        Object.defineProperty(e, 'message', {get() { return big + big }});
+        void Promise.reject(e);
+      JS
+
+      _(seen.map(&:message)).must_equal ['out of memory']
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
     it "still condemns the VM for an out-of-memory a getter hit during conversion" do
       vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
 
