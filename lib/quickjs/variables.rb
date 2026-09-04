@@ -344,22 +344,34 @@ module Quickjs
       seen[value] = true
 
       begin
-        parts = []
+        # Appended to one String rather than collected and joined. The pieces
+        # were retained until the end, and a Ruby String costs about forty
+        # bytes of object for the two bytes of budget a small element spends,
+        # so a wide container of tiny values reached twenty-seven times
+        # memory_limit in host memory before the check fired. Appending keeps
+        # one piece alive at a time.
         used = 2
+        separator = ""
         if ::Array === value
+          out = +"["
           value.each do |v|
-            parts << (piece = _js_literal(v, seen, budget))
+            piece = _js_literal(v, seen, budget)
+            out << separator << piece
+            separator = ","
             used += piece.bytesize + 1
             _over_budget!(budget) if budget && used > budget
           end
-          "[#{parts.join(",")}]"
+          out << "]"
         else
+          out = +"{"
           value.each do |k, v|
-            parts << (piece = "#{_js_object_key(k)}:#{_js_literal(v, seen, budget)}")
+            piece = "#{_js_object_key(k)}:#{_js_literal(v, seen, budget)}"
+            out << separator << piece
+            separator = ","
             used += piece.bytesize + 1
             _over_budget!(budget) if budget && used > budget
           end
-          "{#{parts.join(",")}}"
+          out << "}"
         end
       ensure
         seen.delete(value)
