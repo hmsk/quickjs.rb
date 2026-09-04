@@ -440,7 +440,7 @@ vm.define_var(:counter, 3)    #=> raise ArgumentError (already defined as a let)
 
 The name is a `String` or `Symbol` and comes back as a `Symbol`. It has to match `/\A[A-Za-z_$][A-Za-z0-9_$]*\z/` and not be a reserved word. That is narrower than JavaScript itself, which also accepts Unicode identifiers like `値`: the name is concatenated into source that gets evaluated, so the pattern is what stops one from smuggling in arbitrary JS.
 
-Values are `Hash`, `Array`, `String`, numerics, `true`/`false`/`nil`, plus `Quickjs::Value::UNDEFINED` and `Quickjs::Value::NAN`. Anything else raises `TypeError` rather than being silently stringified:
+Values are `Hash`, `Array`, `String`, `Symbol`, `Integer`, `Float`, `true`/`false`/`nil`, plus `Quickjs::Value::UNDEFINED` and `Quickjs::Value::NAN`. `Rational`, `Complex` and `BigDecimal` are not included, since JavaScript has nothing to receive them as. Anything else raises `TypeError` rather than being silently stringified:
 
 ```rb
 vm.define_const(:at, Time.now) #=> raise TypeError
@@ -451,7 +451,8 @@ This is a narrower set than the converter used for `define_function` return valu
 A few edges are worth knowing before they surprise you:
 
 - **Strings are taken as text, not as bytes.** An `ASCII-8BIT` string whose bytes happen to be valid UTF-8 is reinterpreted as those characters, so `"\xC3\xA9".b` arrives as `"é"` with length 1. Bytes that are not valid UTF-8 raise `JSON::GeneratorError`, and a name in an encoding that cannot be compared against ASCII raises `Encoding::CompatibilityError`; both are unsupported values reported by the layer that noticed rather than as `TypeError`.
-- **Integers beyond JavaScript's range become `Infinity`**, not a rounded value. `10 ** 400` is `Infinity` on the JS side.
+- **Integers lose precision past `2 ** 53`, silently.** JavaScript has one number type, so `2 ** 53 + 1` arrives as `9007199254740992.0`, the same as `2 ** 53`. Past the range of a double it becomes `Infinity` rather than a rounded value: `10 ** 400` is `Infinity` on the JS side. This matches what the rest of the gem does with large integers.
+- **A `__proto__` key stays a key.** In a JS object literal `__proto__: v` sets the prototype instead of defining a property, and quoting it does not opt out, so a `Hash` with that key would otherwise reach JS with no such key and read back as if it had never been sent. It is emitted as a computed key, which is not that special form: `Object.keys` lists it and it round-trips. JavaScript you write yourself is untouched, and `{__proto__: x}` in your own source still sets a prototype.
 - **Hash keys are compared after `to_s`.** `{ 'a' => 1, a: 2 }` and `{ 1 => 'x', '1' => 'y' }` each produce one JS key, and the last value wins, as they would in a JS object literal.
 - **A name defined here shadows a `define_function` of the same name**, in either order and without an error. `define_const(:svc, 1)` followed by `define_function('svc')` leaves `typeof svc` as `"number"`, with the function reachable only as `globalThis.svc`.
 - **Reserved words are rejected, built-ins are not.** The name check refuses `class`, `return` and the rest, because QuickJS would too and the failure reads better from Ruby. It does not stop you replacing something that already exists: `define_var(:eval, 1)` succeeds and `typeof eval` becomes `"number"`.

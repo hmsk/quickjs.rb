@@ -592,12 +592,17 @@ describe "values the serializer must not take at face value" do
     values.each_with_index { |f, i| _(vm.eval_code("f#{i}")).must_equal f }
   end
   # A wide container walks past a check that only runs on the finished
-  # container, since map and join materialise it first.
+  # container, since map and join materialise it first. Refusing it is not
+  # enough to show that, since the old check refused it too, just later. The
+  # last element is a value this converter cannot represent: reaching it would
+  # raise TypeError, so ArgumentError is what says the walk stopped short.
   it "stops on a wide container rather than after building it" do
     leaf = Array.new(5_000) { |i| i }
+    tripwire = Object.new
     vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
 
-    _ { vm.define_let(:v, { 'items' => Array.new(300) { leaf } }) }.must_raise ArgumentError
+    _ { vm.define_let(:v, { 'items' => Array.new(300) { leaf } + [tripwire] }) }
+      .must_raise ArgumentError
   end
 
   # A depth constant cannot be right: a Ruby thread's stack is a fraction of the
