@@ -872,6 +872,35 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code('v')).must_equal 'fine'
   end
 
+  # Recording before the eval inverts which way the window can be wrong, so it
+  # needs its own case: a record standing for a declaration that never ran. The
+  # VM refusing a second define, or quietly turning a let into a global, are
+  # both worse than what the ordering was introduced to fix.
+  it "corrects a record that ran ahead of its declaration" do
+    %i[const let var].each do |kind|
+      vm = Quickjs::VM.new(timeout_msec: 60_000)
+      vm.define_let(:warm, 1)
+      busy = ::Thread.new do
+        vm.eval_code("let s = 0; for (let i = 0; i < 60000000; i++) s += i; s")
+      rescue StandardError
+        nil
+      end
+      sleep 0.05
+      begin
+        vm.public_send(:"define_#{kind}", :cfg, 1)
+      rescue ThreadError
+      end
+      busy.join
+      next unless vm.eval_code("typeof cfg") == "undefined"
+
+      vm.public_send(:"define_#{kind}", :cfg, 2)
+
+      _(vm.eval_code("cfg")).must_equal 2
+      # A let or const that reached the VM through an assignment would have
+      # been invented as a global by sloppy mode.
+      _(vm.eval_code("typeof globalThis.cfg")).must_equal(kind == :var ? "number" : "undefined")
+    end
+  end
   # Thread.handle_interrupt defers Timeout and Thread#raise. It does not defer
   # a trap handler: that runs at the checkpoint regardless of the mask, and a
   # raise inside it is an ordinary raise from that point. So the record goes in

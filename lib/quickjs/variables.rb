@@ -86,51 +86,23 @@ module Quickjs
           "unusable for the life of the VM"
       elsif existing.nil?
         _refuse_unusable_global(key) if kind == :var
-        # The declaration is its own eval so the caller's source is never
-        # rewritten. Prepending to it would shift every line number in a
-        # backtrace away from the code the caller actually wrote.
-        #
-        # The registry entry goes in before the eval rather than after it.
-        # Nothing can be relied on to run in between: eval_code is a C call, so
-        # an exception raised at the first Ruby checkpoint after it returns
-        # lands exactly in the gap between a binding the VM now has and the
-        # line that would say so. Timeout and Thread#raise are held off by the
-        # mask below, but a raise from a trap handler is not, and a server that
-        # does `trap("TERM") { raise Shutdown }` reaches it four times in five.
-        # That left the binding live and correct in JS, absent from the
-        # registry, and reported as a redeclaration nobody wrote.
-        #
-        # Recording first inverts which way the window can be wrong. What is
-        # left is a few bytecodes before the eval, where the record is ahead of
-        # a declaration that never happened, and the next define assigns to the
-        # name instead of declaring it. Wrong, but not permanently.
-        declared[key] = kind
-        begin
-          ::Thread.handle_interrupt(::Exception => :never) do
-            eval_code("#{JS_KEYWORDS.fetch(kind)} #{key} = #{literal};")
-          end
-        rescue Quickjs::InterruptedError
-          # QuickJS created the binding and the interrupt landed before it was
-          # initialized, so a let or const name stays in the temporal dead zone
-          # for the life of the VM: reading it, assigning to it and redeclaring
-          # it all raise. Nothing here can undo that, so the next define is told
-          # why rather than being left to report a redeclaration.
-          #
-          # A var is left alone, since redeclaring one is legal JS and works.
-          declared[key] = kind == :var ? :var : :interrupted
-          raise
-        rescue Quickjs::RuntimeError
-          # The eval itself failed, so no binding was made and the name is the
-          # caller's to use again. Only QuickJS errors mean that: anything else
-          # arriving here came from outside and says nothing about whether the
-          # declaration ran, so the entry recorded above stands.
-          declared.delete(key)
-          raise
-        end
+        _declare(declared, kind, key, literal)
       elsif existing != kind
         raise ::ArgumentError,
           "#{key} is already defined as a #{existing}; it cannot be redefined as a #{kind}"
       elsif kind == :const
+        # The registry can be ahead of a declaration that never ran, so refusing
+        # on its word alone would brick a name the VM has never heard of. A
+        # strict self-assignment asks: a live const answers TypeError, and
+        # anything the VM does not have answers ReferenceError.
+        begin
+          eval_code(%{(() => { "use strict"; #{key} = #{key}; })();})
+        rescue Quickjs::ReferenceError
+          return _declare(declared, kind, key, literal)
+        rescue Quickjs::TypeError
+          raise ::ArgumentError,
+            "#{key} is already defined as a const; a const cannot be redefined"
+        end
         raise ::ArgumentError,
           "#{key} is already defined as a const; a const cannot be redefined"
       else
@@ -139,14 +111,26 @@ module Quickjs
         # ourselves can have been swapped for an accessor since, so the
         # same check applies to the assignment.
         _refuse_unusable_global(key) if kind == :var
-        # `void` so the statement has no completion value. An assignment
-        # expression evaluates to what was assigned, and eval_code converts
-        # whatever the statement produced back into Ruby, so redefining a value
-        # built a whole Ruby object graph from the JavaScript it had just
-        # written and dropped it. A 200k-row Hash cost 1.6 million objects that
-        # nothing read. A declaration never had this, since declarations have
-        # no completion value.
-        eval_code("void (#{key} = #{literal});")
+        # Strict mode, so an assignment to a name that is not declared is a
+        # ReferenceError rather than a new global. Sloppy mode would invent one,
+        # which is how a record that ran ahead of its declaration turned
+        # define_let into a define_var: the value landed on globalThis, which
+        # this method promises never happens for a let.
+        #
+        # It also gives the two answers this path needs. A const refuses with
+        # TypeError, and a name the VM does not have refuses with
+        # ReferenceError, which is the registry being ahead of a declaration
+        # that never ran. Declaring it now is the correction.
+        #
+        # The IIFE returns undefined, so nothing converts the assigned value
+        # back into Ruby. An assignment expression evaluates to what was
+        # assigned, and eval_code converts whatever the statement produced, so
+        # this used to rebuild the whole value as Ruby objects and drop them.
+        begin
+          eval_code(%{(() => { "use strict"; #{key} = #{literal}; })();})
+        rescue Quickjs::ReferenceError
+          _declare(declared, kind, key, literal)
+        end
       end
 
       # Only here, where a patched String#to_sym can decide nothing except what
@@ -156,8 +140,8 @@ module Quickjs
 
     # memory_usage walks the whole JS heap, and the limit it reports is fixed
     # when the VM is built, so reading it per call made every define cost a
-    # heap walk: 8us on an empty VM against 1.5ms on one holding a few hundred
-    # thousand objects.
+    # heap walk: single-digit microseconds on an empty VM against milliseconds on
+    # one holding a few hundred thousand objects, on this machine.
     #
     # JSMemoryUsage.malloc_limit is an int64_t, so a limit at or above 2**63
     # comes back negative. Anything that is not a usable size means no budget,
@@ -183,6 +167,51 @@ module Quickjs
     # VM that has evaluated untrusted JavaScript owns its own environment, and
     # there is no way to hand a value into it unobserved. Define before running
     # code you do not control.
+    # The declaration is its own eval so the caller's source is never rewritten.
+    # Prepending to it would shift every line number in a backtrace away from the
+    # code the caller actually wrote.
+    #
+    # The registry entry goes in before the eval rather than after it. Nothing
+    # can be relied on to run in between: eval_code is a C call, so an exception
+    # raised at the first Ruby checkpoint after it returns lands exactly in the
+    # gap between a binding the VM now has and the line that would say so.
+    # Timeout and Thread#raise are held off by the mask below, but a raise from a
+    # trap handler is not, and a server that does `trap("TERM") { raise Shutdown
+    # }` reaches it four times in five. That left the binding live and correct in
+    # JS, absent from the registry, and reported as a redeclaration nobody wrote.
+    #
+    # Recording first inverts which way the window can be wrong, and the two
+    # branches that act on an existing record ask the VM rather than believing
+    # it, so a record that ran ahead of its declaration corrects itself on the
+    # next define instead of standing for the life of the VM.
+    def _declare(declared, kind, key, literal)
+      declared[key] = kind
+      begin
+        ::Thread.handle_interrupt(::Exception => :never) do
+          eval_code("#{JS_KEYWORDS.fetch(kind)} #{key} = #{literal};")
+        end
+      rescue Quickjs::InterruptedError
+        # QuickJS created the binding and the interrupt landed before it was
+        # initialized, so a let or const name stays in the temporal dead zone for
+        # the life of the VM: reading it, assigning to it and redeclaring it all
+        # raise. Nothing here can undo that, so the next define is told why
+        # rather than being left to report a redeclaration.
+        #
+        # A var is left alone, since redeclaring one is legal JS and works.
+        declared[key] = kind == :var ? :var : :interrupted
+        raise
+      rescue Quickjs::RuntimeError
+        # The name is the caller's to use again. The source built here is a
+        # declaration of a literal, with no call in it, so the only ways the eval
+        # itself can fail are a parse error, which creates no binding, and
+        # out-of-memory, which poisons the whole VM and makes the registry moot.
+        # A declaration whose initializer threw would leave a binding behind, but
+        # nothing here can generate one.
+        declared.delete(key)
+        raise
+      end
+      key.to_sym
+    end
     def _refuse_unusable_global(key)
       state = eval_code(<<~JS)
         (() => {
