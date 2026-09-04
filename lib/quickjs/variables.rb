@@ -263,6 +263,15 @@ module Quickjs
     # expensive copy.
     BYTESIZE = ::String.instance_method(:bytesize)
 
+    # The same move for the two numeric conversions. format looked like it read
+    # the number rather than asking it, but Kernel#format is itself replaceable
+    # and fails open when it is: it answers with whatever the patch returns and
+    # that goes straight into the source. An unbound Integer#to_s and Float#to_s
+    # cannot be redirected after they are taken here, and they write the
+    # shortest form that reads back as the same number rather than the widest.
+    INTEGER_TO_S = ::Integer.instance_method(:to_s)
+    FLOAT_TO_S = ::Float.instance_method(:to_s)
+
     def self._js_string_literal(value, budget)
       _over_budget!(budget) if budget && BYTESIZE.bind_call(value) > budget
 
@@ -276,18 +285,13 @@ module Quickjs
     def self._js_integer_literal(value, budget)
       _over_budget!(budget) if budget && value.bit_length / 4 > budget
 
-      format("%d", value)
+      INTEGER_TO_S.bind_call(value)
     end
-    # `format` rather than `to_s` for the same reason as the String path: it
-    # reads the number itself instead of asking the object to describe it. The
-    # cost is a longer literal, since %.17g always prints enough digits to name
-    # the double exactly rather than the shortest that round-trips, so 0.1 is
-    # written as 0.10000000000000001. Both parse back to the same double.
     def self._js_float_literal(value)
       return "NaN" if value.nan?
       return value.positive? ? "Infinity" : "-Infinity" if value.infinite?
 
-      format("%.17g", value)
+      FLOAT_TO_S.bind_call(value)
     end
 
     # `Quickjs::Value::UNDEFINED` and `NAN` are plain Symbols, so they have to
@@ -391,7 +395,7 @@ module Quickjs
                   ::JSON.generate(::String.new(key))
                 when ::Integer
                   # Read, not asked to describe itself, as on the value path.
-                  ::JSON.generate(format("%d", key))
+                  ::JSON.generate(INTEGER_TO_S.bind_call(key))
                 when ::Symbol
                   # A Symbol has no bytes to copy, so this one asks. What it
                   # answers is still escaped here, so the worst a patched

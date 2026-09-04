@@ -625,8 +625,7 @@ describe "values the serializer must not take at face value" do
 
   # Integer and Float cannot be subclassed, so this one needs a process-wide
   # patch rather than a hostile value. That is the same tier as replacing
-  # String#to_json, which the String path already answers, and these two were
-  # still describing themselves.
+  # String#to_json, which the String path already answers.
   it "reads numbers itself rather than asking them to describe themselves" do
     vm = Quickjs::VM.new
     Integer.class_eval do
@@ -651,10 +650,30 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code("typeof globalThis.PWNED")).must_equal "undefined"
   end
 
-  # %.17g names the double exactly rather than the shortest form that reads
-  # back as it, so the literal is longer than Float#to_s would write. What has
-  # to hold is that it parses back to the same double.
-  it "round-trips floats through the longer literal" do
+  # format looked like it read the number rather than asking it, but it is
+  # replaceable too, and unlike Array#join and String#initialize it fails open:
+  # whatever the patch returns goes into the source.
+  it "does not build numeric literals through a replaceable format" do
+    vm = Quickjs::VM.new
+    ::Kernel.module_eval do
+      alias_method :_orig_format, :format
+      def format(*) = "0; globalThis.pwned = 1; var zz"
+    end
+
+    begin
+      vm.define_let(:i, 42)
+      vm.define_let(:h, { 7 => "seven" })
+    ensure
+      ::Kernel.module_eval { remove_method(:format); alias_method :format, :_orig_format; remove_method :_orig_format }
+    end
+
+    _(vm.eval_code("i")).must_equal 42
+    _(vm.eval_code(%q(h["7"]))).must_equal "seven"
+    _(vm.eval_code("typeof globalThis.pwned")).must_equal "undefined"
+  end
+  # Float#to_s writes the shortest form that reads back as the same double, and
+  # is taken as an unbound method so a patched one cannot redirect it.
+  it "round-trips floats" do
     vm = Quickjs::VM.new
     values = [0.1, 1.5, -2.25, 1e20, 1e-7, 1e308, 5e-324, 3.141592653589793, 1.0 / 3]
 
