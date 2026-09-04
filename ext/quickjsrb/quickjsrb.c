@@ -2869,7 +2869,9 @@ static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
   // Not a file-wide invariant yet, to be clear. vm_m_evalCode,
   // vm_m_evalBytecode, call_global_function_body, vm_m_import and
   // vm_m_drainJobs all still arm unconditionally and all still defeat
-  // timeout_msec the same way. Hoisting the condition into arm_eval_timer
+  // timeout_msec the same way — call_global_function_body above its path
+  // resolution, so a nested call that fails to resolve has already reset the
+  // enclosing clock. Hoisting the condition into arm_eval_timer
   // would close them together, but it would also start interrupting
   // workloads that re-enter the VM from a bridge and today run unbounded —
   // a semantics change that deserves its own PR rather than a ride on this
@@ -3476,13 +3478,71 @@ struct js_entry_call
   VMData *data;
 };
 
+// The converted arguments of a call. Owned by an ensure from before the first
+// conversion, because to_js_value runs inspect on the caller's own objects and
+// any one of them can raise part-way through — and the ones already converted
+// used to go with it, along with the array.
+struct js_call_args
+{
+  JSContext *ctx;
+  JSValue *j_args;
+  int nargs;
+};
+
+static VALUE js_call_args_release(VALUE p)
+{
+  struct js_call_args *args = (struct js_call_args *)p;
+  for (int i = 0; i < args->nargs; i++)
+    JS_FreeValue(args->ctx, args->j_args[i]);
+  xfree(args->j_args);
+  return Qnil;
+}
+
+struct js_call_run
+{
+  struct js_entry_call *call;
+  struct js_call_args *args;
+};
+
+static VALUE call_global_function_run(VALUE p);
+
 static VALUE call_global_function_body(VALUE p)
 {
   struct js_entry_call *call = (struct js_entry_call *)p;
-  int argc = call->argc;
+  struct js_call_args args = {call->data->context, NULL, call->argc - 1};
+  if (args.nargs > 0)
+  {
+    args.j_args = xmalloc2(args.nargs, sizeof(JSValue));
+    for (int i = 0; i < args.nargs; i++)
+      args.j_args[i] = JS_UNDEFINED;
+  }
+  struct js_call_run run = {call, &args};
+  return rb_ensure(call_global_function_run, (VALUE)&run, js_call_args_release, (VALUE)&args);
+}
+
+static VALUE call_global_function_run(VALUE p)
+{
+  struct js_call_run *run = (struct js_call_run *)p;
+  struct js_entry_call *call = run->call;
+  struct js_call_args *args = run->args;
   VALUE *argv = call->argv;
   VMData *data = call->data;
   VALUE r_name = argv[0];
+
+  // Converted first, under a clock of its own. Mostly this is Ruby work —
+  // inspect on the caller's objects, allocation, a GVL yield to another thread
+  // — and none of it is the guest's to pay for, which is why the arm above the
+  // resolution below starts the budget over. But two conversions run JS: a
+  // File argument calls the proxy creator and a Bignum calls Number(), and
+  // each polls the interrupt handler on the way, so without an arm here they
+  // ran on whatever clock the previous entry left — a lapsed one interrupts
+  // the conversion at random and hands the function a JS_EXCEPTION for an
+  // argument. Two arms, but not the two budgets the previous commit had: no
+  // guest-written JS runs between them unless the guest has replaced Proxy or
+  // Number, and then it is bounded rather than unbounded.
+  arm_eval_timer(data);
+  for (int i = 0; i < args->nargs; i++)
+    args->j_args[i] = to_js_value(data->context, argv[i + 1]);
 
   JSValue j_this = JS_UNDEFINED;
   JSValue j_func;
@@ -3531,13 +3591,15 @@ static VALUE call_global_function_body(VALUE p)
     rb_raise(rb_eTypeError, "function's name should be a Symbol or a String");
   }
 
-  // Armed above the resolution, for the reason define_global_function_body and
-  // vm_m_import give: resolving the path runs JS — the JS_Eval of the first
+  // Armed once, above the resolution, for the reason define_global_function_body
+  // and vm_m_import give: resolving the path runs JS — the JS_Eval of the first
   // segment, then a property read per segment, any of which can be a getter —
   // and it ran under whatever the previous entry point left behind. A lapsed
   // clock interrupted it spuriously; none at all, after a polyfill load's
-  // disarm, left it unbounded. Armed again below, beside the JS_Call, so that
-  // converting the Ruby arguments in between is not charged to the budget.
+  // disarm, left it unbounded. Once, because resolution and the call are one
+  // budget: a second arm beside the JS_Call handed a single call twice
+  // timeout_msec of guest JS, half in a getter on the path and half in the
+  // function it found.
   arm_eval_timer(data);
 
   {
@@ -3592,30 +3654,10 @@ static VALUE call_global_function_body(VALUE p)
     return Qnil;
   }
 
-  int nargs = argc - 1;
-  JSValue *j_args = NULL;
-  if (nargs > 0)
-  {
-    j_args = (JSValue *)malloc(sizeof(JSValue) * nargs);
-    for (int i = 0; i < nargs; i++)
-      j_args[i] = to_js_value(data->context, argv[i + 1]);
-  }
-
-  // A fresh clock for the call itself. The conversion above is Ruby work —
-  // inspect on the caller's objects, allocation, a GVL yield to another thread
-  // — and none of it is the guest's to pay for.
-  arm_eval_timer(data);
-
-  JSValue j_result = JS_Call(data->context, j_func, j_this, nargs, (JSValueConst *)j_args);
+  JSValue j_result = JS_Call(data->context, j_func, j_this, args->nargs, (JSValueConst *)args->j_args);
 
   JS_FreeValue(data->context, j_func);
   JS_FreeValue(data->context, j_this);
-  if (j_args)
-  {
-    for (int i = 0; i < nargs; i++)
-      JS_FreeValue(data->context, j_args[i]);
-    free(j_args);
-  }
 
   // js_std_await handles both async (promise) and sync results; frees j_result
   return to_rb_return_value(data->context, js_std_await(data->context, j_result));

@@ -496,6 +496,27 @@ describe Quickjs::VM do
        bytes:   after[:malloc_size] - before[:malloc_size]}
     end
 
+    # to_js_value runs inspect on the caller's own objects, so converting the
+    # arguments of a call can raise part-way through — and the ones already
+    # converted went with it, along with the array they sat in.
+    it "releases the arguments already converted when a later one raises" do
+      vm = Quickjs::VM.new
+      vm.eval_code('globalThis.f = () => 1')
+      raiser = Class.new { def inspect = raise(ArgumentError, 'mid-conversion') }
+
+      retained = retained(vm, 200) do
+        begin
+          vm.call('f', {a: [1, 2, 3], b: 'x' * 64}, raiser.new)
+          flunk 'expected inspect to raise'
+        rescue ArgumentError
+        end
+      end
+
+      _(retained).must_equal({objects: 0, bytes: 0})
+    ensure
+      vm.dispose!
+    end
+
     # The expected error is named rather than swallowed: a source that stops
     # raising — or never raised, because it was a syntax error all along —
     # would otherwise measure nothing and pass.
@@ -963,15 +984,33 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
-    # The clock for the call itself starts beside the JS_Call, after the Ruby
-    # arguments are converted: inspect on the caller's objects, allocation, a
-    # yield to another thread — none of it is the guest's to pay for.
+    # The arguments are converted before the clock for resolution and the call
+    # starts: inspect on the caller's objects, allocation, a yield to another
+    # thread — none of it is the guest's to pay for.
     it "does not charge converting the arguments of call to the budget" do
       slow = Class.new { def inspect = (sleep 0.15; 'slow') }
       vm = Quickjs::VM.new(timeout_msec: 100)
       vm.eval_code('globalThis.f = (x) => { let n = 0; for (let i = 0; i < 50000; i++) n += i; return n }')
 
       _(vm.call('f', slow.new)).must_equal 1249975000
+    ensure
+      vm.dispose!
+    end
+
+    # Resolution and the call are one budget. A second arm beside the JS_Call
+    # handed a single call twice timeout_msec of guest JS: half in a getter on
+    # the path, half in the function it found, neither tripping alone.
+    it "gives a call one budget across resolving its path and running it" do
+      vm = Quickjs::VM.new(timeout_msec: 200)
+      # Each phase alone is well inside the budget; only their sum is not.
+      vm.eval_code(<<~JS)
+        globalThis.holder = {get f() {
+          const t = Date.now(); while (Date.now() - t < 120) {}
+          return () => { const u = Date.now(); while (Date.now() - u < 120) {}; return 'done' };
+        }}; 1
+      JS
+
+      _ { vm.call('holder.f') }.must_raise Quickjs::InterruptedError
     ensure
       vm.dispose!
     end
