@@ -18,6 +18,12 @@ module Quickjs
     # this check is what stops a name from smuggling in arbitrary JS.
     NAME_PATTERN = /\A[A-Za-z_$][A-Za-z0-9_$]*\z/
 
+    # The keyword is interpolated too, and a Symbol interpolates through
+    # Symbol#to_s exactly as a name would. These are ours rather than the
+    # caller's, but "ours" is not the property that matters: what reaches the
+    # source has to be a String that answers for itself.
+    JS_KEYWORDS = { const: "const", let: "let", var: "var" }.freeze
+
     # The full spec list. QuickJS refuses some of these itself, but not all:
     # a declaration eval is sloppy mode, so `var static = 1` and the other
     # strict-mode-only words evaluate cleanly there. Rejecting the whole list
@@ -30,7 +36,7 @@ module Quickjs
       with yield
     ].freeze
 
-    private_constant :NAME_PATTERN, :RESERVED_WORDS
+    private_constant :NAME_PATTERN, :RESERVED_WORDS, :JS_KEYWORDS
 
     def define_const(name, value)
       _define_variable(:const, name, value)
@@ -84,7 +90,7 @@ module Quickjs
         # rewritten. Prepending to it would shift every line number in a
         # backtrace away from the code the caller actually wrote.
         begin
-          eval_code("#{kind} #{key} = #{literal};")
+          eval_code("#{JS_KEYWORDS.fetch(kind)} #{key} = #{literal};")
         rescue Quickjs::InterruptedError
           # QuickJS created the binding and the interrupt landed before it was
           # initialized, so a let or const name stays in the temporal dead zone

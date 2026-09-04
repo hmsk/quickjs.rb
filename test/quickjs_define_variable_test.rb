@@ -150,6 +150,24 @@ describe "VM#define_const / #define_let / #define_var" do
       _(@vm.eval_code("typeof globalThis.pwned")).must_equal "undefined"
     end
 
+    # The binding keyword is interpolated beside the name, and it was a Symbol
+    # too. Being ours rather than the caller's is not the property that keeps
+    # it out of trouble.
+    it "interpolates the keyword as a String as well as the name" do
+      ::Symbol.class_eval do
+        alias_method :_orig_to_s, :to_s
+        def to_s = _orig_to_s == "const" ? "var q = 0; globalThis.pwned = 1; const" : _orig_to_s
+      end
+
+      begin
+        @vm.define_const(:ok, 1)
+      ensure
+        ::Symbol.class_eval { remove_method(:to_s); alias_method :to_s, :_orig_to_s; remove_method :_orig_to_s }
+      end
+
+      _(@vm.eval_code("ok")).must_equal 1
+      _(@vm.eval_code("typeof globalThis.pwned")).must_equal "undefined"
+    end
     # The other half of the same pair: to_sym runs after the declaration, so a
     # patched one decides what the caller is handed back and nothing else.
     it "keeps a patched String#to_sym out of the source and the registry" do
