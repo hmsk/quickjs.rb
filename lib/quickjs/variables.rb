@@ -74,12 +74,30 @@ module Quickjs
       declared = (@_defined_variables ||= {})
       existing = declared[key]
 
-      if existing.nil?
+      if existing == :interrupted
+        raise ::ArgumentError,
+          "#{key} was left uninitialized by a declaration this VM interrupted, so the name is " \
+          "unusable for the life of the VM"
+      elsif existing.nil?
         _refuse_unusable_global(key) if kind == :var
         # The declaration is its own eval so the caller's source is never
         # rewritten. Prepending to it would shift every line number in a
         # backtrace away from the code the caller actually wrote.
-        eval_code("#{kind} #{key} = #{literal};")
+        begin
+          eval_code("#{kind} #{key} = #{literal};")
+        rescue Quickjs::InterruptedError
+          # QuickJS created the binding and the interrupt landed before it was
+          # initialized, so a let or const name stays in the temporal dead zone
+          # for the life of the VM: reading it, assigning to it and redeclaring
+          # it all raise. Nothing here can undo that. Recording it is what stops
+          # the next define from reporting a redeclaration the caller never
+          # wrote, on a VM that is otherwise perfectly healthy.
+          #
+          # A var is left out, since redeclaring one is legal JS and works, so
+          # there is nothing to remember.
+          declared[key] = :interrupted unless kind == :var
+          raise
+        end
         declared[key] = kind
       elsif existing != kind
         raise ::ArgumentError,

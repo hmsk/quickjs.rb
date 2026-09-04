@@ -717,6 +717,19 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code('v')).must_equal 'fine'
   end
 
+  # An interrupt lands after QuickJS has created the binding and before it is
+  # initialized, so the name stays in the temporal dead zone for the life of an
+  # otherwise healthy VM. Nothing can undo that; what it must not do is report
+  # a redeclaration the caller never wrote.
+  it "says so when a name was left uninitialized by an interrupt" do
+    vm = Quickjs::VM.new(timeout_msec: 1)
+    _ { vm.define_const(:y, Array.new(400_000) { |i| i }) }.must_raise Quickjs::InterruptedError
+
+    err = _ { vm.define_const(:y, 1) }.must_raise ArgumentError
+
+    _(err.message).must_match(/uninitialized/)
+    _(vm.eval_code("1 + 1")).must_equal 2
+  end
   # memory_usage walks the whole JS heap, and the limit it reports is fixed
   # when the VM is built, so asking per call made every define scale with how
   # much the VM was holding.
