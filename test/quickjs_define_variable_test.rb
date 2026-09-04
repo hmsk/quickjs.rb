@@ -905,36 +905,44 @@ describe "values the serializer must not take at face value" do
   # a trap handler: that runs at the checkpoint regardless of the mask, and a
   # raise inside it is an ordinary raise from that point. So the record goes in
   # before the eval rather than after, and this is the case that says so.
-  # Deterministic, unlike the Timeout test below.
+  #
+  # In a child process, because the signal is the point of the test and a
+  # signal that arrives late has the whole process to land in. It did: an
+  # earlier version of this test killed an unrelated crypto test on five CI
+  # runners after its own trap had been restored.
   it "does not lose the record when a trap handler raises" do
-    shutdown = Class.new(StandardError)
-    previous = trap("USR2") { raise shutdown, "down" }
-    bricked = 0
+    skip "fork is not available here" unless Process.respond_to?(:fork)
 
-    begin
+    pid = fork do
+      shutdown = Class.new(StandardError)
+      trap("USR2") { raise shutdown, "down" }
+      status = 2 # nothing landed in the window
       3.times do
         vm = Quickjs::VM.new
         value = Array.new(400_000) { |i| i }
-        pid = Process.pid
-        ::Thread.new { sleep 0.03; Process.kill("USR2", pid) }
+        me = Process.pid
+        ::Thread.new { sleep 0.03; Process.kill("USR2", me) }
         begin
           vm.define_let(:cfg, value)
         rescue shutdown
         end
         next if vm.eval_code("typeof cfg") == "undefined"
 
+        status = 0
         begin
           vm.define_let(:cfg, 1)
         rescue Quickjs::SyntaxError
-          bricked += 1
+          status = 1 # the name is bricked
         rescue ArgumentError
         end
+        break
       end
-    ensure
-      trap("USR2", previous)
+      exit!(status)
     end
+    _, result = Process.waitpid2(pid)
 
-    _(bricked).must_equal 0
+    skip "the signal never landed in the window" if result.exitstatus == 2
+    _(result.exitstatus).must_equal 0
   end
   # eval_code is a C call, so a pending Timeout or Thread#raise is delivered at
   # the first Ruby checkpoint after it returns. That checkpoint used to be the
