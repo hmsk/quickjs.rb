@@ -454,6 +454,27 @@ describe "a value that expands past what the VM could hold" do
     _ { vm.define_const(:s, liar.new(invalid.force_encoding("UTF-8"))) }.must_raise ArgumentError
   end
 
+  # A key is a value the caller supplies, and the up-front check was on the
+  # value path only, so a large String cost nothing as a value and was copied
+  # and escaped as a key before anything looked at it. Same discriminator: the
+  # bytes are invalid UTF-8, so JSON::GeneratorError would say the escaping
+  # ran.
+  it "refuses an oversized key before escaping it" do
+    liar = Class.new(String) { def bytesize = 0 }
+    invalid = (+"\xC3").b * 2_000_000
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+    _ { vm.define_const(:h, { liar.new(invalid.force_encoding("UTF-8")) => 1 }) }
+      .must_raise ArgumentError
+  end
+
+  it "refuses an oversized Symbol, in either position" do
+    huge = ("s" * 2_000_000).to_sym
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+    _ { vm.define_const(:a, huge) }.must_raise ArgumentError
+    _ { vm.define_const(:b, { huge => 1 }) }.must_raise ArgumentError
+  end
   # An Integer costs its digits to render, so the same check applies before
   # rendering rather than to the finished literal.
   #

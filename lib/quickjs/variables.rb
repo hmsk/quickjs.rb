@@ -268,7 +268,7 @@ module Quickjs
       when ::String then _js_string_literal(value, budget)
       when ::Integer then _js_integer_literal(value, budget)
       when ::Float then _js_float_literal(value)
-      when ::Symbol then _js_symbol_literal(value)
+      when ::Symbol then _js_symbol_literal(value, budget)
       when ::Array, ::Hash then _js_container_literal(value, seen, budget)
       else
         raise ::TypeError, "#{value.class} cannot be converted to a JavaScript value"
@@ -326,13 +326,19 @@ module Quickjs
     JS_SPELLED_SYMBOLS = { Value::UNDEFINED => "undefined", Value::NAN => "NaN" }
                           .compare_by_identity.freeze
 
-    def self._js_symbol_literal(value)
+    def self._js_symbol_literal(value, budget = nil)
       # Looked up by identity rather than compared with ==, which a Symbol
       # answers for itself and could use to make any Symbol undefined.
       spelled = JS_SPELLED_SYMBOLS[value]
       return spelled if spelled
 
-      ::JSON.generate(::String.new(value.to_s))
+      # A Symbol has no bytes to measure until to_s makes some, so the copy is
+      # unavoidable. Measuring it before escaping still skips the expensive
+      # half, since escaping walks and rewrites every byte.
+      copy = ::String.new(value.to_s)
+      _over_budget!(budget) if budget && copy.bytesize > budget
+
+      ::JSON.generate(copy)
     end
 
     # `seen` is threaded through by identity: a structure that contains itself
@@ -373,7 +379,7 @@ module Quickjs
         else
           out = +"{"
           value.each do |k, v|
-            piece = "#{_js_object_key(k)}:#{_js_literal(v, seen, budget)}"
+            piece = "#{_js_object_key(k, budget)}:#{_js_literal(v, seen, budget)}"
             out << separator << piece
             separator = ","
             used += piece.bytesize + 1
@@ -431,19 +437,27 @@ module Quickjs
     # JS object keys are strings regardless, so an Integer key is unambiguous.
     # Anything else would rely on `#to_s` producing something meaningful, which
     # is the silent coercion this converter exists to avoid.
-    def self._js_object_key(key)
+    # `budget` for the same reason the value path takes one: a key is a value
+    # the caller supplies, and it was being copied and escaped before anything
+    # looked at its size. A 300MB String cost nothing as a value and 900MB as a
+    # key.
+    def self._js_object_key(key, budget = nil)
       literal = case key
                 when ::String
+                  _over_budget!(budget) if budget && BYTESIZE.bind_call(key) > budget
                   ::JSON.generate(::String.new(key))
                 when ::Integer
                   # Read, not asked to describe itself, as on the value path.
+                  _over_budget!(budget) if budget && BIT_LENGTH.bind_call(key) / 4 > budget
                   ::JSON.generate(INTEGER_TO_S.bind_call(key))
                 when ::Symbol
                   # A Symbol has no bytes to copy, so this one asks. What it
                   # answers is still escaped here, so the worst a patched
                   # Symbol#to_s buys is a different key, not a different
                   # meaning.
-                  ::JSON.generate(::String.new(key.to_s))
+                  copy = ::String.new(key.to_s)
+                  _over_budget!(budget) if budget && copy.bytesize > budget
+                  ::JSON.generate(copy)
                 else
                   raise ::TypeError, "#{key.class} cannot be used as a JavaScript object key"
                 end
