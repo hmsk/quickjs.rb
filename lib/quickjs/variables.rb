@@ -418,16 +418,17 @@ module Quickjs
     # the host. Checking a finished container still lets `map` and `join`
     # materialise the whole thing first, so a single wide container walks past
     # any budget: three hundred references to one twenty-thousand-element array
-    # reached 103MB of Ruby against a 4MB limit that never fired in time. The
-    # same value stops at 6MB now.
+    # reached 103MB of Ruby against a 4MB limit that never fired in time.
     #
     # It is still a multiple of the limit rather than the limit. Nesting builds
-    # each inner literal in full before the level above can check it, so peak
-    # Ruby memory measured four to eight times the limit for the doubling shape,
-    # falling as the limit rises, and about one and a half times it for the wide
-    # one. What it is no longer is proportional to the structure: the same value
-    # with no check at all reaches a third of a gigabyte at twenty-five levels
-    # and ten gigabytes at thirty.
+    # each inner literal in full before the level above can check it, so the
+    # doubling shape measured about eight times a 4MB limit and four and a half
+    # times a 32MB one, falling as the limit rises, against twice the limit for
+    # the wide shape above. Numbers from this machine, and the two that were
+    # quoted here before both went stale, so treat them as an order of
+    # magnitude rather than a promise. What it is no longer is proportional to
+    # the structure: the same value with no check at all reaches a third of a
+    # gigabyte at twenty-five levels and ten gigabytes at thirty.
     def self._within_budget(literal, budget)
       return literal if budget.nil? || literal.bytesize <= budget
 
