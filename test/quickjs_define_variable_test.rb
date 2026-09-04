@@ -828,14 +828,50 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code('v')).must_equal 'fine'
   end
 
+  # Thread.handle_interrupt defers Timeout and Thread#raise. It does not defer
+  # a trap handler: that runs at the checkpoint regardless of the mask, and a
+  # raise inside it is an ordinary raise from that point. So the record goes in
+  # before the eval rather than after, and this is the case that says so.
+  # Deterministic, unlike the Timeout test below.
+  it "does not lose the record when a trap handler raises" do
+    shutdown = Class.new(StandardError)
+    previous = trap("USR2") { raise shutdown, "down" }
+    bricked = 0
+
+    begin
+      3.times do
+        vm = Quickjs::VM.new
+        value = Array.new(400_000) { |i| i }
+        pid = Process.pid
+        ::Thread.new { sleep 0.03; Process.kill("USR2", pid) }
+        begin
+          vm.define_let(:cfg, value)
+        rescue shutdown
+        end
+        next if vm.eval_code("typeof cfg") == "undefined"
+
+        begin
+          vm.define_let(:cfg, 1)
+        rescue Quickjs::SyntaxError
+          bricked += 1
+        rescue ArgumentError
+        end
+      end
+    ensure
+      trap("USR2", previous)
+    end
+
+    _(bricked).must_equal 0
+  end
   # eval_code is a C call, so a pending Timeout or Thread#raise is delivered at
   # the first Ruby checkpoint after it returns. That checkpoint used to be the
   # gap between a binding that now exists in the VM and the line that records
   # it, which is where such an exception lands rather than a narrow race.
   it "does not lose the record when a Timeout lands on the declaration" do
     bricked = 0
+    reached = 0
 
-    6.times do
+    12.times do
       vm = Quickjs::VM.new
       value = Array.new(120_000) { |i| i }
       begin
@@ -844,6 +880,7 @@ describe "values the serializer must not take at face value" do
       end
       next if vm.eval_code("typeof tv") == "undefined"
 
+      reached += 1
       begin
         vm.define_let(:tv, 1)
       rescue Quickjs::SyntaxError
@@ -853,6 +890,11 @@ describe "values the serializer must not take at face value" do
     end
 
     _(bricked).must_equal 0
+    # Whether the timeout lands inside the window depends on how fast the box
+    # is: too slow and it fires while Ruby is still building the literal, too
+    # fast and the define finishes first. Either way every iteration would skip
+    # and this would pass having tested nothing, so say when that happened.
+    skip "the timeout never landed in the window on this machine" if reached.zero?
   end
   # An interrupt lands after QuickJS has created the binding and before it is
   # initialized, so the name stays in the temporal dead zone for the life of an

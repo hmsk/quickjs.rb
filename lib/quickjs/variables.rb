@@ -90,34 +90,42 @@ module Quickjs
         # rewritten. Prepending to it would shift every line number in a
         # backtrace away from the code the caller actually wrote.
         #
-        # The declaration and the line that records it run with interrupts held
-        # off. eval_code is a C call, so a pending Timeout or Thread#raise
-        # cannot be delivered inside it: it arrives at the first Ruby
-        # checkpoint after it returns, which is the gap between a binding that
-        # now exists in the VM and the registry entry that says so. That is not
-        # a narrow race, it is where such an exception lands, and it left the
-        # name declared in JS, absent from the registry, and reporting a
-        # redeclaration nobody wrote for the life of the VM.
+        # The registry entry goes in before the eval rather than after it.
+        # Nothing can be relied on to run in between: eval_code is a C call, so
+        # an exception raised at the first Ruby checkpoint after it returns
+        # lands exactly in the gap between a binding the VM now has and the
+        # line that would say so. Timeout and Thread#raise are held off by the
+        # mask below, but a raise from a trap handler is not, and a server that
+        # does `trap("TERM") { raise Shutdown }` reaches it four times in five.
+        # That left the binding live and correct in JS, absent from the
+        # registry, and reported as a redeclaration nobody wrote.
         #
-        # Nothing in here was interruptible anyway, so holding them off costs
-        # the caller no responsiveness it had.
-        ::Thread.handle_interrupt(::Exception => :never) do
-          begin
+        # Recording first inverts which way the window can be wrong. What is
+        # left is a few bytecodes before the eval, where the record is ahead of
+        # a declaration that never happened, and the next define assigns to the
+        # name instead of declaring it. Wrong, but not permanently.
+        declared[key] = kind
+        begin
+          ::Thread.handle_interrupt(::Exception => :never) do
             eval_code("#{JS_KEYWORDS.fetch(kind)} #{key} = #{literal};")
-          rescue Quickjs::InterruptedError
-            # QuickJS created the binding and the interrupt landed before it was
-            # initialized, so a let or const name stays in the temporal dead zone
-            # for the life of the VM: reading it, assigning to it and redeclaring
-            # it all raise. Nothing here can undo that. Recording it is what stops
-            # the next define from reporting a redeclaration the caller never
-            # wrote, on a VM that is otherwise perfectly healthy.
-            #
-            # A var is left out, since redeclaring one is legal JS and works, so
-            # there is nothing to remember.
-            declared[key] = :interrupted unless kind == :var
-            raise
           end
-          declared[key] = kind
+        rescue Quickjs::InterruptedError
+          # QuickJS created the binding and the interrupt landed before it was
+          # initialized, so a let or const name stays in the temporal dead zone
+          # for the life of the VM: reading it, assigning to it and redeclaring
+          # it all raise. Nothing here can undo that, so the next define is told
+          # why rather than being left to report a redeclaration.
+          #
+          # A var is left alone, since redeclaring one is legal JS and works.
+          declared[key] = kind == :var ? :var : :interrupted
+          raise
+        rescue Quickjs::RuntimeError
+          # The eval itself failed, so no binding was made and the name is the
+          # caller's to use again. Only QuickJS errors mean that: anything else
+          # arriving here came from outside and says nothing about whether the
+          # declaration ran, so the entry recorded above stands.
+          declared.delete(key)
+          raise
         end
       elsif existing != kind
         raise ::ArgumentError,
