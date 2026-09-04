@@ -396,6 +396,32 @@ describe "a value that expands past what the VM could hold" do
     _(vm.eval_code("n")).must_equal Float::INFINITY
   end
 
+  # Cycle detection asks whether it has seen this object before, so it must
+  # not ask the object. Keying on value.object_id let a Hash subclass answer,
+  # in either direction.
+  it "does not call an acyclic structure circular because it says so" do
+    fixed = Class.new(Hash) { def object_id = 12_345 }
+    inner = fixed.new
+    inner["b"] = 1
+    outer = fixed.new
+    outer["a"] = inner
+    vm = Quickjs::VM.new
+
+    vm.define_let(:nested, outer)
+
+    _(vm.eval_code("JSON.stringify(nested)")).must_equal %q({"a":{"b":1}})
+  end
+
+  it "still catches a cycle that reports a new identity every time" do
+    shifty = Class.new(Hash) { def object_id = rand(1 << 62) }
+    cyclic = shifty.new
+    cyclic["self"] = cyclic
+    vm = Quickjs::VM.new
+
+    err = _ { vm.define_let(:c, cyclic) }.must_raise ArgumentError
+
+    _(err.message).must_match(/circular/)
+  end
   # Sharing is only a problem when it compounds. One object under two keys
   # is ordinary and stays allowed.
   it "leaves an ordinary shared reference alone" do

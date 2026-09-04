@@ -268,12 +268,18 @@ module Quickjs
     # `seen` is threaded through by identity: a structure that contains itself
     # would otherwise recurse until the stack gives out. Entries are removed on
     # the way out so a value appearing twice as siblings stays legal.
+    #
+    # compare_by_identity rather than keying on value.object_id, which the
+    # value answers for itself. A Hash subclass returning a constant object_id
+    # had every nested instance of it called circular; one returning a fresh
+    # id each time was never seen twice and walked until the stack guard
+    # caught it.
     def self._js_container_literal(value, seen, budget = nil)
-      seen ||= {}
-      if seen.key?(value.object_id)
+      seen ||= {}.compare_by_identity
+      if seen.key?(value)
         raise ::ArgumentError, "#{value.class} contains a circular reference and cannot be converted"
       end
-      seen[value.object_id] = true
+      seen[value] = true
 
       begin
         parts = []
@@ -294,7 +300,7 @@ module Quickjs
           "{#{parts.join(",")}}"
         end
       ensure
-        seen.delete(value.object_id)
+        seen.delete(value)
       end
     end
 
