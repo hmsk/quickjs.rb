@@ -91,46 +91,56 @@ module Quickjs
         raise ::ArgumentError,
           "#{key} is already defined as a #{existing}; it cannot be redefined as a #{kind}"
       elsif kind == :const
-        # The registry can be ahead of a declaration that never ran, so refusing
-        # on its word alone would brick a name the VM has never heard of. A
-        # strict self-assignment asks: a live const answers TypeError, and
-        # anything the VM does not have answers ReferenceError.
+        # The declaration itself is the question. Redeclaring a live const is a
+        # parse error, thrown before anything runs, so this asks without running
+        # any of the guest's code and without writing anything. Succeeding means
+        # the registry was ahead of a declaration that never happened, and the
+        # const the caller asked for is now there.
         begin
-          eval_code(%{(() => { "use strict"; #{key} = #{key}; })();})
-        rescue Quickjs::ReferenceError
           return _declare(declared, kind, key, literal)
-        rescue Quickjs::TypeError
+        rescue Quickjs::SyntaxError
+          # _declare took the record out on its way past. The const is real, so
+          # put it back and tell the caller what they did.
+          declared[key] = :const
           raise ::ArgumentError,
             "#{key} is already defined as a const; a const cannot be redefined"
         end
-        raise ::ArgumentError,
-          "#{key} is already defined as a const; a const cannot be redefined"
       else
-        # Redeclaring would be a SyntaxError for `let`, so re-defining an
-        # existing binding assigns to it instead. A `var` we declared
-        # ourselves can have been swapped for an accessor since, so the
-        # same check applies to the assignment.
+        # Redeclaring a live `let` is a parse error, so re-defining one assigns
+        # to it instead. A `var` we declared ourselves can have been swapped for
+        # an accessor since, so the same check applies to the assignment.
         _refuse_unusable_global(key) if kind == :var
-        # Strict mode, so an assignment to a name that is not declared is a
-        # ReferenceError rather than a new global. Sloppy mode would invent one,
-        # which is how a record that ran ahead of its declaration turned
-        # define_let into a define_var: the value landed on globalThis, which
-        # this method promises never happens for a let.
+
+        # The bare declaration first, which is what makes the assignment safe.
+        # Assigning to a name that has no binding writes `globalThis` instead:
+        # sloppy mode invents the property, and strict mode was no answer
+        # either, since it only refuses to invent one and will happily write a
+        # global that already exists. Either way a `let` ended up on
+        # `globalThis`, which is the one thing this form promises does not
+        # happen, and it stayed there for every later define.
         #
-        # It also gives the two answers this path needs. A const refuses with
-        # TypeError, and a name the VM does not have refuses with
-        # ReferenceError, which is the registry being ahead of a declaration
-        # that never ran. Declaring it now is the correction.
-        #
-        # The IIFE returns undefined, so nothing converts the assigned value
-        # back into Ruby. An assignment expression evaluates to what was
-        # assigned, and eval_code converts whatever the statement produced, so
-        # this used to rebuild the whole value as Ruby objects and drop them.
+        # `let #{key};` costs a parse and answers both cases. A live binding
+        # refuses it, at parse time, with nothing evaluated and nothing changed.
+        # An absent one gets the binding it was missing, which is the registry
+        # being ahead of a declaration that never ran. Both leave a lexical
+        # binding for the assignment to find, and a lexical binding shadows any
+        # `globalThis` property of the same name.
         begin
-          eval_code(%{(() => { "use strict"; #{key} = #{literal}; })();})
-        rescue Quickjs::ReferenceError
-          _declare(declared, kind, key, literal)
+          eval_code("#{JS_KEYWORDS.fetch(kind)} #{key};")
+        rescue Quickjs::SyntaxError
+          # Already declared, which is the ordinary case.
         end
+
+        # `void` so the statement has no completion value. An assignment
+        # expression evaluates to what was assigned, and eval_code converts
+        # whatever the statement produced back into Ruby, so this used to
+        # rebuild the whole value as Ruby objects and drop them.
+        #
+        # Sloppy, like the declaration above. Strict mode refuses `eval` and
+        # `arguments` as assignment targets, which the declaration accepts, so a
+        # strict assignment made those two names definable once and broken
+        # afterwards.
+        eval_code("void (#{key} = #{literal});")
       end
 
       # Only here, where a patched String#to_sym can decide nothing except what
@@ -153,20 +163,6 @@ module Quickjs
       @_js_source_budget = limit.is_a?(::Integer) && limit.positive? ? limit : nil
     end
 
-    # `var` is the only form that lands on `globalThis`, so it is the only one a
-    # property already sitting there can intercept. An accessor takes the value
-    # in its setter and hands JS back whatever its getter likes; a non-writable
-    # data property swallows the assignment silently, because a declaration eval
-    # is sloppy mode. Either way the caller was told the define succeeded when it
-    # did not happen.
-    #
-    # This refuses a global that is already unusable. It is not a security
-    # boundary, and is deliberately not described as one: it asks the VM through
-    # JS, and code that has already run there can replace
-    # Object.getOwnPropertyDescriptor as easily as it can install the accessor. A
-    # VM that has evaluated untrusted JavaScript owns its own environment, and
-    # there is no way to hand a value into it unobserved. Define before running
-    # code you do not control.
     # The declaration is its own eval so the caller's source is never rewritten.
     # Prepending to it would shift every line number in a backtrace away from the
     # code the caller actually wrote.
@@ -212,6 +208,20 @@ module Quickjs
       end
       key.to_sym
     end
+    # `var` is the only form that lands on `globalThis`, so it is the only one a
+    # property already sitting there can intercept. An accessor takes the value
+    # in its setter and hands JS back whatever its getter likes; a non-writable
+    # data property swallows the assignment silently, because a declaration eval
+    # is sloppy mode. Either way the caller was told the define succeeded when it
+    # did not happen.
+    #
+    # This refuses a global that is already unusable. It is not a security
+    # boundary, and is deliberately not described as one: it asks the VM through
+    # JS, and code that has already run there can replace
+    # Object.getOwnPropertyDescriptor as easily as it can install the accessor. A
+    # VM that has evaluated untrusted JavaScript owns its own environment, and
+    # there is no way to hand a value into it unobserved. Define before running
+    # code you do not control.
     def _refuse_unusable_global(key)
       state = eval_code(<<~JS)
         (() => {

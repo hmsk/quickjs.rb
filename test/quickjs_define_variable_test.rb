@@ -872,12 +872,77 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code('v')).must_equal 'fine'
   end
 
+  # Assigning to a name with no binding writes globalThis: sloppy mode invents
+  # the property, and strict mode is no answer either, since it only refuses to
+  # invent one and writes a global that already exists quite happily. The bare
+  # declaration before the assignment is what keeps a let off globalThis, and a
+  # guest global of the same name is the case that shows it.
+  it "keeps a let off globalThis even when the guest owns that name" do
+    vm = Quickjs::VM.new(timeout_msec: 60_000)
+    vm.eval_code("globalThis.owned = 'guest';")
+    vm.define_let(:warm, 1)
+    # The record has to be ahead of a declaration that never ran, since that is
+    # the only state in which the assignment meets a name with no binding. Same
+    # way the test above produces it.
+    busy = ::Thread.new do
+      vm.eval_code("let s = 0; for (let i = 0; i < 60000000; i++) s += i; s")
+    rescue StandardError
+      nil
+    end
+    sleep 0.05
+    begin
+      vm.define_let(:owned, 1)
+    rescue ThreadError
+    end
+    busy.join
+    skip "the define was not refused in the window" unless vm.eval_code("typeof owned") == "string"
+
+    vm.define_let(:owned, 42)
+
+    _(vm.eval_code("owned")).must_equal 42
+    _(vm.eval_code("globalThis.owned")).must_equal "guest"
+  end
+  # Strict mode refuses these two as assignment targets while the declaration,
+  # which is sloppy, accepts them. A strict assignment made them definable once
+  # and broken every time after.
+  it "can redefine a name JavaScript only restricts in strict mode" do
+    vm = Quickjs::VM.new
+
+    %i[eval arguments].each do |name|
+      vm.define_let(name, 1)
+      vm.define_let(name, 2)
+
+      _(vm.eval_code(name.to_s)).must_equal 2
+    end
+  end
+
+  # Asking whether a const is really there by assigning to it ran the guest's
+  # getter and setter, inside a call that is only meant to be asking. The
+  # declaration answers the same question at parse time, before anything runs.
+  it "asks about a const without running anything of the guest's" do
+    vm = Quickjs::VM.new
+    vm.eval_code(<<~JS)
+      globalThis.hits = [];
+      Object.defineProperty(globalThis, "acc", {
+        configurable: true,
+        get() { hits.push("get"); return 1 },
+        set(v) { hits.push("set") },
+      });
+    JS
+    vm.define_const(:acc, 1)
+
+    _ { vm.define_const(:acc, 2) }.must_raise ArgumentError
+
+    _(vm.eval_code("JSON.stringify(hits)")).must_equal "[]"
+  end
   # Recording before the eval inverts which way the window can be wrong, so it
   # needs its own case: a record standing for a declaration that never ran. The
   # VM refusing a second define, or quietly turning a let into a global, are
   # both worse than what the ordering was introduced to fix.
   it "corrects a record that ran ahead of its declaration" do
-    %i[const let var].each do |kind|
+    # const and let only. A var probes globalThis before it declares, and that
+    # probe is the eval that raises, so no record is ever recorded ahead.
+    %i[const let].each do |kind|
       vm = Quickjs::VM.new(timeout_msec: 60_000)
       vm.define_let(:warm, 1)
       busy = ::Thread.new do
@@ -898,7 +963,7 @@ describe "values the serializer must not take at face value" do
       _(vm.eval_code("cfg")).must_equal 2
       # A let or const that reached the VM through an assignment would have
       # been invented as a global by sloppy mode.
-      _(vm.eval_code("typeof globalThis.cfg")).must_equal(kind == :var ? "number" : "undefined")
+      _(vm.eval_code("typeof globalThis.cfg")).must_equal "undefined"
     end
   end
   # Thread.handle_interrupt defers Timeout and Thread#raise. It does not defer
