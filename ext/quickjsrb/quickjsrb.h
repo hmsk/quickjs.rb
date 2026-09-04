@@ -10,6 +10,7 @@
 #include "cutils.h"
 
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -47,6 +48,14 @@ typedef struct EvalTime
   struct timespec started_at;
 } EvalTime;
 
+static int64_t eval_elapsed_ms(const EvalTime *eval_time)
+{
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (int64_t)(now.tv_sec - eval_time->started_at.tv_sec) * 1000
+       + (now.tv_nsec - eval_time->started_at.tv_nsec) / 1000000;
+}
+
 typedef struct VMData
 {
   struct JSContext *context;
@@ -78,6 +87,11 @@ typedef struct VMData
   // Trip this flag so subsequent eval_code/call calls refuse cleanly with a
   // Ruby exception instead of risking a process crash.
   bool oom_poisoned;
+  // Whether interrupt_handler is currently installed. started_at belongs to
+  // whichever evaluation armed it, so without this the elapsed time is read
+  // off a stale clock — an unbudgeted polyfill load disarms deliberately and
+  // would otherwise look infinitely overdue.
+  bool eval_timer_armed;
   // Set by VM#dispose! to release the multi-MB JS heap before Ruby GC sees
   // enough pressure to collect the wrapper. Doubles as a double-free guard
   // for the dfree handler.
@@ -257,6 +271,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->preloaded_module_names = rb_hash_new();
   data->j_file_proxy_creator = JS_UNDEFINED;
   data->oom_poisoned = false;
+  data->eval_timer_armed = false;
   data->disposed = false;
   data->gvl_released_js = false;
   data->evals_in_flight = 0;

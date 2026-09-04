@@ -36,6 +36,7 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value);
 VALUE to_rb_value(JSContext *ctx, JSValue j_val);
 typedef struct ConvState ConvState;
 static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv);
+static VALUE raise_js_exception(JSContext *ctx);
 static VALUE vm_m_memoryUsage(VALUE r_self);
 static VALUE vm_m_runGC(VALUE r_self);
 static VALUE vm_m_memoryPoisoned(VALUE r_self);
@@ -170,6 +171,15 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
 
 VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
 {
+  // Most callers know they hold an Error before they ask, but the one that
+  // inspects a failed conversion's throw cannot: `throw null` and `throw 1` are
+  // both legal. Reading a property off a primitive throws a TypeError that
+  // nothing here consumes, which would leave the runtime carrying a pending
+  // exception into the next evaluation — the very thing to_r_json goes out of
+  // its way to clear. A non-object was never a bridged Ruby error anyway.
+  if (!JS_IsObject(j_error))
+    return Qnil;
+
   JSValue j_errorOriginalRubyObjectId = JS_GetPropertyStr(ctx, j_error, "rb_object_id");
   int errorOriginalRubyObjectId = 0;
   if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT)
@@ -434,6 +444,11 @@ static VALUE js_plain_object_to_rb(JSContext *ctx, JSValue j_val, ConvState *con
   for (uint32_t i = 0; i < plen; i++)
   {
     const char *key = conv_borrow_key(conv, depth, JS_AtomToCString(ctx, ptab[i].atom));
+    // An atom is already a string, so nothing guest-written runs here and only
+    // a failed allocation answers NULL. Reporting that as the out-of-memory it
+    // is beats handing the NULL to rb_str_new2 two lines down.
+    if (key == NULL)
+      return raise_js_exception(ctx);
     JSValue j_prop = conv_borrow(conv, depth, JS_GetProperty(ctx, j_val, ptab[i].atom));
     rb_hash_aset(r_hash, rb_str_new2(key), to_rb_value_inner(ctx, j_prop, conv));
     conv_return(conv, depth);
@@ -462,6 +477,396 @@ static VALUE conv_release(VALUE r_conv)
   if (conv->pinned != conv->pinned_inline)
     xfree(conv->pinned);
   return Qnil;
+}
+
+// The straight-line sibling of ConvFrame. A block that renders a diagnostic
+// takes several JS references at once — a name, a message, a stack — and keeps
+// every one of them live while it builds Ruby objects from them, so there is
+// nothing to hand back between iterations and no recursion to unwind. It gives
+// each reference to a hold as it takes it, and the ensure that owns the hold
+// releases the set.
+//
+// Raising past the frees is not hypothetical in these blocks. They run while an
+// error is already being handled, so their Ruby allocations are the ones most
+// likely to be short of memory, and every one of them can longjmp.
+#define JS_HOLD_INLINE 16
+
+typedef struct
+{
+  enum
+  {
+    HELD_VALUE,   // JSValue, released with JS_FreeValue
+    HELD_CSTRING, // JS_ToCString result, released with JS_FreeCString
+    HELD_BUFFER   // xmalloc'd, released with xfree
+  } kind;
+  union
+  {
+    JSValue j_val;
+    const char *str;
+    char *buf;
+  } as;
+} JsHeld;
+
+typedef struct
+{
+  JSContext *ctx;
+  JsHeld *held;
+  long count;
+  long capacity;
+  // Set when a string conversion was substituted away because the deadline
+  // fired inside it. Sticky for the life of the hold rather than per-read: the
+  // fact it records is about the evaluation, not about one property.
+  bool interrupted;
+  JsHeld held_inline[JS_HOLD_INLINE];
+} JsHold;
+
+static void js_hold_init(JsHold *hold, JSContext *ctx)
+{
+  hold->ctx = ctx;
+  hold->held = hold->held_inline;
+  hold->count = 0;
+  hold->capacity = JS_HOLD_INLINE;
+  hold->interrupted = false;
+}
+
+// The deepest block below holds eight references at once — an exception, three
+// property values, their three strings and a formatted headline — so the growth
+// path is a backstop with room to spare rather than something a site relies on.
+static JsHeld *js_hold_slot(JsHold *hold)
+{
+  if (hold->count == hold->capacity)
+  {
+    long capacity = hold->capacity * 2;
+    JsHeld *held = xmalloc2(capacity, sizeof(JsHeld));
+    JsHeld *previous = hold->held;
+    memcpy(held, previous, hold->count * sizeof(JsHeld));
+    hold->held = held;
+    hold->capacity = capacity;
+    if (previous != hold->held_inline)
+      xfree(previous);
+  }
+  return &hold->held[hold->count++];
+}
+
+static JSValue js_hold_value(JsHold *hold, JSValue j_val)
+{
+  JsHeld *slot = js_hold_slot(hold);
+  slot->kind = HELD_VALUE;
+  slot->as.j_val = j_val;
+  return j_val;
+}
+
+static const char *js_hold_own_cstring(JsHold *hold, const char *str)
+{
+  JsHeld *slot = js_hold_slot(hold);
+  slot->kind = HELD_CSTRING;
+  slot->as.str = str;
+  return str;
+}
+
+// Whether the evaluation has run past the budget it was armed with. QuickJS
+// throws the interrupt as InternalError("interrupted"), but recognising it by
+// those strings would mean two things this cannot afford: they are strings any
+// guest can write, so a script could relabel its own error as a timeout on a VM
+// whose budget is nowhere near spent, and reading them off the thrown object
+// runs that object's getters — which can reach a Ruby bridge, leaving this with
+// an exception it has nowhere to put and would pin in alive_objects for the
+// life of the VM. The clock answers the same question and nothing guest-written
+// runs to answer it.
+static bool eval_budget_lapsed(VMData *data)
+{
+  return data->eval_timer_armed && eval_elapsed_ms(data->eval_time) >= data->eval_time->limit_ms;
+}
+
+// JS_ToCString converts through the value's own toString, so it answers NULL
+// whenever that throws — a getter that raises, a Symbol, a Proxy that refuses —
+// and not only when it runs out of memory. This keeps the NULL, for the two
+// readers that render a value's absence differently from any string that could
+// stand in for it.
+static const char *js_hold_cstring_or_null(JsHold *hold, JSValue j_val)
+{
+  const char *str = JS_ToCString(hold->ctx, j_val);
+  if (str != NULL)
+    return js_hold_own_cstring(hold, str);
+
+  // The conversion threw, and what was thrown decides who gets told. A throw
+  // carrying a Ruby exception is a bridge reporting a host failure — the user's
+  // block raising, or the ThreadError a dispose! mid-conversion owes its caller
+  // — and it has to come back out. find_ruby_error is also the only thing that
+  // takes the exception out of alive_objects, so discarding the throw instead
+  // would pin it there for the life of the VM at a rate the guest picks.
+  //
+  // Anything else is the value simply having no string form — a Symbol, a
+  // toString written to throw — and the caller substitutes for it. What is worth
+  // remembering is not the throw but the clock: a read the budget outlived says
+  // nothing about the value and everything about the evaluation.
+  JSValue j_pending = js_hold_value(hold, JS_GetException(hold->ctx));
+  VALUE r_ruby_error = find_ruby_error(hold->ctx, j_pending);
+  if (!NIL_P(r_ruby_error))
+    rb_exc_raise(r_ruby_error);
+
+  if (eval_budget_lapsed(JS_GetContextOpaque(hold->ctx)))
+    hold->interrupted = true;
+
+  return NULL;
+}
+
+// Callers get a string they can always print, compare and hand to Ruby. The
+// fallback is a literal and so is deliberately not held.
+static const char *js_hold_cstring(JsHold *hold, JSValue j_val, const char *fallback)
+{
+  const char *str = js_hold_cstring_or_null(hold, j_val);
+  return str != NULL ? str : fallback;
+}
+
+// snprintf reports the length it would have written, and a negative return
+// means the format itself failed — which, handed to a malloc as `length + 1`,
+// asks for a block the size of the address space. xmalloc raises rather than
+// answering NULL, so the buffer is either usable or never exists.
+static char *js_hold_format(JsHold *hold, const char *format, ...) __attribute__((format(printf, 2, 3)));
+
+static char *js_hold_format(JsHold *hold, const char *format, ...)
+{
+  va_list args;
+  va_start(args, format);
+  int length = vsnprintf(NULL, 0, format, args);
+  va_end(args);
+  if (length < 0)
+    length = 0;
+
+  // The slot is filled in before the allocation that could raise past it, so
+  // an out-of-memory here leaves the hold holding a NULL rather than a kind it
+  // never got round to setting.
+  JsHeld *slot = js_hold_slot(hold);
+  slot->kind = HELD_BUFFER;
+  slot->as.buf = NULL;
+  char *buf = slot->as.buf = xmalloc(length + 1);
+
+  va_start(args, format);
+  vsnprintf(buf, length + 1, format, args);
+  va_end(args);
+  return buf;
+}
+
+// Leaves the hold empty and usable, so a block that finishes with one set and
+// starts another can call this between them, and the ensure that calls it again
+// afterwards finds nothing left to do.
+static VALUE js_hold_release(VALUE r_hold)
+{
+  JsHold *hold = (JsHold *)r_hold;
+  // Newest first, mirroring the order the block would have released them.
+  while (hold->count > 0)
+  {
+    JsHeld *slot = &hold->held[--hold->count];
+    switch (slot->kind)
+    {
+    case HELD_VALUE:
+      JS_FreeValue(hold->ctx, slot->as.j_val);
+      break;
+    case HELD_CSTRING:
+      JS_FreeCString(hold->ctx, slot->as.str);
+      break;
+    case HELD_BUFFER:
+      xfree(slot->as.buf);
+      break;
+    }
+  }
+  if (hold->held != hold->held_inline)
+    xfree(hold->held);
+  hold->held = hold->held_inline;
+  hold->capacity = JS_HOLD_INLINE;
+  return Qnil;
+}
+
+// Stands in wherever a value refused to convert to a string, so the diagnostic
+// says so rather than printing "(null)" or dereferencing it.
+#define QUICKJSRB_UNRENDERABLE "(unrenderable value)"
+
+// A budget that lapsed inside one of the reads outranks whatever the script was
+// in the middle of saying. Rendering happens after the evaluation is over, so
+// unlike the log path there is no next interrupt check to report it again: let
+// the substituted read stand on its own and the caller is handed a plain
+// RuntimeError for a run that ran out of time.
+static VALUE r_interrupted_error(void)
+{
+  VALUE r_message = rb_str_new2("Code evaluation is interrupted by the timeout or something");
+  return rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR), rb_intern("new"), 2, r_message, Qnil);
+}
+
+static void raise_if_interrupted(JsHold *hold)
+{
+  if (hold->interrupted)
+    rb_exc_raise(r_interrupted_error());
+}
+
+struct js_exception_render
+{
+  JSContext *ctx;
+  // Whether the exception is the evaluation's own result. Only then is it news:
+  // it gets the "Uncaught" row the console would have printed, and an
+  // out-of-memory in it condemns the VM. An exception raised part-way through
+  // converting a value that did return is on its way to the caller as that
+  // call's error — telling the log listener it went uncaught would be the
+  // opposite of what happened, and the heap it was found on is the heap of a
+  // run that finished.
+  bool uncaught;
+  JsHold hold;
+};
+
+static VALUE js_exception_render_run(VALUE r_render)
+{
+  struct js_exception_render *render = (struct js_exception_render *)r_render;
+  JSContext *ctx = render->ctx;
+  JsHold *hold = &render->hold;
+  VMData *data = JS_GetContextOpaque(ctx);
+
+  JSValue j_exceptionVal = js_hold_value(hold, JS_GetException(ctx));
+
+  if (!JS_IsError(ctx, j_exceptionVal))
+  {
+    // A thrown string, number or bare object: there is no name or stack to ask
+    // for, only what the value itself says.
+    const char *errorMessage = js_hold_cstring(hold, j_exceptionVal, QUICKJSRB_UNRENDERABLE);
+    if (render->uncaught)
+    {
+      VALUE r_headline = rb_str_new2(js_hold_format(hold, "Uncaught '%s'", errorMessage));
+      dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
+    }
+    raise_if_interrupted(hold);
+
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, rb_str_new2(errorMessage), Qnil));
+  }
+
+  VALUE r_maybe_ruby_error = find_ruby_error(ctx, j_exceptionVal);
+  if (!NIL_P(r_maybe_ruby_error))
+    rb_exc_raise(r_maybe_ruby_error);
+  // will support other errors like just returning an instance of Error
+
+  JSValue j_errorClassName = js_hold_value(hold, JS_GetPropertyStr(ctx, j_exceptionVal, "name"));
+  const char *readClassName = js_hold_cstring_or_null(hold, j_errorClassName);
+  // "Error" is a workable default for picking a Ruby class, which has to resolve
+  // to something. It is not an answer to what the JS side called this, so it
+  // stops here and js_name says nothing instead of naming a class nobody named.
+  const char *errorClassName = readClassName != NULL ? readClassName : "Error";
+  VALUE r_error_name = readClassName != NULL ? rb_str_new2(readClassName) : Qnil;
+
+  JSValue j_errorClassMessage = js_hold_value(hold, JS_GetPropertyStr(ctx, j_exceptionVal, "message"));
+  const char *errorClassMessage = js_hold_cstring(hold, j_errorClassMessage, QUICKJSRB_UNRENDERABLE);
+
+  JSValue j_stackTrace = js_hold_value(hold, JS_GetPropertyStr(ctx, j_exceptionVal, "stack"));
+  // Empty rather than a placeholder: this one becomes a Ruby backtrace, and an
+  // apology reads as a frame there.
+  const char *stackTrace = js_hold_cstring(hold, j_stackTrace, "");
+
+  if (render->uncaught)
+  {
+    VALUE r_headline = rb_str_new2(js_hold_format(hold, "Uncaught %s: %s\n%s", errorClassName, errorClassMessage, stackTrace));
+    dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
+  }
+  raise_if_interrupted(hold);
+
+  VALUE r_error_class, r_error_message = rb_str_new2(errorClassMessage);
+  VALUE r_backtrace = r_backtrace_from_js_stack(stackTrace);
+  if (is_native_error_name(errorClassName))
+  {
+    r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
+  }
+  else if (strcmp(errorClassName, "InternalError") == 0 && strstr(errorClassMessage, "interrupted") != NULL)
+  {
+    r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR);
+    r_error_message = rb_str_new2("Code evaluation is interrupted by the timeout or something");
+  }
+  else if (strcmp(errorClassName, "Quickjs::InterruptedError") == 0)
+  {
+    r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR);
+  }
+  else if (strcmp(errorClassName, "InternalError") == 0 && strstr(errorClassMessage, "out of memory") != NULL)
+  {
+    // Once OOM has fired, the QuickJS heap is in a state where another
+    // throw inside the parser-error path can corrupt the shape table and
+    // segfault. Mark the VM so further eval/call calls refuse cleanly.
+    //
+    // This is the one thing the uncaught path does not keep to itself. Running
+    // out of memory is a fact about the heap, not about who was asking: a
+    // getter on an object the evaluation successfully returned allocates on the
+    // same heap as the evaluation did, and `({get x() { return new
+    // Array(2_000_000).fill(0) }})` reaches OOM here with the result already in
+    // hand. Both strings are guest-writable, so a forged InternalError condemns
+    // the VM too — but that is reachable from any getter and always has been,
+    // and refusing to latch here would trade a real guard for no ground.
+    data->oom_poisoned = true;
+    r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR);
+  }
+  else
+  {
+    r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR);
+  }
+
+  VALUE r_exc = rb_funcall(r_error_class, rb_intern("new"), 2, r_error_message, r_error_name);
+  if (!NIL_P(r_backtrace))
+    rb_funcall(r_exc, rb_intern("set_backtrace"), 1, r_backtrace);
+  rb_exc_raise(r_exc);
+  return Qnil; // rb_exc_raise does not return
+}
+
+// Renders the context's pending exception into a Ruby one and raises it. Never
+// returns, so the hold is released by the ensure on the way past.
+static VALUE raise_rendered_js_exception(JSContext *ctx, bool uncaught)
+{
+  struct js_exception_render render;
+  render.ctx = ctx;
+  render.uncaught = uncaught;
+  js_hold_init(&render.hold, ctx);
+  return rb_ensure(js_exception_render_run, (VALUE)&render, js_hold_release, (VALUE)&render.hold);
+}
+
+// The exception nothing caught: it is the evaluation's whole result.
+static VALUE raise_uncaught_js_exception(JSContext *ctx)
+{
+  return raise_rendered_js_exception(ctx, true);
+}
+
+// The exception a conversion ran into on a value that did return — a getter, a
+// toString, an atom that would not allocate. The caller of eval_code hears it
+// as that call's error and nobody else needs telling.
+static VALUE raise_js_exception(JSContext *ctx)
+{
+  return raise_rendered_js_exception(ctx, false);
+}
+
+struct js_bigint_conversion
+{
+  JSContext *ctx;
+  JSValue j_val;
+  JsHold hold;
+};
+
+static VALUE js_bigint_conversion_run(VALUE r_conversion)
+{
+  struct js_bigint_conversion *conversion = (struct js_bigint_conversion *)r_conversion;
+  JSContext *ctx = conversion->ctx;
+  JsHold *hold = &conversion->hold;
+
+  // Unlike the diagnostic blocks, this one is converting a value and has
+  // somewhere to put a throw: a BigInt whose toString raises owes the caller
+  // that error, not a digit string invented to stand in for it.
+  //
+  // The read is checked before the call, not after: calling a value that is
+  // JS_EXCEPTION throws "not a function" over the top of the error that is
+  // being reported, so testing afterwards reports the wrong one.
+  JSValue j_toStringFunc = js_hold_value(hold, JS_GetPropertyStr(ctx, conversion->j_val, "toString"));
+  if (JS_IsException(j_toStringFunc))
+    return raise_js_exception(ctx);
+
+  JSValue j_strigified = js_hold_value(hold, JS_Call(ctx, j_toStringFunc, conversion->j_val, 0, NULL));
+  if (JS_IsException(j_strigified))
+    return raise_js_exception(ctx);
+
+  const char *msg = JS_ToCString(ctx, j_strigified);
+  if (msg == NULL)
+    return raise_js_exception(ctx);
+
+  return rb_funcall(rb_str_new2(js_hold_own_cstring(hold, msg)), rb_intern("to_i"), 0);
 }
 
 VALUE to_rb_value(JSContext *ctx, JSValue j_val)
@@ -530,10 +935,22 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
       // raises, so the frame owns the function across the call.
       long depth = conv_frame_push(conv);
       JSValue j_toStringFunc = conv_borrow(conv, depth, JS_GetPropertyStr(ctx, j_val, "toString"));
+      // Checked before the call for the same reason as the BigInt branch:
+      // calling JS_EXCEPTION throws "not a function" over the real error.
+      if (JS_IsException(j_toStringFunc))
+        return raise_js_exception(ctx);
       JSValue j_source = JS_Call(ctx, j_toStringFunc, j_val, 0, NULL);
       conv_return(conv, depth);
       conv_borrow(conv, depth, j_source);
-      const char *source = conv_borrow_key(conv, depth, JS_ToCString(ctx, j_source));
+      const char *source = JS_ToCString(ctx, j_source);
+      // A toString that threw owes the caller that error rather than a
+      // Quickjs::Function built from nothing — and when the throw came from a
+      // bridge, it is the Ruby exception the bridge raised, which is how a
+      // dispose! reached from a toString gets to report ThreadError. The frame
+      // still holds j_source, so conv_release hands it back on the way out.
+      if (source == NULL)
+        return raise_js_exception(ctx);
+      conv_borrow_key(conv, depth, source);
       VALUE r_source = rb_str_new2(source);
       conv_frame_pop(conv);
       return rb_funcall(rb_path2class("Quickjs::Function"), rb_intern("new"), 1, r_source);
@@ -648,111 +1065,18 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
   case JS_TAG_UNDEFINED:
     return QUICKJSRB_SYM(undefinedId);
   case JS_TAG_EXCEPTION:
-  {
-    JSValue j_exceptionVal = JS_GetException(ctx);
-    if (JS_IsError(ctx, j_exceptionVal))
-    {
-      VALUE r_maybe_ruby_error = find_ruby_error(ctx, j_exceptionVal);
-      if (!NIL_P(r_maybe_ruby_error))
-      {
-        JS_FreeValue(ctx, j_exceptionVal);
-        rb_exc_raise(r_maybe_ruby_error);
-        return Qnil;
-      }
-
-      JSValue j_errorClassName = JS_GetPropertyStr(ctx, j_exceptionVal, "name");
-      const char *errorClassName = JS_ToCString(ctx, j_errorClassName);
-
-      JSValue j_errorClassMessage = JS_GetPropertyStr(ctx, j_exceptionVal, "message");
-      const char *errorClassMessage = JS_ToCString(ctx, j_errorClassMessage);
-
-      JSValue j_stackTrace = JS_GetPropertyStr(ctx, j_exceptionVal, "stack");
-      const char *stackTrace = JS_ToCString(ctx, j_stackTrace);
-      const char *headlineTemplate = "Uncaught %s: %s\n%s";
-      int length = snprintf(NULL, 0, headlineTemplate, errorClassName, errorClassMessage, stackTrace);
-      char *headline = (char *)malloc(length + 1);
-      snprintf(headline, length + 1, headlineTemplate, errorClassName, errorClassMessage, stackTrace);
-
-      VMData *data = JS_GetContextOpaque(ctx);
-      VALUE r_headline = rb_str_new2(headline);
-      dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
-      free(headline);
-
-      VALUE r_error_class, r_error_message = rb_str_new2(errorClassMessage);
-      VALUE r_error_name = rb_str_new2(errorClassName);
-      VALUE r_backtrace = r_backtrace_from_js_stack(stackTrace);
-      if (is_native_error_name(errorClassName))
-      {
-        r_error_class = QUICKJSRB_ERROR_FOR(errorClassName);
-      }
-      else if (strcmp(errorClassName, "InternalError") == 0 && strstr(errorClassMessage, "interrupted") != NULL)
-      {
-        r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR);
-        r_error_message = rb_str_new2("Code evaluation is interrupted by the timeout or something");
-      }
-      else if (strcmp(errorClassName, "Quickjs::InterruptedError") == 0)
-      {
-        r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR);
-      }
-      else if (strcmp(errorClassName, "InternalError") == 0 && strstr(errorClassMessage, "out of memory") != NULL)
-      {
-        // Once OOM has fired, the QuickJS heap is in a state where another
-        // throw inside the parser-error path can corrupt the shape table and
-        // segfault. Mark the VM so further eval/call calls refuse cleanly.
-        data->oom_poisoned = true;
-        r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR);
-      }
-      else
-      {
-        r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR);
-      }
-      JS_FreeValue(ctx, j_errorClassMessage);
-      JS_FreeValue(ctx, j_errorClassName);
-      JS_FreeValue(ctx, j_stackTrace);
-      JS_FreeCString(ctx, stackTrace);
-      JS_FreeCString(ctx, errorClassName);
-      JS_FreeCString(ctx, errorClassMessage);
-      JS_FreeValue(ctx, j_exceptionVal);
-
-      VALUE r_exc = rb_funcall(r_error_class, rb_intern("new"), 2, r_error_message, r_error_name);
-      if (!NIL_P(r_backtrace))
-        rb_funcall(r_exc, rb_intern("set_backtrace"), 1, r_backtrace);
-      rb_exc_raise(r_exc);
-    }
-    else // exception without Error object
-    {
-      const char *errorMessage = JS_ToCString(ctx, j_exceptionVal);
-      const char *headlineTemplate = "Uncaught '%s'";
-      int length = snprintf(NULL, 0, headlineTemplate, errorMessage);
-      char *headline = (char *)malloc(length + 1);
-      snprintf(headline, length + 1, headlineTemplate, errorMessage);
-
-      VMData *data = JS_GetContextOpaque(ctx);
-      VALUE r_headline = rb_str_new2(headline);
-      dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
-
-      free(headline);
-
-      VALUE r_error_message = rb_sprintf("%s", errorMessage);
-      JS_FreeCString(ctx, errorMessage);
-      JS_FreeValue(ctx, j_exceptionVal);
-      rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
-    }
-    return Qnil;
-  }
+    // conv is NULL only for the value to_rb_value was handed, which is the
+    // evaluation's result; anything reached through a property read is part-way
+    // through a walk and belongs to the caller, not to the console.
+    return conv == NULL ? raise_uncaught_js_exception(ctx) : raise_js_exception(ctx);
   case JS_TAG_BIG_INT:
   case JS_TAG_SHORT_BIG_INT:
   {
-    JSValue j_toStringFunc = JS_GetPropertyStr(ctx, j_val, "toString");
-    JSValue j_strigified = JS_Call(ctx, j_toStringFunc, j_val, 0, NULL);
-
-    const char *msg = JS_ToCString(ctx, j_strigified);
-    VALUE r_str = rb_str_new2(msg);
-    JS_FreeValue(ctx, j_toStringFunc);
-    JS_FreeValue(ctx, j_strigified);
-    JS_FreeCString(ctx, msg);
-
-    return rb_funcall(r_str, rb_intern("to_i"), 0);
+    struct js_bigint_conversion conversion;
+    conversion.ctx = ctx;
+    conversion.j_val = j_val;
+    js_hold_init(&conversion.hold, ctx);
+    return rb_ensure(js_bigint_conversion_run, (VALUE)&conversion, js_hold_release, (VALUE)&conversion.hold);
   }
   case JS_TAG_SYMBOL:
   default:
@@ -915,46 +1239,80 @@ static void register_module_loader_funcs(VMData *data)
     JS_SetModuleLoaderFunc2(runtime, quickjsrb_module_normalize, quickjsrb_module_loader, js_module_check_attributes, NULL);
 }
 
-static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason)
+struct js_reason_conversion
 {
+  JSContext *ctx;
+  JSValueConst j_reason;
+  JsHold hold;
+};
+
+static VALUE js_reason_conversion_run(VALUE r_conversion)
+{
+  struct js_reason_conversion *conversion = (struct js_reason_conversion *)r_conversion;
+  JSContext *ctx = conversion->ctx;
+  JSValueConst j_reason = conversion->j_reason;
+  JsHold *hold = &conversion->hold;
+
   if (JS_IsError(ctx, j_reason))
   {
     VALUE r_maybe_ruby_error = find_ruby_error(ctx, j_reason);
     if (!NIL_P(r_maybe_ruby_error))
       return r_maybe_ruby_error;
 
-    JSValue j_name = JS_GetPropertyStr(ctx, j_reason, "name");
-    JSValue j_message = JS_GetPropertyStr(ctx, j_reason, "message");
-    JSValue j_stack = JS_GetPropertyStr(ctx, j_reason, "stack");
-    const char *name = JS_ToCString(ctx, j_name);
-    const char *message = JS_ToCString(ctx, j_message);
-    const char *stack = JS_ToCString(ctx, j_stack);
+    JSValue j_name = js_hold_value(hold, JS_GetPropertyStr(ctx, j_reason, "name"));
+    JSValue j_message = js_hold_value(hold, JS_GetPropertyStr(ctx, j_reason, "message"));
+    JSValue j_stack = js_hold_value(hold, JS_GetPropertyStr(ctx, j_reason, "stack"));
+    const char *readName = js_hold_cstring_or_null(hold, j_name);
+    const char *name = readName != NULL ? readName : "Error";
+    const char *message = js_hold_cstring(hold, j_message, QUICKJSRB_UNRENDERABLE);
+    const char *stack = js_hold_cstring(hold, j_stack, "");
 
     VALUE r_class = is_native_error_name(name)
                         ? QUICKJSRB_ERROR_FOR(name)
                         : QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR);
+    // js_name is left nil rather than given the default the class selection
+    // needed, for the reason the renderer spells out: a name nobody could read
+    // is not "Error".
     VALUE r_exc = rb_funcall(r_class, rb_intern("new"), 2,
-                             rb_str_new2(message), rb_str_new2(name));
+                             rb_str_new2(message), readName != NULL ? rb_str_new2(readName) : Qnil);
     VALUE r_backtrace = r_backtrace_from_js_stack(stack);
     if (!NIL_P(r_backtrace))
       rb_funcall(r_exc, rb_intern("set_backtrace"), 1, r_backtrace);
 
-    JS_FreeCString(ctx, name);
-    JS_FreeCString(ctx, message);
-    if (stack)
-      JS_FreeCString(ctx, stack);
-    JS_FreeValue(ctx, j_name);
-    JS_FreeValue(ctx, j_message);
-    JS_FreeValue(ctx, j_stack);
     return r_exc;
   }
 
-  const char *str = JS_ToCString(ctx, j_reason);
-  VALUE r_exc = rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"),
-                           2, rb_str_new2(str ? str : "(non-stringifiable rejection)"), Qnil);
-  if (str)
-    JS_FreeCString(ctx, str);
-  return r_exc;
+  const char *str = js_hold_cstring(hold, j_reason, "(non-stringifiable rejection)");
+  return rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"),
+                    2, rb_str_new2(str), Qnil);
+}
+
+// The reason belongs to the tracker, which is a QuickJS host callback, so this
+// never raises out: the caller runs it under rb_protect and the hold gives the
+// references back on the way past.
+static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason)
+{
+  struct js_reason_conversion conversion;
+  conversion.ctx = ctx;
+  conversion.j_reason = j_reason;
+  js_hold_init(&conversion.hold, ctx);
+  VALUE r_exc = rb_ensure(js_reason_conversion_run, (VALUE)&conversion, js_hold_release, (VALUE)&conversion.hold);
+  // The flag outlives the release, which is why it is sticky: a budget that
+  // lapsed while the reason was read is what the listener hears about, since
+  // the tracker cannot raise out and there may be no next interrupt check.
+  return conversion.hold.interrupted ? r_interrupted_error() : r_exc;
+}
+
+struct rejection_reason_args
+{
+  JSContext *ctx;
+  JSValueConst j_reason;
+};
+
+static VALUE r_rejection_reason(VALUE r_args_val)
+{
+  struct rejection_reason_args *args = (struct rejection_reason_args *)r_args_val;
+  return r_exception_from_js_reason(args->ctx, args->j_reason);
 }
 
 struct rejection_call_args
@@ -980,14 +1338,35 @@ static void quickjsrb_promise_rejection_tracker(
   if (NIL_P(data->on_unhandled_rejection))
     return;
 
-  VALUE r_reason = r_exception_from_js_reason(ctx, reason);
-  struct rejection_call_args args = {data->on_unhandled_rejection, r_reason};
+  // Protected on its own, and not merely as the first statement of the call
+  // below, because the two failures are not the same failure. The reason is a
+  // guest object whose own getters run while it converts, so a bridge can raise
+  // here — and a host error found while reading one property of a rejection
+  // that was otherwise perfectly reportable is something the listener wants to
+  // hear, not grounds for dropping the rejection. It becomes the reason.
+  struct rejection_reason_args reason_args = {ctx, reason};
   int state;
-  rb_protect(r_rejection_call, (VALUE)&args, &state);
+  VALUE r_reason = rb_protect(r_rejection_reason, (VALUE)&reason_args, &state);
+  if (state)
+  {
+    // rb_protect reports every non-local exit, not only a raise, and a Ruby
+    // `throw` leaves internal throw data in errinfo rather than an exception.
+    // There is nothing to hand a listener there and nowhere to re-raise it
+    // from a host callback, so that one keeps going on the floor.
+    VALUE r_raised = rb_errinfo();
+    rb_set_errinfo(Qnil);
+    if (!rb_obj_is_kind_of(r_raised, rb_eException))
+      return;
+    r_reason = r_raised;
+  }
+
+  struct rejection_call_args call_args = {data->on_unhandled_rejection, r_reason};
+  rb_protect(r_rejection_call, (VALUE)&call_args, &state);
   if (state)
   {
     // Longjmping out of a QuickJS host callback corrupts the runtime, so
-    // a raise inside the user's tracker has to be dropped on the floor.
+    // a raise inside the user's tracker has to be dropped on the floor. There
+    // is nowhere left to put this one: the listener was the place.
     rb_set_errinfo(Qnil);
   }
 }
@@ -1154,19 +1533,23 @@ struct quickjsrb_log_call
   JSValueConst *argv;
   const char *severity;
   JSValue result;
+  // Set when the budget lapsed inside one of the logged values; read back on
+  // the QuickJS side of the protect, where it can be thrown as the interrupt.
+  bool interrupted;
 };
 
-// Runs under rb_protect (see js_quickjsrb_log_inner) so no Ruby raise —
-// to_rb_value on an unconvertible argument (e.g. a Promise nested inside an
-// array), allocation failure, or the user's on_log listener — can longjmp
-// through QuickJS's interpreter frames, or, on the pure path (where this
-// runs inside rb_thread_call_with_gvl), across the rb_thread_call_without_gvl
-// region — which would leak its buffers and leave gvl_released_js stuck.
-static VALUE r_build_and_dispatch_log(VALUE r_call)
+struct log_row_build
 {
-  struct quickjsrb_log_call *call = (struct quickjsrb_log_call *)r_call;
+  struct quickjsrb_log_call *call;
+  JsHold hold;
+};
+
+static VALUE r_build_log_row(VALUE r_build)
+{
+  struct log_row_build *build = (struct log_row_build *)r_build;
+  struct quickjsrb_log_call *call = build->call;
   JSContext *ctx = call->ctx;
-  VMData *data = JS_GetContextOpaque(ctx);
+  JsHold *hold = &build->hold;
   VALUE r_row = rb_ary_new();
   for (int i = 0; i < call->argc; i++)
   {
@@ -1178,40 +1561,57 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
     }
     else if (JS_IsError(ctx, j_logged))
     {
-      JSValue j_errorClassName = JS_GetPropertyStr(ctx, j_logged, "name");
-      const char *errorClassName = JS_ToCString(ctx, j_errorClassName);
-      JS_FreeValue(ctx, j_errorClassName);
+      JSValue j_errorClassName = js_hold_value(hold, JS_GetPropertyStr(ctx, j_logged, "name"));
+      const char *errorClassName = js_hold_cstring(hold, j_errorClassName, "Error");
 
-      JSValue j_errorClassMessage = JS_GetPropertyStr(ctx, j_logged, "message");
-      const char *errorClassMessage = JS_ToCString(ctx, j_errorClassMessage);
-      JS_FreeValue(ctx, j_errorClassMessage);
+      JSValue j_errorClassMessage = js_hold_value(hold, JS_GetPropertyStr(ctx, j_logged, "message"));
+      const char *errorClassMessage = js_hold_cstring(hold, j_errorClassMessage, QUICKJSRB_UNRENDERABLE);
 
-      JSValue j_stackTrace = JS_GetPropertyStr(ctx, j_logged, "stack");
-      const char *stackTrace = JS_ToCString(ctx, j_stackTrace);
-      JS_FreeValue(ctx, j_stackTrace);
+      JSValue j_stackTrace = js_hold_value(hold, JS_GetPropertyStr(ctx, j_logged, "stack"));
+      const char *stackTrace = js_hold_cstring(hold, j_stackTrace, "");
 
-      const char *headlineTemplate = "%s: %s\n%s";
-      int length = snprintf(NULL, 0, headlineTemplate, errorClassName, errorClassMessage, stackTrace);
-      char *headline = (char *)malloc(length + 1);
-      snprintf(headline, length + 1, headlineTemplate, errorClassName, errorClassMessage, stackTrace);
-      JS_FreeCString(ctx, errorClassName);
-      JS_FreeCString(ctx, errorClassMessage);
-      JS_FreeCString(ctx, stackTrace);
-
-      r_raw = rb_str_new2(headline);
-      free(headline);
+      r_raw = rb_str_new2(js_hold_format(hold, "%s: %s\n%s", errorClassName, errorClassMessage, stackTrace));
     }
     else
     {
       r_raw = to_rb_value(ctx, j_logged);
     }
-    const char *body = JS_ToCString(ctx, j_logged);
-    VALUE r_c = rb_str_new2(body);
-    JS_FreeCString(ctx, body);
+    VALUE r_c = rb_str_new2(js_hold_cstring(hold, j_logged, QUICKJSRB_UNRENDERABLE));
 
     rb_ary_push(r_row, r_log_body_new(r_raw, r_c));
+
+    // Each argument's references go back as its entry is finished, the way the
+    // block released them one at a time before; the ensure covers a raise.
+    js_hold_release((VALUE)hold);
   }
 
+  return r_row;
+}
+
+// Runs under rb_protect (see js_quickjsrb_log_inner) so no Ruby raise —
+// to_rb_value on an unconvertible argument (e.g. a Promise nested inside an
+// array), a bridge reporting through a logged value's toString, allocation
+// failure, or the user's on_log listener — can longjmp through QuickJS's
+// interpreter frames, or, on the pure path (where this runs inside
+// rb_thread_call_with_gvl), across the rb_thread_call_without_gvl region —
+// which would leak its buffers and leave gvl_released_js stuck.
+static VALUE r_build_and_dispatch_log(VALUE r_call)
+{
+  struct quickjsrb_log_call *call = (struct quickjsrb_log_call *)r_call;
+  VMData *data = JS_GetContextOpaque(call->ctx);
+
+  struct log_row_build build;
+  build.call = call;
+  js_hold_init(&build.hold, call->ctx);
+  VALUE r_row = rb_ensure(r_build_log_row, (VALUE)&build, js_hold_release, (VALUE)&build.hold);
+
+  // Carried out rather than raised here: a Ruby exception would be bridged
+  // into a catchable JS Error, and a guest wrapping console.log in try/catch
+  // could swallow the timeout and pin one InterruptedError in alive_objects
+  // per catch. The caller throws it as the interrupt QuickJS itself would.
+  // Copied before the listener runs, since a listener that raises unwinds
+  // past everything after it.
+  call->interrupted = build.hold.interrupted;
   r_call_log_listener(rb_ary_new3(2, data->log_listener, r_log_new(call->severity, r_row)));
   return Qnil;
 }
@@ -1221,9 +1621,23 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
 // JS exception instead of a cross-boundary longjmp.
 static JSValue js_quickjsrb_log_inner(JSContext *ctx, int argc, JSValueConst *argv, const char *severity)
 {
-  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED};
+  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED, false};
   int error;
   rb_protect(r_build_and_dispatch_log, (VALUE)&call, &error);
+  if (call.interrupted)
+  {
+    // The lapse outranks a raise from the listener, as it does in the uncaught
+    // renderer, where dispatch_log swallows the listener's raise on its own:
+    // the budget is gone, and reporting the listener instead would hand the
+    // guest a catchable error to repeat the overrun behind.
+    if (error)
+      rb_set_errinfo(Qnil);
+    // The same two calls js_poll_interrupts makes, so the guest cannot catch it
+    // and the top-level renderer classifies it exactly as a native timeout.
+    JS_ThrowInternalError(ctx, "interrupted");
+    JS_SetUncatchableException(ctx, TRUE);
+    return JS_EXCEPTION;
+  }
   if (error)
   {
     VALUE r_error = rb_errinfo();
@@ -1610,11 +2024,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 static int interrupt_handler(JSRuntime *runtime, void *opaque)
 {
   EvalTime *eval_time = opaque;
-  struct timespec now;
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  int64_t elapsed_ms = (int64_t)(now.tv_sec - eval_time->started_at.tv_sec) * 1000
-                     + (now.tv_nsec - eval_time->started_at.tv_nsec) / 1000000;
-  return elapsed_ms >= eval_time->limit_ms ? 1 : 0;
+  return eval_elapsed_ms(eval_time) >= eval_time->limit_ms ? 1 : 0;
 }
 
 // The result of an evaluation, owned for as long as it takes to convert.
@@ -1695,6 +2105,7 @@ static void arm_eval_timer(VMData *data)
 {
   clock_gettime(CLOCK_MONOTONIC, &data->eval_time->started_at);
   JS_SetInterruptHandler(JS_GetRuntime(data->context), interrupt_handler, data->eval_time);
+  data->eval_timer_armed = true;
 }
 
 // Pure-path predicate: true when no JS→Ruby bridge can fire during eval
@@ -1815,6 +2226,13 @@ static void enter_js_entry(VMData *data)
 // Balances enter_js_entry. Clearing the owner only as the outermost entry
 // closes is what lets a VM be handed between threads sequentially, which
 // the README allows and pool warmers depend on.
+//
+// eval_timer_armed deliberately does not drop here. An evaluation is two
+// counted regions, the run and then the conversion of its result, and the
+// budget spans both: a getter that outlives it while the result is being
+// rendered has to be reported, and the count is already back at zero by then.
+// The flag therefore means "some entry armed this clock", and each entry point
+// that renders is responsible for arming above the work it renders.
 static void leave_js_entry(VMData *data)
 {
   if (--data->evals_in_flight == 0)
@@ -2451,7 +2869,9 @@ static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
   // Not a file-wide invariant yet, to be clear. vm_m_evalCode,
   // vm_m_evalBytecode, call_global_function_body, vm_m_import and
   // vm_m_drainJobs all still arm unconditionally and all still defeat
-  // timeout_msec the same way. Hoisting the condition into arm_eval_timer
+  // timeout_msec the same way — call_global_function_body above its path
+  // resolution, so a nested call that fails to resolve has already reset the
+  // enclosing clock. Hoisting the condition into arm_eval_timer
   // would close them together, but it would also start interrupting
   // workloads that re-enter the VM from a bridge and today run unbounded —
   // a semantics change that deserves its own PR rather than a ride on this
@@ -2666,6 +3086,13 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_
   // for the life of the context, so unregistering on interrupt isn't worth it.
   size_t buf_len;
   uint8_t *buf = (uint8_t *)copy_rstring_to_owned_buffer(r_bytecode, &buf_len, false);
+  // The read runs no JS, so there is nothing here to budget — but a failed read
+  // is rendered, and rendering reads name off a SyntaxError whose prototype the
+  // guest may have given a throwing getter. That render must not run on the
+  // clock a previous entry left behind. Conditional as in vm_m_compile: nested
+  // under a bridge, the enclosing eval's budget governs.
+  if (data->evals_in_flight == 0)
+    arm_eval_timer(data);
   JSValue j_mod = run_bytecode_release_gvl(data, bytecode_read_job_run, buf, buf_len, true);
   if (JS_IsException(j_mod))
     return raise_from_js_exception_held(data); // raises
@@ -2822,7 +3249,10 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   // from inside a bridge callback (e.g. an on_log listener) must stay
   // under the in-flight eval's budget, not erase it.
   if (data->evals_in_flight == 0)
+  {
     JS_SetInterruptHandler(JS_GetRuntime(data->context), NULL, NULL);
+    data->eval_timer_armed = false;
+  }
 
   size_t buf_len = (size_t)RSTRING_LEN(r_bytecode);
   JSValue j_result;
@@ -3048,13 +3478,71 @@ struct js_entry_call
   VMData *data;
 };
 
+// The converted arguments of a call. Owned by an ensure from before the first
+// conversion, because to_js_value runs inspect on the caller's own objects and
+// any one of them can raise part-way through — and the ones already converted
+// used to go with it, along with the array.
+struct js_call_args
+{
+  JSContext *ctx;
+  JSValue *j_args;
+  int nargs;
+};
+
+static VALUE js_call_args_release(VALUE p)
+{
+  struct js_call_args *args = (struct js_call_args *)p;
+  for (int i = 0; i < args->nargs; i++)
+    JS_FreeValue(args->ctx, args->j_args[i]);
+  xfree(args->j_args);
+  return Qnil;
+}
+
+struct js_call_run
+{
+  struct js_entry_call *call;
+  struct js_call_args *args;
+};
+
+static VALUE call_global_function_run(VALUE p);
+
 static VALUE call_global_function_body(VALUE p)
 {
   struct js_entry_call *call = (struct js_entry_call *)p;
-  int argc = call->argc;
+  struct js_call_args args = {call->data->context, NULL, call->argc - 1};
+  if (args.nargs > 0)
+  {
+    args.j_args = xmalloc2(args.nargs, sizeof(JSValue));
+    for (int i = 0; i < args.nargs; i++)
+      args.j_args[i] = JS_UNDEFINED;
+  }
+  struct js_call_run run = {call, &args};
+  return rb_ensure(call_global_function_run, (VALUE)&run, js_call_args_release, (VALUE)&args);
+}
+
+static VALUE call_global_function_run(VALUE p)
+{
+  struct js_call_run *run = (struct js_call_run *)p;
+  struct js_entry_call *call = run->call;
+  struct js_call_args *args = run->args;
   VALUE *argv = call->argv;
   VMData *data = call->data;
   VALUE r_name = argv[0];
+
+  // Converted first, under a clock of its own. Mostly this is Ruby work —
+  // inspect on the caller's objects, allocation, a GVL yield to another thread
+  // — and none of it is the guest's to pay for, which is why the arm above the
+  // resolution below starts the budget over. But two conversions run JS: a
+  // File argument calls the proxy creator and a Bignum calls Number(), and
+  // each polls the interrupt handler on the way, so without an arm here they
+  // ran on whatever clock the previous entry left — a lapsed one interrupts
+  // the conversion at random and hands the function a JS_EXCEPTION for an
+  // argument. Two arms, but not the two budgets the previous commit had: no
+  // guest-written JS runs between them unless the guest has replaced Proxy or
+  // Number, and then it is bounded rather than unbounded.
+  arm_eval_timer(data);
+  for (int i = 0; i < args->nargs; i++)
+    args->j_args[i] = to_js_value(data->context, argv[i + 1]);
 
   JSValue j_this = JS_UNDEFINED;
   JSValue j_func;
@@ -3102,6 +3590,17 @@ static VALUE call_global_function_body(VALUE p)
   {
     rb_raise(rb_eTypeError, "function's name should be a Symbol or a String");
   }
+
+  // Armed once, above the resolution, for the reason define_global_function_body
+  // and vm_m_import give: resolving the path runs JS — the JS_Eval of the first
+  // segment, then a property read per segment, any of which can be a getter —
+  // and it ran under whatever the previous entry point left behind. A lapsed
+  // clock interrupted it spuriously; none at all, after a polyfill load's
+  // disarm, left it unbounded. Once, because resolution and the call are one
+  // budget: a second arm beside the JS_Call handed a single call twice
+  // timeout_msec of guest JS, half in a getter on the path and half in the
+  // function it found.
+  arm_eval_timer(data);
 
   {
     long path_len = RARRAY_LEN(r_path);
@@ -3155,27 +3654,10 @@ static VALUE call_global_function_body(VALUE p)
     return Qnil;
   }
 
-  int nargs = argc - 1;
-  JSValue *j_args = NULL;
-  if (nargs > 0)
-  {
-    j_args = (JSValue *)malloc(sizeof(JSValue) * nargs);
-    for (int i = 0; i < nargs; i++)
-      j_args[i] = to_js_value(data->context, argv[i + 1]);
-  }
-
-  arm_eval_timer(data);
-
-  JSValue j_result = JS_Call(data->context, j_func, j_this, nargs, (JSValueConst *)j_args);
+  JSValue j_result = JS_Call(data->context, j_func, j_this, args->nargs, (JSValueConst *)args->j_args);
 
   JS_FreeValue(data->context, j_func);
   JS_FreeValue(data->context, j_this);
-  if (j_args)
-  {
-    for (int i = 0; i < nargs; i++)
-      JS_FreeValue(data->context, j_args[i]);
-    free(j_args);
-  }
 
   // js_std_await handles both async (promise) and sync results; frees j_result
   return to_rb_return_value(data->context, js_std_await(data->context, j_result));
