@@ -130,6 +130,44 @@ describe "VM#define_const / #define_let / #define_var" do
       _(@vm.eval_code("ok")).must_equal 1
     end
 
+    # Validating a copy of the bytes and then handing back a Symbol put a
+    # dispatch back between the check and the source, because interpolating a
+    # Symbol calls Symbol#to_s. The validated String is what reaches the
+    # interpolation now, and to_sym runs only on the way out.
+    it "interpolates the bytes it validated, not a name derived again" do
+      ::Symbol.class_eval do
+        alias_method :_orig_to_s, :to_s
+        def to_s = _orig_to_s == "safe" ? "safe = 0; globalThis.pwned = 1; var zz" : _orig_to_s
+      end
+
+      begin
+        @vm.define_const("safe", 42)
+      ensure
+        ::Symbol.class_eval { remove_method(:to_s); alias_method :to_s, :_orig_to_s; remove_method :_orig_to_s }
+      end
+
+      _(@vm.eval_code("safe")).must_equal 42
+      _(@vm.eval_code("typeof globalThis.pwned")).must_equal "undefined"
+    end
+
+    # The other half of the same pair: to_sym runs after the declaration, so a
+    # patched one decides what the caller is handed back and nothing else.
+    it "keeps a patched String#to_sym out of the source and the registry" do
+      ::String.class_eval do
+        alias_method :_orig_to_sym, :to_sym
+        def to_sym = _orig_to_sym == :safe ? :"safe = 0; globalThis.pwned = 1; var zz" : _orig_to_sym
+      end
+
+      begin
+        @vm.define_const(:safe, 42)
+      ensure
+        ::String.class_eval { remove_method(:to_sym); alias_method :to_sym, :_orig_to_sym; remove_method :_orig_to_sym }
+      end
+
+      _(@vm.eval_code("safe")).must_equal 42
+      _(@vm.eval_code("typeof globalThis.pwned")).must_equal "undefined"
+      _ { @vm.define_const(:safe, 99) }.must_raise ArgumentError
+    end
     it "refuses a name from an object that only claims to be a String" do
       liar = Object.new
       def liar.is_a?(_) = true
@@ -422,6 +460,21 @@ describe "a value that expands past what the VM could hold" do
 
     _(err.message).must_match(/circular/)
   end
+  # Which branch a value takes decides the shape that reaches JS, so the test
+  # for it must not be one the value answers.
+  it "does not let a container choose which shape it is written as" do
+    liar_hash = Class.new(Hash) { def is_a?(_) = true }
+    hash = liar_hash.new
+    hash["a"] = 1
+    liar_array = Class.new(Array) { def is_a?(_) = false }
+    vm = Quickjs::VM.new
+
+    vm.define_let(:h, hash)
+    vm.define_let(:a, liar_array.new([1, 2]))
+
+    _(vm.eval_code("JSON.stringify(h)")).must_equal %q({"a":1})
+    _(vm.eval_code("JSON.stringify(a)")).must_equal "[1,2]"
+  end
   # Sharing is only a problem when it compounds. One object under two keys
   # is ordinary and stays allowed.
   it "leaves an ordinary shared reference alone" do
@@ -645,8 +698,9 @@ describe "values the serializer must not take at face value" do
 
   # A refused value must not leave the name half declared. Every check that
   # can refuse one runs before the declaration is evaluated, so the caller can
-  # fix the value and use the same name. The one exception is running out of
-  # memory mid-eval, which poisons the whole VM rather than one binding.
+  # fix the value and use the same name. Two things get past those checks into
+  # the eval itself: running out of memory, which poisons the whole VM rather
+  # than one binding, and the timeout below.
   it "leaves the name usable after refusing a value" do
     vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
     refused = [

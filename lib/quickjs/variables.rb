@@ -47,6 +47,11 @@ module Quickjs
     private
 
     def _define_variable(kind, name, value)
+      # The validated String itself, all the way to the interpolation. Handing
+      # back a Symbol and interpolating that put a dispatch between the check
+      # and the source: interpolating a Symbol calls Symbol#to_s, so the bytes
+      # that were matched against the pattern were thrown away and the name was
+      # asked for again afterwards. A plain String interpolates as itself.
       key = _validate_variable_name(name)
       budget = _js_source_budget
       # The per-container check bounds the expanding case; this catches the
@@ -91,7 +96,9 @@ module Quickjs
         eval_code("#{key} = #{literal};")
       end
 
-      key
+      # Only here, where a patched String#to_sym can decide nothing except what
+      # the caller is handed back.
+      key.to_sym
     end
 
     # `var` is the only form that lands on `globalThis`, so it is the only one a
@@ -130,7 +137,7 @@ module Quickjs
           // in which case the lookup below answers for whatever took its place
           // and reports a clean global that is not there.
           if (typeof globalThis !== 'object' || globalThis === null) return 'broken';
-          const d = Object.getOwnPropertyDescriptor(globalThis, #{::JSON.generate(::String.new(key.to_s))});
+          const d = Object.getOwnPropertyDescriptor(globalThis, #{::JSON.generate(::String.new(key))});
           if (!d) return 'absent';
           if (d.get !== undefined || d.set !== undefined) return 'accessor';
           return d.writable ? 'writable' : 'readonly';
@@ -184,7 +191,7 @@ module Quickjs
         raise ::ArgumentError, "#{str.inspect} is a reserved word in JavaScript"
       end
 
-      str.to_sym
+      str
     end
   end
 
@@ -206,7 +213,12 @@ module Quickjs
       # a subclass overriding either would decide what goes into the source, and
       # a gem replacing String#to_json process-wide needs no hostile value at all.
       # String.new copies the bytes without asking the object anything, and
-      # JSON.generate does the escaping here, where a monkey patch cannot reach it.
+      # JSON.generate does the escaping. That is not out of a monkey patch's
+      # reach, and nothing in Ruby is: JSON.generate, String#initialize,
+      # Array#join and format are all replaceable, and a process that has done
+      # that has bigger problems than this method. What holds is narrower and
+      # is the part that matters: no method dispatched on the caller's value
+      # decides these bytes.
       when ::String then _js_string_literal(value, budget)
       when ::Integer then _js_integer_literal(value, budget)
       when ::Float then _js_float_literal(value)
@@ -284,7 +296,7 @@ module Quickjs
       begin
         parts = []
         used = 2
-        if value.is_a?(::Array)
+        if ::Array === value
           value.each do |v|
             parts << (piece = _js_literal(v, seen, budget))
             used += piece.bytesize + 1
@@ -351,11 +363,17 @@ module Quickjs
     # is the silent coercion this converter exists to avoid.
     def self._js_object_key(key)
       literal = case key
-                when ::String, ::Symbol, ::Integer
-                  # Same reason as the value: a key whose to_s answers with
-                  # something other than a String is refused by String.new
-                  # rather than written into the source.
-                  ::JSON.generate(::String.new(key.is_a?(::String) ? key : key.to_s))
+                when ::String
+                  ::JSON.generate(::String.new(key))
+                when ::Integer
+                  # Read, not asked to describe itself, as on the value path.
+                  ::JSON.generate(format("%d", key))
+                when ::Symbol
+                  # A Symbol has no bytes to copy, so this one asks. What it
+                  # answers is still escaped here, so the worst a patched
+                  # Symbol#to_s buys is a different key, not a different
+                  # meaning.
+                  ::JSON.generate(::String.new(key.to_s))
                 else
                   raise ::TypeError, "#{key.class} cannot be used as a JavaScript object key"
                 end
