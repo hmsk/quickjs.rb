@@ -48,11 +48,7 @@ module Quickjs
 
     def _define_variable(kind, name, value)
       key = _validate_variable_name(name)
-      # JSMemoryUsage.malloc_limit is an int64_t, so a limit at or above 2**63
-      # comes back negative. Treat anything that is not a usable size as no
-      # budget rather than as a budget of minus nine quintillion.
-      budget = memory_usage[:malloc_limit]
-      budget = nil unless budget.is_a?(::Integer) && budget.positive?
+      budget = _js_source_budget
       # The per-container check bounds the expanding case; this catches the
       # flat one, a single enormous String or a very wide container, where no
       # inner container ever crosses the line on its own.
@@ -112,6 +108,21 @@ module Quickjs
     # VM that has evaluated untrusted JavaScript owns its own environment, and
     # there is no way to hand a value into it unobserved. Define before running
     # code you do not control.
+    # memory_usage walks the whole JS heap, and the limit it reports is fixed
+    # when the VM is built, so reading it per call made every define cost a
+    # heap walk: 8us on an empty VM against 1.5ms on one holding a few hundred
+    # thousand objects.
+    #
+    # JSMemoryUsage.malloc_limit is an int64_t, so a limit at or above 2**63
+    # comes back negative. Anything that is not a usable size means no budget,
+    # rather than a budget of minus nine quintillion.
+    def _js_source_budget
+      return @_js_source_budget if defined?(@_js_source_budget)
+
+      limit = memory_usage[:malloc_limit]
+      @_js_source_budget = limit.is_a?(::Integer) && limit.positive? ? limit : nil
+    end
+
     def _refuse_unusable_global(key)
       state = eval_code(<<~JS)
         (() => {

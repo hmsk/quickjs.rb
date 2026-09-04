@@ -632,6 +632,23 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code('v')).must_equal 'fine'
   end
 
+  # memory_usage walks the whole JS heap, and the limit it reports is fixed
+  # when the VM is built, so asking per call made every define scale with how
+  # much the VM was holding.
+  it "reads the memory limit once per VM rather than per define" do
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+    vm.define_let(:a, 1)
+    asked = 0
+    vm.define_singleton_method(:memory_usage) do
+      asked += 1
+      super()
+    end
+
+    vm.define_let(:b, 2)
+
+    _(asked).must_equal 0
+    _ { vm.define_let(:c, 3_000_000.times.map { 0 }) }.must_raise ArgumentError
+  end
   # malloc_limit is an int64_t, so a limit at or above 2**63 reads back
   # negative and every define compared against it.
   it "works on a VM whose memory_limit reads back negative" do
