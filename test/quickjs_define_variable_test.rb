@@ -454,6 +454,29 @@ describe "a value that expands past what the VM could hold" do
     _ { vm.define_const(:s, liar.new(invalid.force_encoding("UTF-8"))) }.must_raise ArgumentError
   end
 
+  # Redefining an existing binding is an assignment, and an assignment
+  # expression evaluates to what was assigned, so eval_code converted the whole
+  # value back into Ruby and dropped it. A declaration never did, having no
+  # completion value, which is what makes the two comparable here: they
+  # serialize the same value, so they should cost about the same to run.
+  it "does not convert the value back into Ruby when redefining" do
+    vm = Quickjs::VM.new(timeout_msec: 60_000)
+    rows = Array.new(20_000) { |i| "row#{i}" }
+    GC.start
+    before = GC.stat(:total_allocated_objects)
+    vm.define_let(:s, rows)
+    declaring = GC.stat(:total_allocated_objects) - before
+
+    GC.start
+    before = GC.stat(:total_allocated_objects)
+    vm.define_let(:s, rows)
+    assigning = GC.stat(:total_allocated_objects) - before
+
+    # Both cost about three objects per element to build. The value coming
+    # back is one more per element, so half of that is clear of the noise in
+    # either direction.
+    _(assigning).must_be :<, declaring + rows.size / 2
+  end
   # A key is a value the caller supplies, and the up-front check was on the
   # value path only, so a large String cost nothing as a value and was copied
   # and escaped as a key before anything looked at it. Same discriminator: the

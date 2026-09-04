@@ -139,7 +139,14 @@ module Quickjs
         # ourselves can have been swapped for an accessor since, so the
         # same check applies to the assignment.
         _refuse_unusable_global(key) if kind == :var
-        eval_code("#{key} = #{literal};")
+        # `void` so the statement has no completion value. An assignment
+        # expression evaluates to what was assigned, and eval_code converts
+        # whatever the statement produced back into Ruby, so redefining a value
+        # built a whole Ruby object graph from the JavaScript it had just
+        # written and dropped it. A 200k-row Hash cost 1.6 million objects that
+        # nothing read. A declaration never had this, since declarations have
+        # no completion value.
+        eval_code("void (#{key} = #{literal});")
       end
 
       # Only here, where a patched String#to_sym can decide nothing except what
