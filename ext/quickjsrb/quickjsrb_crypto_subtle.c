@@ -79,20 +79,21 @@ static void js_reject_with_ruby_error(JSContext *ctx, JSValueConst *resolving_fu
 // Resolved without rb_const_get's raise, because these run inside QuickJS
 // native callbacks with no rb_protect between them and the interpreter: a
 // NameError there longjmps through QuickJS's own frames, past the JS values
-// they still hold. Cached after the first hit; the constant cannot be
-// collected while the module holds it, and never changes for a process.
+// they still hold.
+//
+// Looked up per call rather than cached in a static. A class held only by a
+// constant table is movable, so a cached VALUE survives GC.compact as an
+// address the collector has since handed to something else — which would name
+// the wrong class, or a non-class that makes rb_obj_is_kind_of raise the very
+// unprotected raise this function exists to avoid. Two constant lookups are
+// nothing beside the OpenSSL work every caller goes on to do.
 static VALUE r_crypto_key_class(void)
 {
-  static VALUE r_class = Qnil;
-  if (!NIL_P(r_class))
-    return r_class;
-
   VALUE r_quickjs = rb_const_get(rb_cObject, rb_intern("Quickjs"));
   if (!rb_const_defined_at(r_quickjs, rb_intern("CryptoKey")))
     return Qnil;
 
-  r_class = rb_const_get(r_quickjs, rb_intern("CryptoKey"));
-  return r_class;
+  return rb_const_get(r_quickjs, rb_intern("CryptoKey"));
 }
 
 // Find Ruby CryptoKey from a JS CryptoKey object via rb_object_id handle.

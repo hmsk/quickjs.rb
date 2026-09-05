@@ -161,6 +161,21 @@ describe "crypto.subtle key management" do
       vm.dispose!
     end
 
+    # A class held only by a constant table is movable, so caching the lookup
+    # in a C static would leave an address the collector has since reused.
+    it "keeps working across a compaction" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      vm.eval_code("globalThis.k = await crypto.subtle.generateKey({name: 'HMAC', hash: 'SHA-256'}, true, ['sign', 'verify'])")
+      sign = "(await crypto.subtle.sign('HMAC', globalThis.k, new Uint8Array([1, 2, 3]))).byteLength"
+      _(vm.eval_code(sign)).must_equal 32
+
+      5.times { GC.compact }
+
+      _(vm.eval_code(sign)).must_equal 32
+    ensure
+      vm.dispose!
+    end
+
     # The lookup runs inside a QuickJS native callback with no rb_protect
     # between it and the interpreter, so it must answer rather than raise when
     # the Ruby layer that defines the class has not been loaded. Requiring the
@@ -179,9 +194,12 @@ describe "crypto.subtle key management" do
         end
       RUBY
 
-      out, status = Open3.capture2e(RbConfig.ruby, '-I', 'lib', '-e', script)
-      _(status).must_be :success?
+      lib = File.expand_path('../lib', __dir__)
+      out, status = Open3.capture2e(RbConfig.ruby, '-I', lib, '-e', script)
+      # Asserted before the exit status so the abort guard's own message, or a
+      # LoadError, is what a failure reports rather than "expected success?".
       _(out).must_match(/Quickjs::TypeError: .*invalid CryptoKey/)
+      _(status).must_be :success?
     end
   end
 end
