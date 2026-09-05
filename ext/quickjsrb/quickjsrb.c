@@ -967,7 +967,26 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
       // Checked before the call for the same reason as the BigInt branch:
       // calling JS_EXCEPTION throws "not a function" over the real error.
       if (JS_IsException(j_toStringFunc))
+      {
+        // A function target reaches this branch before the check at the top of
+        // the case can be repeated, since JS_IsFunction answers off is_func
+        // without resolving. So the question is asked here, holding the throw
+        // aside because asking replaces it, and putting it back if the proxy
+        // was not the reason: a host error still comes out of a logged value.
+        if (conv->substitute_unresolvable)
+        {
+          JSValue j_pending = JS_GetException(ctx);
+          if (JS_IsArray(ctx, j_val) < 0)
+          {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            JS_FreeValue(ctx, j_pending);
+            conv_frame_pop(conv);
+            return rb_str_new2(QUICKJSRB_UNRENDERABLE);
+          }
+          JS_Throw(ctx, j_pending);
+        }
         return raise_js_exception(ctx);
+      }
       JSValue j_source = JS_Call(ctx, j_toStringFunc, j_val, 0, NULL);
       conv_return(conv, depth);
       conv_borrow(conv, depth, j_source);
@@ -978,7 +997,25 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
       // dispose! reached from a toString gets to report ThreadError. The frame
       // still holds j_source, so conv_release hands it back on the way out.
       if (source == NULL)
+      {
+        // Same question as the read above, and the same care with the throw:
+        // calling toString with a revoked proxy as `this` is how a function
+        // target refuses, and a log row substitutes for that while still
+        // letting a bridge's Ruby exception through.
+        if (conv->substitute_unresolvable)
+        {
+          JSValue j_pending = JS_GetException(ctx);
+          if (JS_IsArray(ctx, j_val) < 0)
+          {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            JS_FreeValue(ctx, j_pending);
+            conv_frame_pop(conv);
+            return rb_str_new2(QUICKJSRB_UNRENDERABLE);
+          }
+          JS_Throw(ctx, j_pending);
+        }
         return raise_js_exception(ctx);
+      }
       conv_borrow_key(conv, depth, source);
       VALUE r_source = rb_str_new2(source);
       conv_frame_pop(conv);
@@ -1050,7 +1087,20 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
     // and takes the exception off the context on the way.
     int is_array = JS_IsArray(ctx, j_val);
     if (is_array < 0)
+    {
+      // Asked again because the answer can change under us: the reads between
+      // here and the check at the top of this case run the guest's own traps,
+      // and one of them may revoke the proxy it was asked about. The r_seen
+      // marking is undone so a second occurrence substitutes too rather than
+      // reading as the cycle nil is reserved for.
+      if (conv->substitute_unresolvable)
+      {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        rb_hash_delete(conv->r_seen, r_key);
+        return rb_str_new2(QUICKJSRB_UNRENDERABLE);
+      }
       return raise_js_exception(ctx); // raises
+    }
     if (is_array)
     {
       r_result = js_array_to_rb(ctx, j_val, conv);
