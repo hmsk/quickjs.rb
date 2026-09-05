@@ -313,6 +313,11 @@ struct ConvState
   ConvFrame *frames;
   long frame_count;
   long frame_capacity;
+  // Set for the walk that builds a console row. A log line must not decide
+  // whether the statement after it runs, so a proxy this walk cannot resolve
+  // is substituted at whatever depth it is found rather than reported. Only
+  // that one refusal: a host error met on the way still comes back out.
+  bool substitute_unresolvable;
   ConvFrame frames_inline[CONV_FRAMES_INLINE];
 };
 
@@ -869,7 +874,7 @@ static VALUE js_bigint_conversion_run(VALUE r_conversion)
   return rb_funcall(rb_str_new2(js_hold_own_cstring(hold, msg)), rb_intern("to_i"), 0);
 }
 
-VALUE to_rb_value(JSContext *ctx, JSValue j_val)
+static VALUE to_rb_value_with(JSContext *ctx, JSValue j_val, bool substitute_unresolvable)
 {
   // Only object graphs need the bookkeeping, and only they can recurse, so
   // primitives convert straight through rather than paying for the state and
@@ -882,7 +887,35 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
   conv.frames = conv.frames_inline;
   conv.frame_count = 0;
   conv.frame_capacity = CONV_FRAMES_INLINE;
+  conv.substitute_unresolvable = substitute_unresolvable;
   return rb_ensure(conv_run, (VALUE)&conv, conv_release, (VALUE)&conv);
+}
+
+VALUE to_rb_value(JSContext *ctx, JSValue j_val)
+{
+  return to_rb_value_with(ctx, j_val, false);
+}
+
+// The conversion a console row is built with. See ConvState.
+static VALUE to_rb_value_for_log(JSContext *ctx, JSValue j_val)
+{
+  return to_rb_value_with(ctx, j_val, true);
+}
+
+// The placeholder a console row gets for a proxy it cannot resolve. The throw
+// is discarded, but not before find_ruby_error has looked at it: a trap can
+// revoke and reach a Ruby bridge in the same breath, and that throw carries the
+// host's exception, which has to come back out and is only taken out of
+// alive_objects here.
+static VALUE r_substituted_unresolvable(JSContext *ctx)
+{
+  JSValue j_pending = JS_GetException(ctx);
+  VALUE r_ruby_error = find_ruby_error(ctx, j_pending);
+  JS_FreeValue(ctx, j_pending);
+  if (!NIL_P(r_ruby_error))
+    rb_exc_raise(r_ruby_error);
+
+  return rb_str_new2(QUICKJSRB_UNRENDERABLE);
 }
 
 static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
@@ -921,6 +954,15 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
   }
   case JS_TAG_OBJECT:
   {
+    // Asked first, and only by the walk that builds a console row. It has to
+    // come before the branches below because JS_IsFunction reads a proxy's
+    // is_func without resolving it, so a proxy revoked over a function target
+    // would be claimed there and raise from the toString read instead; and
+    // before the r_seen marking, so a proxy met twice in one row is two
+    // substitutions rather than a second one reading as a cycle.
+    if (conv != NULL && conv->substitute_unresolvable && JS_IsArray(ctx, j_val) < 0)
+      return r_substituted_unresolvable(ctx);
+
     int promiseState = JS_PromiseState(ctx, j_val);
     if (promiseState != -1)
     {
@@ -1011,7 +1053,35 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
 
     VALUE r_result;
     int memoize = 1;
-    if (JS_IsArray(ctx, j_val))
+    // JS_IsArray is tri-state: 1, 0, and -1 when it cannot resolve a proxy —
+    // a revoked one, or a chain too deep to walk. Read as a boolean the -1 said
+    // "array", so a value JS itself refuses to inspect came back as an ordinary
+    // empty Array, indistinguishable from a genuine one. js_resolve_proxy
+    // throws on both paths, a TypeError for the revoked case and a stack
+    // overflow for the deep one, and it is the guest's own either way: what
+    // Array.isArray would have reported. Rendering it hands the caller that,
+    // and takes the exception off the context on the way.
+    int is_array = JS_IsArray(ctx, j_val);
+    if (is_array < 0)
+    {
+      // Asked again because the answer can change under us: the reads between
+      // here and the check at the top of this case run the guest's own traps,
+      // and one of them may revoke the proxy it was asked about. The r_seen
+      // marking is undone so a second occurrence substitutes too rather than
+      // reading as the cycle nil is reserved for.
+      //
+      // Not the last word either: js_is_plain_object and the walkers below run
+      // traps of their own, and a proxy that waits until one of those still
+      // converts to an empty container, because those reads are unchecked.
+      // That is #119 rather than the tri-state this branch is about.
+      if (conv->substitute_unresolvable)
+      {
+        rb_hash_delete(conv->r_seen, r_key);
+        return r_substituted_unresolvable(ctx);
+      }
+      return raise_js_exception(ctx); // raises
+    }
+    if (is_array)
     {
       r_result = js_array_to_rb(ctx, j_val, conv);
     }
@@ -1383,6 +1453,31 @@ static VALUE r_try_call_proc(VALUE r_try_args)
   );
 }
 
+struct js_arg_conversion
+{
+  JSContext *ctx;
+  JSValue j_val;
+};
+
+static VALUE js_arg_conversion_run(VALUE r_conversion)
+{
+  struct js_arg_conversion *conversion = (struct js_arg_conversion *)r_conversion;
+  return to_rb_value(conversion->ctx, conversion->j_val);
+}
+
+// Hands a Ruby exception back to the guest as a JS throw, the way a raise from
+// the block itself is already handed back, so the caller sees an error instead
+// of the conversion silently yielding nothing. A Ruby throw leaves internal
+// data rather than an Exception in errinfo and has nowhere to go from here.
+static JSValue j_throw_from_ruby_errinfo(JSContext *ctx)
+{
+  VALUE r_error = rb_errinfo();
+  rb_set_errinfo(Qnil);
+  if (!rb_obj_is_kind_of(r_error, rb_eException))
+    return JS_ThrowInternalError(ctx, "an argument could not be converted");
+  return JS_Throw(ctx, j_error_from_ruby_error(ctx, r_error));
+}
+
 static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, int _magic, JSValue *func_data)
 {
   // func_data[0] holds the Ruby Symbol ID for the defined function (stored by
@@ -1402,12 +1497,22 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   VALUE r_call_args = rb_ary_new();
   rb_ary_push(r_call_args, r_proc);
 
+  // Converted under a protect, because to_rb_value raises for an argument it
+  // cannot represent and this is a JSCFunction: the longjmp would go out
+  // through QuickJS's own frames, past the JS_FreeValue below, pinning the
+  // argument and everything it holds on the JS heap for the life of the VM.
+  // Repeatable by the guest, which is enough to condemn a VM by out-of-memory
+  // rather than merely to leak.
   VALUE r_argv = rb_ary_new();
   for (int i = 0; i < argc; i++)
   {
-    JSValue j_v = JS_DupValue(ctx, argv[i]);
-    rb_ary_push(r_argv, to_rb_value(ctx, j_v));
-    JS_FreeValue(ctx, j_v);
+    struct js_arg_conversion conversion = {ctx, JS_DupValue(ctx, argv[i])};
+    int state;
+    VALUE r_converted = rb_protect(js_arg_conversion_run, (VALUE)&conversion, &state);
+    JS_FreeValue(ctx, conversion.j_val);
+    if (state)
+      return j_throw_from_ruby_errinfo(ctx);
+    rb_ary_push(r_argv, r_converted);
   }
   rb_ary_push(r_call_args, r_argv);
   rb_ary_push(r_call_args, ULONG2NUM(data->eval_time->limit_ms));
@@ -1574,7 +1679,13 @@ static VALUE r_build_log_row(VALUE r_build)
     }
     else
     {
-      r_raw = to_rb_value(ctx, j_logged);
+      // Substitutes an unresolvable proxy wherever in the graph it sits. The
+      // raise would otherwise come back to the guest as a catchable Error,
+      // whose Ruby exception is parked in alive_objects until something throws
+      // it back, so a guest that catches its own console.log in a loop pins one
+      // per iteration. The Promise above is the same idea and only goes one
+      // level deep: a nested one still raises out of the row.
+      r_raw = to_rb_value_for_log(ctx, j_logged);
     }
     VALUE r_c = rb_str_new2(js_hold_cstring(hold, j_logged, QUICKJSRB_UNRENDERABLE));
 

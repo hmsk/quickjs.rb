@@ -250,6 +250,281 @@ describe Quickjs do
       result = ::Quickjs.eval_code("() => 'hi'")
       _(result).must_be_instance_of Quickjs::Function
     end
+
+    # JS_IsArray answers -1 rather than false when it cannot resolve a proxy,
+    # and read as a boolean that took the array path: a value whose every trap
+    # throws came back as [], indistinguishable from a genuine empty Array.
+    describe "a revoked Proxy" do
+      def revoked
+        "const {proxy, revoke} = Proxy.revocable({a: 1}, {}); revoke();"
+      end
+
+      it "reports the TypeError the guest would see" do
+        error = _ { ::Quickjs.eval_code("#{revoked} proxy") }.must_raise Quickjs::TypeError
+        _(error.message).must_equal 'revoked proxy'
+      end
+
+      it "reports it from inside a container too" do
+        _ { ::Quickjs.eval_code("#{revoked} ({ok: 1, bad: proxy})") }.must_raise Quickjs::TypeError
+        _ { ::Quickjs.eval_code("#{revoked} [1, proxy]") }.must_raise Quickjs::TypeError
+      end
+
+      it "leaves the VM usable, having taken the throw off the context" do
+        vm = Quickjs::VM.new
+        _ { vm.eval_code("#{revoked} proxy") }.must_raise Quickjs::TypeError
+        _(vm.eval_code('1 + 1')).must_equal 2
+      ensure
+        vm.dispose!
+      end
+
+      # The -1 is the proxy being unresolvable, not the target being an array,
+      # so a live proxy has to keep converting as whatever it wraps.
+      it "does not change what a live Proxy converts to" do
+        assert_code("new Proxy([1, 2, 3], {})", [1, 2, 3])
+        assert_code("new Proxy({a: 1}, {})", {'a' => 1})
+      end
+
+      # A log line must not decide whether the statement after it runs, so the
+      # row builder substitutes the way it does for a Promise, rather than
+      # letting the conversion report. The raise would also come back to the
+      # guest catchable, pinning a Ruby exception per catch.
+      it "is substituted in a log row rather than reported" do
+        vm = Quickjs::VM.new
+        rows = []
+        vm.on_log { |l| rows << l.to_s }
+
+        result = vm.eval_code("#{revoked} let c = 'none'; try { console.log('x', proxy) } catch (e) { c = e.message } c")
+
+        _(result).must_equal 'none'
+        _(rows).must_equal ['x (unrenderable value)']
+      ensure
+        vm.dispose!
+      end
+
+      it "is substituted at whatever depth it sits in a log row" do
+        vm = Quickjs::VM.new
+        rows = []
+        vm.on_log { |l| rows << l.raw }
+
+        result = vm.eval_code("#{revoked} console.log([proxy], {p: proxy}); 'after'")
+
+        _(result).must_equal 'after'
+        _(rows).must_equal [[['(unrenderable value)'], {'p' => '(unrenderable value)'}]]
+      ensure
+        vm.dispose!
+      end
+
+      # Met twice in one row it is two substitutions, not a substitution and a
+      # cycle: nil is what this conversion reserves for a genuine cycle.
+      it "is substituted once per occurrence in a log row" do
+        vm = Quickjs::VM.new
+        rows = []
+        vm.on_log { |l| rows << l.raw }
+
+        vm.eval_code("#{revoked} console.log({a: proxy, b: proxy}, [proxy, proxy]); 1")
+
+        _(rows).must_equal [[
+          {'a' => '(unrenderable value)', 'b' => '(unrenderable value)'},
+          ['(unrenderable value)', '(unrenderable value)'],
+        ]]
+      ensure
+        vm&.dispose!
+      end
+
+      # JS_IsFunction reads a proxy's is_func without resolving it, so a
+      # function target would be claimed by that branch and raise from the
+      # toString read rather than being substituted with the rest.
+      it "is substituted in a log row over a function target too" do
+        vm = Quickjs::VM.new
+        rows = []
+        vm.on_log { |l| rows << l.raw }
+
+        fn_revoked = "const {proxy, revoke} = Proxy.revocable(function(){}, {}); revoke();"
+        result = vm.eval_code("#{fn_revoked} console.log('x', proxy); 'after'")
+
+        _(result).must_equal 'after'
+        _(rows).must_equal [['x', '(unrenderable value)']]
+      ensure
+        vm&.dispose!
+      end
+
+      # The check at the top of the object case is not the last word: the reads
+      # after it run the guest's own traps, and one of them can revoke the
+      # proxy that was live when it was asked about.
+      describe "revoking itself from its own trap" do
+        def self_revoking(target)
+          <<~JS
+            globalThis.mk = () => {
+              let rev;
+              const t = #{target};
+              const p = new Proxy(t, {
+                get(x, k) { if (rev) { rev(); rev = null } return x[k] },
+                getPrototypeOf(x) { if (rev) { rev(); rev = null } return Object.getPrototypeOf(x) },
+              });
+              const r = Proxy.revocable(p, {});
+              rev = r.revoke;
+              return r.proxy;
+            };
+          JS
+        end
+
+        it "is still substituted, over an object target" do
+          vm = Quickjs::VM.new
+          rows = []
+          vm.on_log { |l| rows << l.raw }
+          vm.eval_code(self_revoking('{a: 1}'))
+
+          _(vm.eval_code("console.log(mk(), mk()); 'after'")).must_equal 'after'
+          _(rows).must_equal [['(unrenderable value)', '(unrenderable value)']]
+        ensure
+          vm&.dispose!
+        end
+
+        # Over a function target it still reports, and that is deliberate.
+        # JS_IsFunction answers off is_func without resolving, so this one is
+        # claimed by the function branch and refuses at its toString, where the
+        # throw already pending is not necessarily the proxy's: it can be an
+        # out-of-memory, which has to reach the renderer that latches the VM.
+        # Substituting there would swallow it. The row is lost for this one
+        # shape rather than the latch for every shape.
+        it "reports rather than substitutes, over a function target" do
+          vm = Quickjs::VM.new
+          rows = []
+          vm.on_log { |l| rows << l.raw }
+          vm.eval_code(self_revoking('function(){}'))
+
+          _ { vm.eval_code("console.log(mk()); 'after'") }.must_raise Quickjs::TypeError
+          _(rows).must_equal []
+        ensure
+          vm&.dispose!
+        end
+
+        # The reason the substitution stops at the function branch. Over an
+        # object target the same shape is still lost, but it is lost on main
+        # too: the unchecked rb_object_id read swallows the out-of-memory and
+        # JS_IsArray's own throw replaces it. That is #119, not this branch.
+        it "still condemns the VM when the trap runs the heap out" do
+          vm = Quickjs::VM.new(memory_limit: 8 * 1024 * 1024)
+          vm.on_log { |l| }
+          vm.eval_code(<<~JS)
+            globalThis.mk = () => {
+              let rev;
+              const t = function(){};
+              const p = new Proxy(t, { get(x, k) {
+                if (rev) { rev(); rev = null; const a = []; for (;;) a.push(new Array(10000).fill(0)) }
+                return x[k]
+              } });
+              const r = Proxy.revocable(p, {});
+              rev = r.revoke;
+              return r.proxy;
+            };
+          JS
+
+          error = _ { vm.eval_code("console.log(mk()); 'after'") }.must_raise Quickjs::RuntimeError
+          _(error.message).must_match(/out of memory/)
+          _(vm.memory_poisoned?).must_equal true
+        ensure
+          vm&.dispose!
+        end
+
+        # The throw held aside while the proxy is asked about can be a bridge
+        # reporting a host failure. Discarding it would swallow the error and
+        # leave the Ruby exception parked in alive_objects, which only
+        # find_ruby_error takes it out of.
+        it "still reports a host error raised by the revoking trap itself" do
+          vm = Quickjs::VM.new
+          vm.on_log { |l| }
+          vm.define_function('boom') { raise IOError, 'host' }
+          vm.eval_code(<<~JS)
+            globalThis.mk = () => {
+              let rev;
+              const t = function(){};
+              const p = new Proxy(t, { get(x, k) { if (rev) { rev(); rev = null; boom() } return x[k] } });
+              const r = Proxy.revocable(p, {});
+              rev = r.revoke;
+              return r.proxy;
+            };
+          JS
+
+          error = _ { vm.eval_code("console.log(mk()); 'after'") }.must_raise IOError
+          _(error.message).must_equal 'host'
+        ensure
+          vm&.dispose!
+        end
+
+        # The substitution is for the proxy refusing, not for every throw the
+        # same read can carry.
+        it "still lets a host error out of a function's toString" do
+          vm = Quickjs::VM.new
+          vm.on_log { |l| }
+          vm.define_function('boom') { raise IOError, 'host' }
+          vm.eval_code("globalThis.f = function(){}; f.toString = () => { boom() }")
+
+          error = _ { vm.eval_code("console.log(f); 1") }.must_raise IOError
+          _(error.message).must_equal 'host'
+        ensure
+          vm&.dispose!
+        end
+      end
+
+      # The argument loop is a JSCFunction with nothing between it and the
+      # interpreter, so a raise there used to longjmp past the JS_FreeValue and
+      # pin the argument's whole graph on the JS heap, once per call and
+      # repeatable, which condemns the VM rather than merely leaking.
+      describe "as a define_function argument" do
+        it "reaches the guest as a catchable error" do
+          vm = Quickjs::VM.new
+          vm.define_function(:take) { |x| 'unreachable' }
+
+          caught = vm.eval_code("#{revoked} let c = 'none'; try { take(proxy) } catch (e) { c = e.message } c")
+
+          _(caught).must_equal 'revoked proxy'
+        ensure
+          vm&.dispose!
+        end
+
+        it "does not accumulate on the JS heap across calls" do
+          vm = Quickjs::VM.new
+          vm.define_function(:take) { |x| 1 }
+          vm.eval_code('globalThis.mk = () => { const {proxy, revoke} = Proxy.revocable({a: 1, big: new Array(200).fill(0)}, {}); revoke(); return proxy }')
+          200.times { vm.eval_code('try { take(mk()) } catch (e) {}') }
+          vm.gc!
+          before = vm.memory_usage
+
+          500.times { vm.eval_code('try { take(mk()) } catch (e) {}') }
+          vm.gc!
+          after = vm.memory_usage
+
+          _((after[:obj_count] - before[:obj_count]) / 500.0).must_be :<, 1.0
+          _(vm.memory_poisoned?).must_equal false
+        ensure
+          vm&.dispose!
+        end
+      end
+
+      # Only the one refusal is substituted. A host failure met while walking a
+      # logged value is not the log path's to swallow.
+      it "still lets a host error out of a logged value" do
+        vm = Quickjs::VM.new
+        vm.on_log { |l| }
+        vm.define_function('boom') { raise IOError, 'host' }
+        vm.eval_code("globalThis.C = class { toJSON() { boom() } }")
+
+        error = _ { vm.eval_code("console.log({o: new C()}); 'after'") }.must_raise IOError
+        _(error.message).must_equal 'host'
+      ensure
+        vm.dispose!
+      end
+
+      # The other way js_resolve_proxy answers -1. Reported rather than
+      # swallowed for the same reason: it is what Array.isArray would have
+      # said about the same value.
+      it "reports the stack overflow of a chain too deep to resolve" do
+        deep = "let p = [1, 2]; for (let i = 0; i < 1500; i++) p = new Proxy(p, {});"
+        error = _ { ::Quickjs.eval_code("#{deep} p") }.must_raise Quickjs::RuntimeError
+        _(error.message).must_match(/stack overflow/)
+      end
+    end
   end
 
   describe "Exceptions" do
