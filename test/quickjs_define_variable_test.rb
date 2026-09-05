@@ -479,6 +479,43 @@ describe "a value that expands past what the VM could hold" do
     # either direction.
     _(assigning).must_be :<, declaring + rows.size / 2
   end
+  # The per-value checks measure raw bytes; escaping expands them. A string of
+  # nothing but quotes doubles, so it passes the check on the way in and only
+  # the check on the finished literal can catch it. Without that one the VM
+  # runs out of memory and is poisoned for good, which is why this asserts the
+  # VM survives and not just that something was raised.
+  it "catches a value that only goes over budget once it is escaped" do
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+    _ { vm.define_const(:s, %q(") * 1_048_566) }.must_raise ArgumentError
+
+    _(vm.eval_code("1 + 1")).must_equal 2
+  end
+
+  # Extensibility decides whether a property can be added, so it has nothing to
+  # say about a name already there. Asking first refused a redefine the VM
+  # would have taken, and told the caller why in terms that were not true.
+  it "redefines a var on a sealed global, which JavaScript allows" do
+    vm = Quickjs::VM.new
+    vm.define_var(:cfg, 1)
+    vm.eval_code("Object.preventExtensions(globalThis);")
+
+    vm.define_var(:cfg, 2)
+
+    _(vm.eval_code("cfg")).must_equal 2
+  end
+
+  # A descriptor is an ordinary object, so reading `get` off it walks the
+  # prototype chain. A stray Object.prototype.get made every var read as an
+  # accessor and refused it for a reason that was not there.
+  it "does not read the descriptor through Object.prototype" do
+    vm = Quickjs::VM.new
+    vm.eval_code("globalThis.cfg = 1; Object.prototype.get = 1;")
+
+    vm.define_var(:cfg, 2)
+
+    _(vm.eval_code("cfg")).must_equal 2
+  end
   # A key is a value the caller supplies, and the up-front check was on the
   # value path only, so a large String cost nothing as a value and was copied
   # and escaped as a key before anything looked at it. Same discriminator: the

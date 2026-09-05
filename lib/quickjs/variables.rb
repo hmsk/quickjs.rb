@@ -190,7 +190,13 @@ module Quickjs
           # the prototype chain, and a setter inherited from Object.prototype
           # takes the value while the guard above, which asks only about own
           # properties, reports a clean global.
-          eval_code("var #{key};")
+          begin
+            eval_code("var #{key};")
+          rescue Quickjs::SyntaxError
+            # A guest lexical of the same name refuses it. Reachable only with a
+            # record ahead of a declaration that never ran, and the assignment
+            # below reports it the same way any other collision is reported.
+          end
         elsif !_live_lexical?(key)
           begin
             eval_code("#{JS_KEYWORDS.fetch(kind)} #{key};")
@@ -331,13 +337,19 @@ module Quickjs
           // function called with no receiver gets the global object itself.
           const root = (function () { return this })();
           if (typeof root !== 'object' || root === null) return 'broken';
-          // A sealed global refuses the declaration at runtime rather than
-          // swallowing it, but the caller is owed the same ArgumentError as any
-          // other global it cannot be given.
-          if (!Object.isExtensible(root)) return 'sealed';
           const d = Object.getOwnPropertyDescriptor(root, #{::JSON.generate(::String.new(key))});
-          if (!d) return 'absent';
-          if (d.get !== undefined || d.set !== undefined) return 'accessor';
+          // Extensibility only decides whether a property can be added, so it
+          // is asked about only when there is none. A sealed global with the
+          // property already on it takes the declaration quite happily, and
+          // refusing that told the caller something untrue about their VM.
+          if (!d) return Object.isExtensible(root) ? 'absent' : 'sealed';
+          // Own keys only. A descriptor is an ordinary object, so reading `get`
+          // off it walks the prototype chain, and a stray Object.prototype.get
+          // (a gadget, or a library that just assigns it) made every var look
+          // like an accessor. It only ever failed closed, but it named a cause
+          // that was not there.
+          const has = (k) => Object.prototype.hasOwnProperty.call(d, k);
+          if (has('get') || has('set')) return 'accessor';
           return d.writable ? 'writable' : 'readonly';
         })()
       JS
