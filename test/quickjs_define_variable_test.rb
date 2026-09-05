@@ -876,7 +876,7 @@ describe "values the serializer must not take at face value" do
   # whether a binding is live by provoking a redeclaration error put a
   # console.error the caller never wrote into their log stream, once per
   # redefine, on a path that succeeded. This is the README's own example.
-  it "does not log anything of its own when redefining" do
+  it "does not log when the binding reads as a live lexical" do
     logged = []
     vm = Quickjs::VM.new
     vm.on_log { |entry| logged << [entry.severity, entry.raw.to_s] }
@@ -890,6 +890,32 @@ describe "values the serializer must not take at face value" do
 
     _(logged).must_equal []
     _(vm.eval_code("counter")).must_equal 2
+  end
+
+  # The check cannot answer for a binding holding undefined, or one shadowing a
+  # guest global of the same name, so those two still fall back to provoking the
+  # error and still log. Pinned rather than left to the comment, since the shape
+  # above reads as a general promise and this is where it stops.
+  it "still logs for the two shapes the check cannot answer for" do
+    holding_undefined = Quickjs::VM.new
+    rows = []
+    holding_undefined.on_log { |entry| rows << entry.severity }
+    holding_undefined.define_let(:u, Quickjs::Value::UNDEFINED)
+    holding_undefined.define_let(:u, 2)
+
+    _(rows).must_equal [:error]
+    _(holding_undefined.eval_code("u")).must_equal 2
+
+    shadowing = Quickjs::VM.new
+    rows = []
+    shadowing.on_log { |entry| rows << entry.severity }
+    shadowing.eval_code("globalThis.s = 'guest';")
+    shadowing.define_let(:s, 1)
+    shadowing.define_let(:s, 2)
+
+    _(rows).must_equal [:error]
+    _(shadowing.eval_code("s")).must_equal 2
+    _(shadowing.eval_code("globalThis.s")).must_equal "guest"
   end
 
   # Refusing a const redefine asks by attempting the declaration, so it has to
