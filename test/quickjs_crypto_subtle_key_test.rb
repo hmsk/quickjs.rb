@@ -140,7 +140,7 @@ describe "crypto.subtle key management" do
 
       _(vm.eval_code(sign)).must_equal 32
     ensure
-      vm.dispose!
+      vm&.dispose!
     end
 
     # The handle is read off whatever the guest passes as the key argument, so
@@ -158,7 +158,7 @@ describe "crypto.subtle key management" do
         .must_raise Quickjs::TypeError
       _(error.message).must_match(/invalid CryptoKey/)
     ensure
-      vm.dispose!
+      vm&.dispose!
     end
 
     # A class held only by a constant table is movable, so caching the lookup
@@ -173,7 +173,7 @@ describe "crypto.subtle key management" do
 
       _(vm.eval_code(sign)).must_equal 32
     ensure
-      vm.dispose!
+      vm&.dispose!
     end
 
     # The lookup runs inside a QuickJS native callback with no rb_protect
@@ -186,8 +186,14 @@ describe "crypto.subtle key management" do
         require "quickjs/quickjsrb"
         abort "CryptoKey should not be loaded" if Quickjs.const_defined?(:CryptoKey)
         vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_CRYPTO])
+        # A real entry rather than a made-up id: 1 is in no table, so the nil
+        # hash hit alone would satisfy the callers and the class lookup would
+        # never be reached.
+        vm.define_function(:boom) { raise ArgumentError, 'host' }
+        vm.eval_code("globalThis.id = null; try { boom() } catch (e) { globalThis.id = e.rb_object_id }")
+        abort "no id was planted" unless vm.eval_code("typeof globalThis.id") == 'number'
         begin
-          vm.eval_code('await crypto.subtle.sign("HMAC", {rb_object_id: 1}, new Uint8Array([1]))')
+          vm.eval_code('await crypto.subtle.sign("HMAC", {rb_object_id: globalThis.id}, new Uint8Array([1]))')
           puts "no raise"
         rescue Exception => e
           puts "\#{e.class}: \#{e.message}"

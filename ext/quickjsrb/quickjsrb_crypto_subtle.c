@@ -93,7 +93,11 @@ static VALUE r_crypto_key_class(void)
   if (!rb_const_defined_at(r_quickjs, rb_intern("CryptoKey")))
     return Qnil;
 
-  return rb_const_get(r_quickjs, rb_intern("CryptoKey"));
+  VALUE r_class = rb_const_get(r_quickjs, rb_intern("CryptoKey"));
+  // Defined is not the same as a class. Anything else bound to that name makes
+  // rb_obj_is_kind_of raise TypeError, which is the unprotected raise this
+  // function exists not to make.
+  return RB_TYPE_P(r_class, T_CLASS) ? r_class : Qnil;
 }
 
 // Find Ruby CryptoKey from a JS CryptoKey object via rb_object_id handle.
