@@ -317,6 +317,12 @@ static VALUE vm_alloc(VALUE r_self)
 // trusted to be unlikely, since one would hand two subsystems the same entry.
 #define QUICKJSRB_HANDLE_BITS 48
 
+// Narrowed, not closed: the draw below still calls into Ruby, so a
+// NoMemoryError or an entropy failure raises from inside a QuickJS callback
+// with nothing between it and the interpreter. Pre-resolving takes the
+// reachable cause off that path; the rest is #114's to remove along with the
+// table itself.
+//
 // Resolved once at Init and pinned, rather than looked up per registration.
 // This runs inside QuickJS native callbacks with no rb_protect between them and
 // the interpreter, the hazard r_crypto_key_class is written around, and a

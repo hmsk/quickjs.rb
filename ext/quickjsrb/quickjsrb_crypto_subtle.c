@@ -345,32 +345,26 @@ static JSValue js_crypto_key_to_js(JSContext *ctx, VALUE r_key)
   VALUE r_algo_pub_exp = rb_hash_aref(r_algorithm, rb_str_new_cstr("publicExponent"));
   if (!NIL_P(r_algo_pub_exp))
   {
+    // Built through JS_NewTypedArray rather than by calling globalThis's
+    // Uint8Array. That constructor is the guest's to delete or replace, and a
+    // replacement can throw anything it likes, including a Ruby exception from
+    // a bridge: nothing here can report it, because this runs after its
+    // caller's rb_protect has returned and every caller stores the result
+    // unchecked. Not reading the global removes the question rather than
+    // answering it. What remains is the runtime's own allocation failing, which
+    // is a genuine out-of-memory, and that is left pending for the renderer to
+    // classify and latch rather than cleared.
     JSValue j_pe_buf = JS_NewArrayBufferCopy(ctx,
                                              (const uint8_t *)RSTRING_PTR(r_algo_pub_exp),
                                              RSTRING_LEN(r_algo_pub_exp));
-    // JS_GetGlobalObject hands back a reference of its own, so reading through
-    // it inline pinned the global for the life of the runtime, once per RSA key.
-    JSValue j_global = JS_GetGlobalObject(ctx);
-    JSValue j_uint8 = JS_GetPropertyStr(ctx, j_global, "Uint8Array");
-    JS_FreeValue(ctx, j_global);
-    JSValue j_pe = JS_CallConstructor(ctx, j_uint8, 1, (JSValueConst *)&j_pe_buf);
-    JS_FreeValue(ctx, j_uint8);
-    JS_FreeValue(ctx, j_pe_buf);
-    // A guest that deleted or shadowed Uint8Array makes the construction throw,
-    // and storing the sentinel would put JS_EXCEPTION on the key as a real own
-    // property and leave the throw pending to surface somewhere later. The key
-    // is described without the exponent instead.
-    //
-    // The throw itself is still lost, and cannot be reported from here: this
-    // runs after its caller's rb_protect has returned, so a raise would longjmp
-    // through the JSCFunction, and every caller stores the result without
-    // checking it, so returning JS_EXCEPTION only moves the sentinel up one
-    // level. When the guest's shim reaches a Ruby bridge, the exception it
-    // raised stays parked in alive_objects. #125.
-    if (JS_IsException(j_pe))
-      JS_FreeValue(ctx, JS_GetException(ctx));
-    else
-      JS_SetPropertyStr(ctx, j_algo, "publicExponent", j_pe);
+    if (!JS_IsException(j_pe_buf))
+    {
+      JSValue j_args[3] = {j_pe_buf, JS_NewInt32(ctx, 0), JS_NewInt64(ctx, RSTRING_LEN(r_algo_pub_exp))};
+      JSValue j_pe = JS_NewTypedArray(ctx, 3, (JSValueConst *)j_args, JS_TYPED_ARRAY_UINT8);
+      JS_FreeValue(ctx, j_pe_buf);
+      if (!JS_IsException(j_pe))
+        JS_SetPropertyStr(ctx, j_algo, "publicExponent", j_pe);
+    }
   }
 
   JS_SetPropertyStr(ctx, j_key, "algorithm", j_algo);

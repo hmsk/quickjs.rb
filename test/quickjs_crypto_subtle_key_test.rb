@@ -161,20 +161,36 @@ describe "crypto.subtle key management" do
       vm&.dispose!
     end
 
-    # The exponent is handed to JS through Uint8Array, which the guest can take
-    # away. Storing the failed construction would put the exception sentinel on
-    # the key as a real property and leave the throw to surface later.
-    it "describes the key without the exponent when Uint8Array is gone" do
+    # The exponent used to be handed to JS by calling globalThis's Uint8Array,
+    # which the guest can delete or replace with anything, including a shim
+    # that throws. It is built directly now, so what the guest does to that
+    # name cannot reach the description.
+    it "describes the key in full even when Uint8Array is gone" do
       vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
       vm.eval_code('globalThis.PE = new Uint8Array([1, 0, 1]); delete globalThis.Uint8Array; 1')
 
       described = vm.eval_code(<<~JS)
         const k = await crypto.subtle.generateKey({name: 'RSA-OAEP', modulusLength: 2048, publicExponent: PE, hash: 'SHA-256'}, true, ['encrypt', 'decrypt']);
-        [Object.keys(k.publicKey.algorithm).join(','), typeof k.publicKey.algorithm.publicExponent].join(' | ')
+        [Object.keys(k.publicKey.algorithm).join(','), Array.from(k.publicKey.algorithm.publicExponent).join('.')].join(' | ')
       JS
 
-      _(described).must_equal 'name,hash,modulusLength | undefined'
+      _(described).must_equal 'name,hash,modulusLength,publicExponent | 1.0.1'
       _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm&.dispose!
+    end
+
+    # A replacement that reaches a Ruby bridge used to have its exception
+    # swallowed and left parked in alive_objects.
+    it "does not run a replaced Uint8Array at all" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      calls = 0
+      vm.define_function(:boom) { calls += 1; raise ArgumentError, 'host' }
+      vm.eval_code('globalThis.PE = new Uint8Array([1, 0, 1]); globalThis.Uint8Array = function () { boom() }; 1')
+
+      vm.eval_code("const k = await crypto.subtle.generateKey({name: 'RSA-OAEP', modulusLength: 2048, publicExponent: PE, hash: 'SHA-256'}, true, ['encrypt', 'decrypt']); 'resolved'")
+
+      _(calls).must_equal 0
     ensure
       vm&.dispose!
     end
