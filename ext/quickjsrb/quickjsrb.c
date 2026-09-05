@@ -938,6 +938,18 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
   }
   case JS_TAG_OBJECT:
   {
+    // Asked first, and only by the walk that builds a console row. It has to
+    // come before the branches below because JS_IsFunction reads a proxy's
+    // is_func without resolving it, so a proxy revoked over a function target
+    // would be claimed there and raise from the toString read instead; and
+    // before the r_seen marking, so a proxy met twice in one row is two
+    // substitutions rather than a second one reading as a cycle.
+    if (conv != NULL && conv->substitute_unresolvable && JS_IsArray(ctx, j_val) < 0)
+    {
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      return rb_str_new2(QUICKJSRB_UNRENDERABLE);
+    }
+
     int promiseState = JS_PromiseState(ctx, j_val);
     if (promiseState != -1)
     {
@@ -1038,12 +1050,7 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
     // and takes the exception off the context on the way.
     int is_array = JS_IsArray(ctx, j_val);
     if (is_array < 0)
-    {
-      if (!conv->substitute_unresolvable)
-        return raise_js_exception(ctx); // raises
-      JS_FreeValue(ctx, JS_GetException(ctx));
-      return rb_str_new2(QUICKJSRB_UNRENDERABLE);
-    }
+      return raise_js_exception(ctx); // raises
     if (is_array)
     {
       r_result = js_array_to_rb(ctx, j_val, conv);
@@ -1607,11 +1614,12 @@ static VALUE r_build_log_row(VALUE r_build)
     }
     else
     {
-      // Substitutes an unresolvable proxy wherever in the graph it sits, the
-      // way the Promise above is substituted: the raise would otherwise come
-      // back to the guest as a catchable Error, whose Ruby exception is parked
-      // in alive_objects until something throws it back, so a guest that
-      // catches its own console.log in a loop pins one per iteration.
+      // Substitutes an unresolvable proxy wherever in the graph it sits. The
+      // raise would otherwise come back to the guest as a catchable Error,
+      // whose Ruby exception is parked in alive_objects until something throws
+      // it back, so a guest that catches its own console.log in a loop pins one
+      // per iteration. The Promise above is the same idea and only goes one
+      // level deep: a nested one still raises out of the row.
       r_raw = to_rb_value_for_log(ctx, j_logged);
     }
     VALUE r_c = rb_str_new2(js_hold_cstring(hold, j_logged, QUICKJSRB_UNRENDERABLE));
