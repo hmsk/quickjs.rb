@@ -250,6 +250,38 @@ describe Quickjs do
       result = ::Quickjs.eval_code("() => 'hi'")
       _(result).must_be_instance_of Quickjs::Function
     end
+
+    # JS_IsArray answers -1 rather than false when it cannot resolve a proxy,
+    # and read as a boolean that took the array path: a value whose every trap
+    # throws came back as [], indistinguishable from a genuine empty Array.
+    describe "a revoked Proxy" do
+      REVOKED = "const {proxy, revoke} = Proxy.revocable({a: 1}, {}); revoke();"
+
+      it "reports the TypeError the guest would see" do
+        error = _ { ::Quickjs.eval_code("#{REVOKED} proxy") }.must_raise Quickjs::TypeError
+        _(error.message).must_equal 'revoked proxy'
+      end
+
+      it "reports it from inside a container too" do
+        _ { ::Quickjs.eval_code("#{REVOKED} ({ok: 1, bad: proxy})") }.must_raise Quickjs::TypeError
+        _ { ::Quickjs.eval_code("#{REVOKED} [1, proxy]") }.must_raise Quickjs::TypeError
+      end
+
+      it "leaves the VM usable, having taken the throw off the context" do
+        vm = Quickjs::VM.new
+        _ { vm.eval_code("#{REVOKED} proxy") }.must_raise Quickjs::TypeError
+        _(vm.eval_code('1 + 1')).must_equal 2
+      ensure
+        vm.dispose!
+      end
+
+      # The -1 is the proxy being unresolvable, not the target being an array,
+      # so a live proxy has to keep converting as whatever it wraps.
+      it "does not change what a live Proxy converts to" do
+        assert_code("new Proxy([1, 2, 3], {})", [1, 2, 3])
+        assert_code("new Proxy({a: 1}, {})", {'a' => 1})
+      end
+    end
   end
 
   describe "Exceptions" do
