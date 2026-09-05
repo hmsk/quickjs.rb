@@ -1234,6 +1234,36 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
+    # Construction opens no scope, because there is no earlier call to tell it
+    # apart from, so every refusal counted while a VM is built belongs to that
+    # VM. Some of them raise on the way out. The feature module loads do not:
+    # they free their results unchecked, so a std module that ran out is
+    # discarded and the VM handed back on a heap that had already refused,
+    # with the first call finding it only by refusing too.
+    #
+    # Either outcome below is correct, and which one a platform takes depends
+    # on where its own allocations fall. Neither hands back a usable VM.
+    it "does not hand back a VM whose heap refused while it was being built" do
+      vm = nil
+      refused_at_construction = nil
+
+      begin
+        vm = Quickjs::VM.new(memory_limit: 64 * 1024, features: [:feature_std])
+      rescue Quickjs::RuntimeError => e
+        refused_at_construction = e
+      end
+
+      if vm
+        _(vm.memory_poisoned?).must_equal true
+        error = _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
+        _(error.message).must_match(/poisoned/)
+      else
+        _(refused_at_construction.message).must_match(/out of memory/)
+      end
+    ensure
+      vm&.dispose!
+    end
+
     # Scoped to the call rather than to the VM: a guest that runs out, catches
     # it and returns is left alone, which is what it was before the allocator
     # was ours. The scope is what makes that possible to say at all.

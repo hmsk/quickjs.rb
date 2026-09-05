@@ -2137,6 +2137,16 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   JS_SetPropertyStr(data->context, j_global, "console", j_console);
   JS_FreeValue(data->context, j_global);
 
+  // Construction opens no scope, since there is no earlier call to be told
+  // apart from: every refusal counted so far happened building this VM. Some
+  // of them raise on their way out, but the feature module loads free their
+  // results unchecked, so a std or os module that ran out is discarded here
+  // and the VM is handed back on a heap that has already refused. The first
+  // call would find it only by refusing too, and the scope it opens masks
+  // the count that would have said so.
+  if (data->alloc_refusals > 0)
+    data->oom_poisoned = true;
+
   return r_self;
 }
 
