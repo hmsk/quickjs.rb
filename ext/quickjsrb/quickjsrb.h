@@ -99,6 +99,16 @@ typedef struct VMData
   // whether the allocator refused during a window they name, which is the
   // one signal a guest cannot write to. Only mutated from the thread running
   // JS, which is one at a time per VM.
+  //
+  // It counts a refusal QuickJS goes on to tolerate as well as one it reports:
+  // resize_shape_hash and compact_properties ignore what they get back and
+  // carry on correctly with the smaller table. A reader would then answer for
+  // a heap that had recovered. Reachable only where such an allocation is the
+  // one that fails while the ones around it do not, which 120 shapings against
+  // the ceiling did not produce, and every reader below is already in a
+  // something-has-gone-wrong path except construction, where a refusal means
+  // the limit cannot hold the runtime. Recorded here rather than guarded
+  // against, since the allocator cannot see which of its callers will care.
   uint64_t alloc_refusals;
   // The count as the current public API call began. What the readers compare
   // against: allocator_refused asks whether the number moved inside the call

@@ -757,12 +757,15 @@ struct js_exception_render
 {
   JSContext *ctx;
   // Whether the exception is the evaluation's own result. Only then is it news:
-  // it gets the "Uncaught" row the console would have printed, and an
-  // out-of-memory in it condemns the VM. An exception raised part-way through
-  // converting a value that did return is on its way to the caller as that
-  // call's error — telling the log listener it went uncaught would be the
-  // opposite of what happened, and the heap it was found on is the heap of a
-  // run that finished.
+  // it gets the "Uncaught" row the console would have printed. An exception
+  // raised part-way through converting a value that did return is on its way to
+  // the caller as that call's error, and telling the log listener it went
+  // uncaught would be the opposite of what happened.
+  //
+  // The out-of-memory latch is not keyed on this and reads the same either way.
+  // It was, while the latch lived in the class cascade below and only the
+  // uncaught path reached it; the heap is a fact about the call rather than
+  // about which of its exceptions is being rendered.
   bool uncaught;
   JsHold hold;
 };
