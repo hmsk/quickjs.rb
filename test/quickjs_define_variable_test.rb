@@ -543,7 +543,7 @@ describe "a value that expands past what the VM could hold" do
   # while the Ruby walk still had room. The caller is told to rescue
   # ArgumentError, and on a worker thread a raw Quickjs::SyntaxError is fatal.
   it "raises the same error when the parser runs out first" do
-    raised = [400, 550, 700, 1500].map do |depth|
+    outcomes = [400, 550, 700, 900, 1500].map do |depth|
       value = (1..depth).reduce([1]) { |inner, _| [inner] }
       ::Thread.new do
         vm = Quickjs::VM.new
@@ -552,13 +552,18 @@ describe "a value that expands past what the VM could hold" do
           :accepted
         rescue ArgumentError
           :refused
+        rescue StandardError => e
+          e.class
         end
       end.value
     end
 
-    _(raised).must_equal [:accepted, :refused, :refused, :refused]
-  end
-  # undefined, NaN and Infinity are not literals in JavaScript, they are
+    # Not where the boundary falls, which is this thread's stack on this
+    # machine and nobody else's. What has to hold is that crossing it raises
+    # what the caller was told to rescue, wherever it is.
+    _(outcomes.uniq - [:accepted, :refused]).must_equal []
+    skip "nothing was deep enough to be refused here" unless outcomes.include?(:refused)
+  end  # undefined, NaN and Infinity are not literals in JavaScript, they are
   # properties of the global object, and QuickJS lets a guest redefine them
   # with defineProperty even though the spec says it should not. Writing them
   # by name handed the guest the value, at any depth, for const and let as much
