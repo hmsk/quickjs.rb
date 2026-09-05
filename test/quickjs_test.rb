@@ -1144,6 +1144,10 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
+    # What the listener hears is decided by the conversion: it gets the real
+    # rejection, not "out of memory" borrowed from a refusal the guest had
+    # already caught. Whether the VM survives is decided separately, and an
+    # unhandled rejection is not a recovery, so this one does condemn it.
     it "hands the listener the real rejection reason after a recovered out-of-memory" do
       vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
       seen = []
@@ -1157,11 +1161,33 @@ describe Quickjs::VM do
 
       _(seen.map(&:class)).must_equal [Quickjs::TypeError]
       _(seen.map(&:message)).must_equal ['real reason']
-      _(vm.memory_poisoned?).must_equal false
+      _(vm.memory_poisoned?).must_equal true
     ensure
       vm.dispose!
     end
 
+    # The rejection nobody handled, with no listener to read its reason: the
+    # only reader below the tracker is one nobody registered, so a job that ran
+    # out inside drain_jobs! left the VM running on the heap that refused.
+    it "condemns the VM for an out-of-memory a drained job left unhandled" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      ran = []
+      vm.define_function(:mark) {|m| ran << m }
+
+      _(vm.eval_code(<<~JS)).must_equal 'ok'
+        Promise.resolve().then(() => { mark('job ran'); new Array(2_000_000).fill(0); mark('allocated') });
+        'ok';
+      JS
+      _(vm.memory_poisoned?).must_equal false
+
+      vm.drain_jobs!
+
+      _(ran).must_equal ['job ran']
+      _(vm.memory_poisoned?).must_equal true
+      _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
+    ensure
+      vm.dispose!
+    end
     # The listener runs after the row is built and can re-enter the VM, so the
     # window has to close before it: a nested call that meets a refusal and
     # recovers from it is that call's business, not this row's.

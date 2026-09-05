@@ -1398,6 +1398,22 @@ static void quickjsrb_promise_rejection_tracker(
     return;
 
   VMData *data = JS_GetContextOpaque(ctx);
+
+  // A rejection nobody handled is not a recovery, so a refusal met anywhere in
+  // this call condemns the heap here, and does so before the listener check:
+  // with no listener registered there is no reader below at all, and a job
+  // that ran out inside drain_jobs! left the VM running on the heap that
+  // refused. Read of the call rather than of the reason conversion, because
+  // the allocation that failed is the one the job was making when it rejected,
+  // and reading its reason afterwards allocates nothing.
+  //
+  // The cost is a guest that catches its own out-of-memory and, in the same
+  // call, leaves an unrelated rejection unhandled: that VM is condemned too.
+  // Nothing here can tell the two apart, and of the two mistakes this is the
+  // one that does not leave a caller evaluating on a refused heap.
+  if (allocator_refused(data))
+    data->oom_poisoned = true;
+
   if (NIL_P(data->on_unhandled_rejection))
     return;
 

@@ -413,6 +413,8 @@ When the JS heap exhausts its memory limit, QuickJS enters a fragile state where
 
 The flag follows the allocator, not the error text: it flips when an allocation the JS runtime asked for was actually refused during the call, so JavaScript that merely throws an error saying `out of memory` leaves the VM alone, and a real exhaustion is caught even when QuickJS could not allocate an error object to report it with. Within the call where the heap ran out, that fact outranks whatever was thrown: JavaScript that catches its own out-of-memory and then throws something else is reported as `out of memory` rather than as the later error, since the VM is condemned either way. JavaScript that catches it and returns normally keeps its VM.
 
+"Returns normally" means nothing went unreported: an unhandled promise rejection in the same call condemns the VM too, since a rejection nobody handled is not a recovery and nothing can tell it apart from the heap's own doing.
+
 ```rb
 vm = Quickjs::VM.new(memory_limit: 256 * 1024 * 1024)
 
