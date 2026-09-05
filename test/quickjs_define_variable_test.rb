@@ -352,6 +352,8 @@ describe "VM#define_const / #define_let / #define_var" do
       _(@vm.eval_code("seen")).must_equal "visible"
     end
   end
+end
+
 describe "define_var onto a global that is already there" do
   # var is the only form that lands on globalThis, so it is the only one an
   # existing property can intercept. Both of these used to report success:
@@ -1297,6 +1299,4 @@ describe "when the VM can no longer answer about its own globals" do
 
     _(err.message).must_match(/globals/)
   end
-end
-
 end
