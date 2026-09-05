@@ -84,7 +84,15 @@ static VALUE r_find_alive_crypto_key(JSContext *ctx, JSValueConst j_key)
   if (handle <= 0)
     return Qnil;
   VMData *data = JS_GetContextOpaque(ctx);
-  return rb_hash_aref(data->alive_objects, LONG2NUM(handle));
+  VALUE r_key = rb_hash_aref(data->alive_objects, LONG2NUM(handle));
+  // The handle is read off whatever the guest passed as the key, and
+  // alive_objects also holds bridged exceptions and the Ruby object behind a
+  // File proxy. Without this an object carrying another entry's id reaches the
+  // operations below as if it were a key, and the caller is told about a
+  // method missing on a File rather than about an invalid CryptoKey.
+  if (!rb_obj_is_kind_of(r_key, rb_const_get(rb_const_get(rb_cObject, rb_intern("Quickjs")), rb_intern("CryptoKey"))))
+    return Qnil;
+  return r_key;
 }
 
 // Build a comprehensive Ruby Hash (symbol keys) from a JS algorithm object.

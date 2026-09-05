@@ -141,5 +141,20 @@ describe "crypto.subtle key management" do
     ensure
       vm.dispose!
     end
+
+    # The handle is read off whatever the guest passes as the key argument, so
+    # unlike the File proxy's closure-captured one it is the guest's to choose.
+    # An id belonging to another entry used to reach the operation as a key.
+    it "refuses an id that belongs to something else in the table" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      vm.define_function(:boom) { raise ArgumentError, 'host' }
+      vm.eval_code("globalThis.id = null; try { boom() } catch (e) { globalThis.id = e.rb_object_id }")
+
+      error = _ { vm.eval_code("await crypto.subtle.sign('HMAC', {rb_object_id: globalThis.id}, new Uint8Array([1, 2, 3]))") }
+        .must_raise Quickjs::TypeError
+      _(error.message).must_match(/invalid CryptoKey/)
+    ensure
+      vm.dispose!
+    end
   end
 end
