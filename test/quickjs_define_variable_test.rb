@@ -492,6 +492,22 @@ describe "a value that expands past what the VM could hold" do
     _(vm.eval_code("1 + 1")).must_equal 2
   end
 
+  # A non-configurable property of the global object makes a lexical
+  # declaration of that name impossible for good, and a guest top-level `var`
+  # creates exactly that shape. Letting the refusal pass left nothing for the
+  # assignment to find, so it wrote the global: a define_let on globalThis.
+  # The sibling test below uses a configurable property, which is the one
+  # variant where the declaration succeeds and shadows.
+  it "refuses a let the VM can never give it, rather than writing the global" do
+    vm = Quickjs::VM.new
+    vm.eval_code("var owned = 'guest';")
+    vm.instance_variable_set(:@_defined_variables, { "owned" => :let })
+
+    err = _ { vm.define_let(:owned, { "api_key" => "s3cret" }) }.must_raise ArgumentError
+
+    _(err.message).must_match(/cannot be configured away/)
+    _(vm.eval_code(%q{(function () { return this })().owned})).must_equal "guest"
+  end
   # define_var promises the value is visible on globalThis. A guest lexical of
   # the same name refuses the declaration, and swallowing that let the
   # assignment write the guest's binding and report success for a define that
@@ -560,7 +576,9 @@ describe "a value that expands past what the VM could hold" do
   # record of.
   it "refuses a form change onto a global it cannot write" do
     vm = Quickjs::VM.new
-    vm.define_let(:w, 1)
+    # Only the record, with no live let: with one, the declaration is refused
+    # for being a redeclaration and the guard never has to answer, which is how
+    # this test used to pass with the guard deleted.
     vm.instance_variable_set(:@_defined_variables, { "w" => :let })
     vm.eval_code(<<~JS)
       globalThis.stolen = null;
@@ -569,11 +587,11 @@ describe "a value that expands past what the VM could hold" do
       });
     JS
 
-    _ { vm.define_var(:w, 2) }.must_raise ArgumentError
+    err = _ { vm.define_var(:w, 2) }.must_raise ArgumentError
 
+    _(err.message).must_match(/accessor/)
     _(vm.eval_code("stolen")).must_be_nil
-  end
-  # Extensibility decides whether a property can be added, so it has nothing to
+  end  # Extensibility decides whether a property can be added, so it has nothing to
   # say about a name already there. Asking first refused a redefine the VM
   # would have taken, and told the caller why in terms that were not true.
   it "redefines a var on a sealed global, which JavaScript allows" do

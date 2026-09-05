@@ -198,9 +198,12 @@ module Quickjs
           begin
             eval_code("#{JS_KEYWORDS.fetch(kind)} #{key};")
           rescue Quickjs::SyntaxError
-            # Already declared. Reached when the binding holds undefined, or
-            # when it shadows a guest global of the same name, since neither is
-            # decisive above. Those two still log.
+            # Refused because the binding is already there, which is the
+            # ordinary case and leaves the assignment something to find. Or
+            # because JavaScript will never accept this declaration at all,
+            # which leaves it nothing, and then the assignment writes the
+            # global instead.
+            _refuse_restricted_global(key, kind)
           end
         end
 
@@ -326,6 +329,41 @@ module Quickjs
     # VM that has evaluated untrusted JavaScript owns its own environment, and
     # there is no way to hand a value into it unobserved. Define before running
     # code you do not control.
+    # A non-configurable property of the global object makes a lexical
+    # declaration of that name impossible for the life of the VM: JavaScript
+    # refuses `let x;` outright rather than shadowing it. A guest`s top-level
+    # `var` creates exactly that shape, so this is not exotic.
+    #
+    # Letting that refusal pass leaves no lexical binding for the assignment to
+    # find, and it writes the global instead. A define_let that puts its value
+    # on globalThis is the one thing this form promises does not happen, so the
+    # caller is told rather than being given a success it did not get.
+    #
+    # Anything but a clean false refuses, since not being able to ask is not a
+    # reason to go ahead.
+    def _refuse_restricted_global(key, kind)
+      restricted =
+        begin
+          eval_code(<<~JS)
+            (() => {
+              const root = (function () { return this })();
+              const d = Object.getOwnPropertyDescriptor(root, #{::JSON.generate(::String.new(key))});
+              if (!d) return false;
+              Object.setPrototypeOf(d, null);
+              return !d.configurable;
+            })()
+          JS
+        rescue Quickjs::InterruptedError
+          raise
+        rescue Quickjs::RuntimeError
+          true
+        end
+      return if restricted == false
+
+      raise ::ArgumentError,
+        "cannot define #{kind} #{key}: globalThis.#{key} cannot be configured away, so JavaScript " \
+        "will not accept a #{kind} of that name and the value would be written to that global instead"
+    end
     def _refuse_unusable_global(key)
       state = eval_code(<<~JS)
         (() => {
@@ -383,10 +421,12 @@ module Quickjs
           "cannot define var #{key}: this VM cannot be asked about its globals, so whether the " \
           "assignment would take effect is unknown. Replacing globalThis or Object does this"
       end
-    rescue Quickjs::TypeError, Quickjs::ReferenceError => e
+    rescue Quickjs::InterruptedError
+      raise
+    rescue Quickjs::RuntimeError => e
       raise ::ArgumentError,
         "cannot define var #{key}: asking this VM about its globals failed with #{e.class}. " \
-        "Replacing globalThis or Object does this"
+        "Replacing Object, or any of the methods this asks it for, does this"
     end
 
     def _validate_variable_name(name, budget)
