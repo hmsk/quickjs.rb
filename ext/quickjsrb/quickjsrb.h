@@ -100,6 +100,12 @@ typedef struct VMData
   // one signal a guest cannot write to. Only mutated from the thread running
   // JS, which is one at a time per VM.
   uint64_t alloc_refusals;
+  // The count as the current public API call began. What the readers compare
+  // against: allocator_refused asks whether the number moved inside the call
+  // they are reporting on, not whether this VM ever refused. A guest that
+  // catches an out-of-memory and returns normally is left alone, as it is
+  // today.
+  uint64_t alloc_refusals_at_scope;
   // Once the runtime has hit JS-level "out of memory", the QuickJS heap is in
   // a fragile state where further evaluation can trigger a use-after-free in
   // the parser-error-during-OOM cascade (segfault inside js_shape_hash_unlink).
@@ -407,6 +413,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->preloaded_module_names = rb_hash_new();
   data->j_file_proxy_creator = JS_UNDEFINED;
   data->alloc_refusals = 0;
+  data->alloc_refusals_at_scope = 0;
   data->oom_poisoned = false;
   data->eval_timer_armed = false;
   data->disposed = false;

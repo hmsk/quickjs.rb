@@ -1002,11 +1002,14 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
-    # One level deeper: the discarded throw says "out of memory" as an own data
-    # property, but converting that message to look at it is itself an
-    # allocation — a non-ASCII string transcodes — and it fails on the same
-    # exhausted heap. A string that will not convert is the heap running out.
-    it "condemns the VM when inspecting the discarded throw itself runs out of memory" do
+    # The same shape with nothing actually running out. The getter throws an
+    # error whose message is large and non-ASCII, which is what it took to make
+    # the old detector — the one that read the discarded throw's message
+    # looking for a sentence — run out of memory inside its own inspection and
+    # condemn the VM on the strength of it. Nothing reads that message now, so
+    # the heap is never asked for the string, and a throwing getter is a
+    # throwing getter.
+    it "substitutes for a throwing getter whose error is expensive to render, without condemning the VM" do
       vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
 
       error = _ do
@@ -1022,8 +1025,91 @@ describe Quickjs::VM do
         JS
       end.must_raise Quickjs::RuntimeError
 
-      _(error.message).must_match(/out of memory/)
+      _(error.message).must_equal "(unrenderable value)"
+      _(vm.memory_poisoned?).must_equal false
+      _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm.dispose!
+    end
+
+    # The sentence is the guest's to write, so it cannot be the signal. Every
+    # forgery below reached the latch before the allocator was ours, and each
+    # one condemned a VM whose heap was never touched.
+    it "does not condemn the VM for an InternalError the guest wrote itself" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      _ do
+        vm.eval_code("const e = new Error('out of memory'); e.name = 'InternalError'; throw e;")
+      end.must_raise Quickjs::RuntimeError
+
+      _(vm.memory_poisoned?).must_equal false
+      _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm.dispose!
+    end
+
+    it "does not condemn the VM for a forged out-of-memory thrown from a logged value" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      logged = []
+      vm.on_log {|log| logged << log.to_s }
+
+      _(vm.eval_code(<<~JS)).must_equal 'done'
+        console.log({toString() {
+          const e = new Error('out of memory');
+          e.name = 'InternalError';
+          throw e;
+        }});
+        'done';
+      JS
+
+      _(logged).must_equal ['(unrenderable value)']
+      _(vm.memory_poisoned?).must_equal false
+    ensure
+      vm.dispose!
+    end
+
+    # The sentence this issue is really about: application code reporting that
+    # something else ran out of memory, in a message the VM has no business
+    # reading as news about its own heap.
+    it "does not condemn the VM for a guest error that merely says it ran out of memory" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      error = _ do
+        vm.eval_code("'' + {toString() { throw new Error('worker ran out of memory, retrying') }}")
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'worker ran out of memory, retrying'
+      _(vm.memory_poisoned?).must_equal false
+      _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm.dispose!
+    end
+
+    # The other end, which no sentence could reach: the refusal is counted
+    # where it happens, so an evaluation that runs out is condemned whatever
+    # the throw that comes back says, and whether or not one comes back at all.
+    it "condemns the VM for a real out-of-memory the guest caught and threw something else over" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      error = _ do
+        vm.eval_code("try { new Array(2_000_000).fill(0) } catch (e) {} ; throw new TypeError('after')")
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'out of memory'
       _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
+    # Scoped to the call rather than to the VM: a guest that runs out, catches
+    # it and returns is left alone, which is what it was before the allocator
+    # was ours. The scope is what makes that possible to say at all.
+    it "leaves the VM alone when the guest catches its own out-of-memory and returns" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      _(vm.eval_code("try { new Array(2_000_000).fill(0) } catch (e) { 'caught' }")).must_equal 'caught'
+      _(vm.memory_poisoned?).must_equal false
+      _(vm.eval_code('1 + 1')).must_equal 2
     ensure
       vm.dispose!
     end
