@@ -348,6 +348,67 @@ describe Quickjs do
         vm&.dispose!
       end
 
+      # The check at the top of the object case is not the last word: the reads
+      # after it run the guest's own traps, and one of them can revoke the
+      # proxy that was live when it was asked about.
+      describe "revoking itself from its own trap" do
+        def self_revoking(target)
+          <<~JS
+            globalThis.mk = () => {
+              let rev;
+              const t = #{target};
+              const p = new Proxy(t, {
+                get(x, k) { if (rev) { rev(); rev = null } return x[k] },
+                getPrototypeOf(x) { if (rev) { rev(); rev = null } return Object.getPrototypeOf(x) },
+              });
+              const r = Proxy.revocable(p, {});
+              rev = r.revoke;
+              return r.proxy;
+            };
+          JS
+        end
+
+        it "is still substituted, over an object target" do
+          vm = Quickjs::VM.new
+          rows = []
+          vm.on_log { |l| rows << l.raw }
+          vm.eval_code(self_revoking('{a: 1}'))
+
+          _(vm.eval_code("console.log(mk(), mk()); 'after'")).must_equal 'after'
+          _(rows).must_equal [['(unrenderable value)', '(unrenderable value)']]
+        ensure
+          vm&.dispose!
+        end
+
+        # JS_IsFunction answers off is_func without resolving, so this one is
+        # claimed by the function branch and refuses at its toString instead.
+        it "is still substituted, over a function target" do
+          vm = Quickjs::VM.new
+          rows = []
+          vm.on_log { |l| rows << l.raw }
+          vm.eval_code(self_revoking('function(){}'))
+
+          _(vm.eval_code("console.log(mk(), mk()); 'after'")).must_equal 'after'
+          _(rows).must_equal [['(unrenderable value)', '(unrenderable value)']]
+        ensure
+          vm&.dispose!
+        end
+
+        # The substitution is for the proxy refusing, not for every throw the
+        # same read can carry.
+        it "still lets a host error out of a function's toString" do
+          vm = Quickjs::VM.new
+          vm.on_log { |l| }
+          vm.define_function('boom') { raise IOError, 'host' }
+          vm.eval_code("globalThis.f = function(){}; f.toString = () => { boom() }")
+
+          error = _ { vm.eval_code("console.log(f); 1") }.must_raise IOError
+          _(error.message).must_equal 'host'
+        ensure
+          vm&.dispose!
+        end
+      end
+
       # Only the one refusal is substituted. A host failure met while walking a
       # logged value is not the log path's to swallow.
       it "still lets a host error out of a logged value" do
