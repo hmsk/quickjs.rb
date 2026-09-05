@@ -88,9 +88,31 @@ module Quickjs
         _refuse_unusable_global(key) if kind == :var
         _declare(declared, kind, key, literal)
       elsif existing != kind
+        # A record can be ahead of a declaration that never ran, so refusing a
+        # change of form on the record's word alone would go on refusing a
+        # legitimate one for the life of the VM. The same correction the two
+        # branches below make: ask, and if the other form is not there, the
+        # caller gets the one they asked for.
+        #
+        # Every cross-form redeclaration is a parse error in JavaScript, so the
+        # declaration answers this the same way it answers the const case.
+        unless _live_lexical?(key)
+          begin
+            _refuse_unusable_global(key) if kind == :var
+            return _declare(declared, kind, key, literal)
+          rescue Quickjs::InterruptedError
+            raise
+          rescue Quickjs::SyntaxError
+            # The other form really is declared, so say so below.
+            declared[key] = existing
+          rescue Quickjs::RuntimeError
+            declared[key] = existing
+            raise
+          end
+        end
+
         raise ::ArgumentError,
-          "#{key} is already defined as a #{existing}; it cannot be redefined as a #{kind}"
-      elsif kind == :const
+          "#{key} is already defined as a #{existing}; it cannot be redefined as a #{kind}"      elsif kind == :const
         # Same question, and the same reason not to ask it by provoking a parse
         # error: a refusal is not a place to emit a console.error the caller
         # never wrote. If the name reads as something no `globalThis` property
@@ -273,15 +295,19 @@ module Quickjs
     def _refuse_unusable_global(key)
       state = eval_code(<<~JS)
         (() => {
-          // globalThis can itself have been replaced by an earlier define_var,
-          // in which case the lookup below answers for whatever took its place
-          // and reports a clean global that is not there.
-          if (typeof globalThis !== 'object' || globalThis === null) return 'broken';
-          // A sealed globalThis refuses the declaration at runtime rather than
+          // The real global object, not the `globalThis` property, which is
+          // writable and can be pointed at a decoy. That is reachable from Ruby
+          // alone with define_var(:globalThis, 1): the lookup below would then
+          // answer about the decoy and report a clean global while the value
+          // went to whatever the real one still had sitting there. A sloppy
+          // function called with no receiver gets the global object itself.
+          const root = (function () { return this })();
+          if (typeof root !== 'object' || root === null) return 'broken';
+          // A sealed global refuses the declaration at runtime rather than
           // swallowing it, but the caller is owed the same ArgumentError as any
           // other global it cannot be given.
-          if (!Object.isExtensible(globalThis)) return 'sealed';
-          const d = Object.getOwnPropertyDescriptor(globalThis, #{::JSON.generate(::String.new(key))});
+          if (!Object.isExtensible(root)) return 'sealed';
+          const d = Object.getOwnPropertyDescriptor(root, #{::JSON.generate(::String.new(key))});
           if (!d) return 'absent';
           if (d.get !== undefined || d.set !== undefined) return 'accessor';
           return d.writable ? 'writable' : 'readonly';

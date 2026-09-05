@@ -944,6 +944,60 @@ describe "values the serializer must not take at face value" do
     _(err.message).must_match(/memory_limit/)
     _(vm.eval_code("1 + 1")).must_equal 2
   end
+  # The one branch still acting on the record alone. A record that ran ahead of
+  # a declaration that never happened refused a legitimate change of form, and
+  # went on refusing it for the life of the VM.
+  it "lets a form change through when the other form is not really there" do
+    vm = Quickjs::VM.new(timeout_msec: 60_000)
+    vm.define_let(:warm, 1)
+    busy = ::Thread.new do
+      vm.eval_code("let s = 0; for (let i = 0; i < 60000000; i++) s += i; s")
+    rescue StandardError
+      nil
+    end
+    sleep 0.05
+    begin
+      vm.define_let(:n, 1)
+    rescue ThreadError
+    end
+    busy.join
+    skip "the define was not refused in the window" unless vm.eval_code("typeof n") == "undefined"
+
+    vm.define_var(:n, 7)
+
+    _(vm.eval_code("n")).must_equal 7
+    _(vm.eval_code("globalThis.n")).must_equal 7
+  end
+
+  it "still refuses a form change when the other form is there" do
+    vm = Quickjs::VM.new
+    vm.define_let(:real, 1)
+
+    err = _ { vm.define_var(:real, 2) }.must_raise ArgumentError
+
+    _(err.message).must_match(/already defined as a let/)
+    _(vm.eval_code("real")).must_equal 1
+  end
+  # The guard read the `globalThis` property, which is writable, so pointing it
+  # at a decoy made the probe answer about the decoy while the value went to
+  # whatever the real global still had sitting there. Reachable from Ruby alone
+  # with define_var(:globalThis, 1).
+  it "sees past a globalThis that has been pointed at a decoy" do
+    vm = Quickjs::VM.new
+    vm.eval_code(<<~JS)
+      globalThis.sink = [];
+      Object.defineProperty(globalThis, "x", {
+        get() { return "GETTER" },
+        set(v) { sink.push(v) },
+        configurable: true,
+      });
+      globalThis = {};
+    JS
+
+    _ { vm.define_var(:x, { "a" => 1 }) }.must_raise ArgumentError
+
+    _(vm.eval_code("JSON.stringify(sink)")).must_equal "[]"
+  end
   # A sealed globalThis refuses a var declaration at runtime. The guard exists
   # so that a var the VM cannot be given raises ArgumentError rather than some
   # other class from further in.
