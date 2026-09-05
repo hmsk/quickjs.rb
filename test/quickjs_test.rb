@@ -314,6 +314,40 @@ describe Quickjs do
         vm.dispose!
       end
 
+      # Met twice in one row it is two substitutions, not a substitution and a
+      # cycle: nil is what this conversion reserves for a genuine cycle.
+      it "is substituted once per occurrence in a log row" do
+        vm = Quickjs::VM.new
+        rows = []
+        vm.on_log { |l| rows << l.raw }
+
+        vm.eval_code("#{revoked} console.log({a: proxy, b: proxy}, [proxy, proxy]); 1")
+
+        _(rows).must_equal [[
+          {'a' => '(unrenderable value)', 'b' => '(unrenderable value)'},
+          ['(unrenderable value)', '(unrenderable value)'],
+        ]]
+      ensure
+        vm&.dispose!
+      end
+
+      # JS_IsFunction reads a proxy's is_func without resolving it, so a
+      # function target would be claimed by that branch and raise from the
+      # toString read rather than being substituted with the rest.
+      it "is substituted in a log row over a function target too" do
+        vm = Quickjs::VM.new
+        rows = []
+        vm.on_log { |l| rows << l.raw }
+
+        fn_revoked = "const {proxy, revoke} = Proxy.revocable(function(){}, {}); revoke();"
+        result = vm.eval_code("#{fn_revoked} console.log('x', proxy); 'after'")
+
+        _(result).must_equal 'after'
+        _(rows).must_equal [['x', '(unrenderable value)']]
+      ensure
+        vm&.dispose!
+      end
+
       # Only the one refusal is substituted. A host failure met while walking a
       # logged value is not the log path's to swallow.
       it "still lets a host error out of a logged value" do
