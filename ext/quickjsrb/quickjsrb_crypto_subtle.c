@@ -348,7 +348,11 @@ static JSValue js_crypto_key_to_js(JSContext *ctx, VALUE r_key)
     JSValue j_pe_buf = JS_NewArrayBufferCopy(ctx,
                                              (const uint8_t *)RSTRING_PTR(r_algo_pub_exp),
                                              RSTRING_LEN(r_algo_pub_exp));
-    JSValue j_uint8 = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Uint8Array");
+    // JS_GetGlobalObject hands back a reference of its own, so reading through
+    // it inline pinned the global for the life of the runtime, once per RSA key.
+    JSValue j_global = JS_GetGlobalObject(ctx);
+    JSValue j_uint8 = JS_GetPropertyStr(ctx, j_global, "Uint8Array");
+    JS_FreeValue(ctx, j_global);
     JSValue j_pe = JS_CallConstructor(ctx, j_uint8, 1, (JSValueConst *)&j_pe_buf);
     JS_FreeValue(ctx, j_uint8);
     JS_FreeValue(ctx, j_pe_buf);

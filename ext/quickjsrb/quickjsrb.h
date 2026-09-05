@@ -63,6 +63,9 @@ typedef struct VMData
   struct EvalTime *eval_time;
   VALUE log_listener;
   VALUE alive_objects;
+  // object_id -> handle, so an object bridged twice keeps one entry. Private:
+  // the guest is told the handle, never this key.
+  VALUE alive_handles;
   VALUE module_loader;
   VALUE on_unhandled_rejection;
   // Memoize (specifier, importer) → canonical so the user's loader Proc
@@ -210,6 +213,7 @@ static void vm_mark(void *ptr)
   rb_gc_mark_movable(data->defined_functions);
   rb_gc_mark_movable(data->log_listener);
   rb_gc_mark_movable(data->alive_objects);
+  rb_gc_mark_movable(data->alive_handles);
   rb_gc_mark_movable(data->module_loader);
   rb_gc_mark_movable(data->on_unhandled_rejection);
   rb_gc_mark_movable(data->module_resolution_cache);
@@ -227,6 +231,7 @@ static void vm_compact(void *ptr)
   data->defined_functions = rb_gc_location(data->defined_functions);
   data->log_listener = rb_gc_location(data->log_listener);
   data->alive_objects = rb_gc_location(data->alive_objects);
+  data->alive_handles = rb_gc_location(data->alive_handles);
   data->module_loader = rb_gc_location(data->module_loader);
   data->on_unhandled_rejection = rb_gc_location(data->on_unhandled_rejection);
   data->module_resolution_cache = rb_gc_location(data->module_resolution_cache);
@@ -264,6 +269,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->defined_functions = rb_hash_new();
   data->log_listener = Qnil;
   data->alive_objects = rb_hash_new();
+  data->alive_handles = rb_hash_new();
   data->module_loader = Qnil;
   data->on_unhandled_rejection = Qnil;
   data->module_resolution_cache = rb_hash_new();
@@ -313,15 +319,30 @@ static VALUE vm_alloc(VALUE r_self)
 
 static VALUE alive_objects_register(VMData *data, VALUE r_object)
 {
-  VALUE r_secure_random = rb_const_get(rb_cClass, rb_intern("SecureRandom"));
+  // One entry per object, not per crossing. The old handle was the object_id,
+  // so re-bridging the same File or exception overwrote its own row; drawing a
+  // fresh handle every time would instead add one, and nothing is ever removed,
+  // so `for (i = 0; i < 200000; i++) f()` would grow the table by 200000.
+  VALUE r_object_id = rb_funcall(r_object, rb_intern("object_id"), 0);
+  VALUE r_known = rb_hash_lookup2(data->alive_handles, r_object_id, Qnil);
+  if (!NIL_P(r_known) && !NIL_P(rb_hash_lookup2(data->alive_objects, r_known, Qnil)))
+    return r_known;
+
+  VALUE r_secure_random = rb_const_get(rb_cObject, rb_intern("SecureRandom"));
+  // 1 .. 2^48 - 1, never 0: every reader treats a zero handle as "no entry", so
+  // a zero draw would strand the object and answer as though it had not been
+  // bridged at all.
   VALUE r_limit = rb_funcall(INT2NUM(2), rb_intern("**"), 1, INT2NUM(QUICKJSRB_HANDLE_BITS));
+  r_limit = rb_funcall(r_limit, rb_intern("-"), 1, INT2NUM(1));
   VALUE r_handle;
   do
   {
     r_handle = rb_funcall(r_secure_random, rb_intern("random_number"), 1, r_limit);
+    r_handle = rb_funcall(r_handle, rb_intern("+"), 1, INT2NUM(1));
   } while (!NIL_P(rb_hash_lookup2(data->alive_objects, r_handle, Qnil)));
 
   rb_hash_aset(data->alive_objects, r_handle, r_object);
+  rb_hash_aset(data->alive_handles, r_object_id, r_handle);
   return r_handle;
 }
 

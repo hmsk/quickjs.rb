@@ -486,6 +486,32 @@ describe "RubyFileProxy" do
     end
   end
 
+  # One entry per object rather than per crossing. The handle used to be the
+  # object_id, so re-bridging overwrote its own row; a fresh draw each time
+  # would add one instead, and nothing is ever removed from the table.
+  describe "crossing into JS more than once" do
+    it "keeps one handle for one object" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+
+      first = vm.eval_code('get_file().rb_object_id')
+      _(vm.eval_code("for (let i = 0; i < 500; i++) get_file(); get_file().rb_object_id")).must_equal first
+      _(first).must_be :>, 0
+    ensure
+      vm&.dispose!
+    end
+
+    it "still converts back to the same Ruby object" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.define_function(:same) { |x| x.equal?(@file) }
+
+      _(vm.eval_code('get_file(); same(get_file())')).must_equal true
+    ensure
+      vm&.dispose!
+    end
+  end
+
   # The handle used to be the Ruby object_id, a small sequential integer that
   # nothing ever removes from the table, so a later script could walk the space
   # and be handed a File it had never held.
