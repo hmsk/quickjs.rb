@@ -1124,6 +1124,76 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
+    # Every reader below asks about the conversion it is reporting on, not
+    # about the call the conversion sits in. Asked of the whole call, each one
+    # answers for a refusal the guest already caught and recovered from, and
+    # condemns a VM whose call went on to return normally.
+    it "leaves the VM alone when an unrelated value cannot be stringified after a recovered out-of-memory" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      vm.on_log {|log| }
+
+      _(vm.eval_code(<<~JS)).must_equal 'ok'
+        try { new Array(2_000_000).fill(0) } catch (e) {}
+        console.log(Symbol('s'));
+        'ok';
+      JS
+
+      _(vm.memory_poisoned?).must_equal false
+      _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm.dispose!
+    end
+
+    it "hands the listener the real rejection reason after a recovered out-of-memory" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      seen = []
+      vm.on_unhandled_rejection {|err| seen << err }
+
+      _(vm.eval_code(<<~JS)).must_equal 'ok'
+        try { new Array(2_000_000).fill(0) } catch (e) {}
+        void Promise.reject(new TypeError('real reason'));
+        'ok';
+      JS
+
+      _(seen.map(&:class)).must_equal [Quickjs::TypeError]
+      _(seen.map(&:message)).must_equal ['real reason']
+      _(vm.memory_poisoned?).must_equal false
+    ensure
+      vm.dispose!
+    end
+
+    # The listener runs after the row is built and can re-enter the VM, so the
+    # window has to close before it: a nested call that meets a refusal and
+    # recovers from it is that call's business, not this row's.
+    it "does not condemn the outer call for an out-of-memory a log listener's own call recovered from" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      vm.on_log {|log| vm.eval_code('try { new Array(2_000_000).fill(0) } catch (e) {} ; 1') }
+
+      _(vm.eval_code("console.log('hi'); 'done'")).must_equal 'done'
+      _(vm.memory_poisoned?).must_equal false
+    ensure
+      vm.dispose!
+    end
+
+    # The bridge's own exit is above every reader that would have said so: the
+    # host error is what comes back out, since find_ruby_error is the only
+    # thing that takes it out of alive_objects, but the heap is condemned all
+    # the same.
+    it "condemns the VM when a bridge raises over an out-of-memory the guest caught" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      vm.define_function(:boom) { raise IOError, 'host error' }
+
+      error = _ do
+        vm.eval_code('try { new Array(2_000_000).fill(0) } catch (e) { boom() }')
+      end.must_raise IOError
+
+      _(error.message).must_equal 'host error'
+      _(vm.memory_poisoned?).must_equal true
+      _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
+    ensure
+      vm.dispose!
+    end
+
     # Scoped to the call rather than to the VM: a guest that runs out, catches
     # it and returns is left alone, which is what it was before the allocator
     # was ours. The scope is what makes that possible to say at all.

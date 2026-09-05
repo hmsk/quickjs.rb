@@ -597,6 +597,12 @@ static bool allocator_refused(VMData *data)
 // stand in for it.
 static const char *js_hold_cstring_or_null(JsHold *hold, JSValue j_val)
 {
+  VMData *data = JS_GetContextOpaque(hold->ctx);
+  // The window is this read, not the call it sits in. Asked of the whole
+  // scope, a read that answers NULL for its own reasons — a Symbol, a toString
+  // written to throw — would report a refusal the guest had already caught and
+  // recovered from, and condemn a VM whose call went on to return normally.
+  uint64_t refusals_before = data->alloc_refusals;
   const char *str = JS_ToCString(hold->ctx, j_val);
   if (str != NULL)
     return js_hold_own_cstring(hold, str);
@@ -613,21 +619,19 @@ static const char *js_hold_cstring_or_null(JsHold *hold, JSValue j_val)
   // remembering is not the throw but the clock: a read the budget outlived says
   // nothing about the value and everything about the evaluation.
   JSValue j_pending = js_hold_value(hold, JS_GetException(hold->ctx));
+
+  // Before the bridge exit below, which raises: a read that ran out and then
+  // found a host error waiting would unwind past the latch and leave the VM
+  // running on the heap that refused.
+  if (data->alloc_refusals > refusals_before)
+    data->oom_poisoned = true;
+
   VALUE r_ruby_error = find_ruby_error(hold->ctx, j_pending);
   if (!NIL_P(r_ruby_error))
     rb_exc_raise(r_ruby_error);
 
-  VMData *data = JS_GetContextOpaque(hold->ctx);
   if (eval_budget_lapsed(data))
     hold->interrupted = true;
-
-  // A heap that ran out inside the read is the one throw here that must not
-  // be quietly substituted: a read that is substituted for and never reported
-  // would leave the next evaluation running on the heap the latch exists to
-  // refuse. Condemned here, at every hold, rather than left to the renderer,
-  // since the log row and the rejection reason have no renderer.
-  if (allocator_refused(data))
-    data->oom_poisoned = true;
 
   return NULL;
 }
@@ -790,7 +794,17 @@ static VALUE js_exception_render_run(VALUE r_render)
 
   VALUE r_maybe_ruby_error = find_ruby_error(ctx, j_exceptionVal);
   if (!NIL_P(r_maybe_ruby_error))
+  {
+    // The host error is what comes back out: it is the bridge reporting a
+    // failure of its own, and find_ruby_error is the only thing that takes it
+    // out of alive_objects. But the heap is condemned all the same, and this
+    // exit is above every reader that would have said so, so a guest that
+    // catches its own out-of-memory and calls a bridge that raises left the
+    // VM running on a refused heap.
+    if (allocator_refused(data))
+      data->oom_poisoned = true;
     rb_exc_raise(r_maybe_ruby_error);
+  }
   // will support other errors like just returning an instance of Error
 
   JSValue j_errorClassName = js_hold_value(hold, JS_GetPropertyStr(ctx, j_exceptionVal, "name"));
@@ -1331,6 +1345,12 @@ static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason)
   conversion.ctx = ctx;
   conversion.j_reason = j_reason;
   js_hold_init(&conversion.hold, ctx);
+  VMData *data = JS_GetContextOpaque(ctx);
+  // The window is the conversion, for the reason the hold's own read narrows
+  // to itself: a refusal the guest met and caught earlier in the call says
+  // nothing about this reason, and reporting it here would hand the listener
+  // "out of memory" in place of the rejection it is waiting to hear about.
+  uint64_t refusals_before = data->alloc_refusals;
   VALUE r_exc = rb_ensure(js_reason_conversion_run, (VALUE)&conversion, js_hold_release, (VALUE)&conversion.hold);
   // Read after the release: a heap that ran out or a budget that lapsed while
   // the reason was read is what the listener hears about, since the tracker
@@ -1338,8 +1358,7 @@ static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason)
   // flag the hold carries, because a re-armed clock forgets; the refusal is a
   // count on the VM, which forgets nothing. The same precedence as the
   // renderer.
-  VMData *data = JS_GetContextOpaque(ctx);
-  if (allocator_refused(data))
+  if (data->alloc_refusals > refusals_before)
   {
     data->oom_poisoned = true;
     return r_out_of_memory_error();
@@ -1580,13 +1599,31 @@ struct quickjsrb_log_call
   // Set when the budget lapsed inside one of the logged values; read back on
   // the QuickJS side of the protect, where it can be thrown as the interrupt.
   bool interrupted;
+  // Set when the allocator refused while the row was being built. Written by
+  // the ensure that owns the build, which runs on the raising path too, so
+  // unlike a flag copied after the build it cannot be skipped by an unwind.
+  bool refused;
 };
 
 struct log_row_build
 {
   struct quickjsrb_log_call *call;
   JsHold hold;
+  // The count as the build began. The window is the build alone: the listener
+  // runs after it and can re-enter the VM, and a nested call that meets a
+  // refusal and recovers from it is that call's business, not this row's.
+  uint64_t refusals_before;
 };
+
+// Owns the build's exit, raising or not: releases what the row held, and
+// records whether the heap ran out while it was being built.
+static VALUE r_log_row_ensure(VALUE r_build)
+{
+  struct log_row_build *build = (struct log_row_build *)r_build;
+  VMData *data = JS_GetContextOpaque(build->hold.ctx);
+  build->call->refused = data->alloc_refusals > build->refusals_before;
+  return js_hold_release((VALUE)&build->hold);
+}
 
 static VALUE r_build_log_row(VALUE r_build)
 {
@@ -1647,7 +1684,8 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
   struct log_row_build build;
   build.call = call;
   js_hold_init(&build.hold, call->ctx);
-  VALUE r_row = rb_ensure(r_build_log_row, (VALUE)&build, js_hold_release, (VALUE)&build.hold);
+  build.refusals_before = data->alloc_refusals;
+  VALUE r_row = rb_ensure(r_build_log_row, (VALUE)&build, r_log_row_ensure, (VALUE)&build);
 
   // Carried out rather than raised here: a Ruby exception would be bridged
   // into a catchable JS Error, and a guest wrapping console.log in try/catch
@@ -1666,16 +1704,13 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
 static JSValue js_quickjsrb_log_inner(JSContext *ctx, int argc, JSValueConst *argv, const char *severity)
 {
   VMData *data = JS_GetContextOpaque(ctx);
-  // Read either side of the protect rather than carried out on the call. A
-  // flag set inside is only as good as the path that copies it out, and the
-  // paths here raise: a second logged argument whose conversion fails unwinds
-  // past the copy, and the news that the heap had run out goes with it. The
-  // counter is on the VM, and no unwind can lose it.
-  uint64_t refusals_before = data->alloc_refusals;
-  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED, false};
+  // The row build records this for us, in the ensure that owns its exit, so it
+  // survives an argument whose conversion raises past everything after it and
+  // it does not answer for a nested call the listener made.
+  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED, false, false};
   int error;
   rb_protect(r_build_and_dispatch_log, (VALUE)&call, &error);
-  if (data->alloc_refusals > refusals_before)
+  if (call.refused)
   {
     // Ahead of the lapse, as in the renderer: a heap that ran out is a fact
     // about the VM rather than about this evaluation. Without this the
