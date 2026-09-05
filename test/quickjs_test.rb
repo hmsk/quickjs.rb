@@ -281,6 +281,15 @@ describe Quickjs do
         assert_code("new Proxy([1, 2, 3], {})", [1, 2, 3])
         assert_code("new Proxy({a: 1}, {})", {'a' => 1})
       end
+
+      # The other way js_resolve_proxy answers -1. Reported rather than
+      # swallowed for the same reason: it is what Array.isArray would have
+      # said about the same value.
+      it "reports the stack overflow of a chain too deep to resolve" do
+        deep = "let p = [1, 2]; for (let i = 0; i < 1500; i++) p = new Proxy(p, {});"
+        error = _ { ::Quickjs.eval_code("#{deep} p") }.must_raise Quickjs::RuntimeError
+        _(error.message).must_match(/stack overflow/)
+      end
     end
   end
 

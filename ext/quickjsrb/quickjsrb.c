@@ -1011,13 +1011,14 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
 
     VALUE r_result;
     int memoize = 1;
-    // JS_IsArray is tri-state: 1, 0, and -1 when it cannot resolve a proxy,
-    // which is what a revoked one does. Read as a boolean the -1 said "array",
-    // so a value JS itself refuses to inspect came back as an ordinary empty
-    // Array, indistinguishable from a genuine one. The throw js_resolve_proxy
-    // left pending is the guest's own TypeError, so rendering it hands the
-    // caller what the guest would have seen and takes the exception off the
-    // context on the way.
+    // JS_IsArray is tri-state: 1, 0, and -1 when it cannot resolve a proxy —
+    // a revoked one, or a chain too deep to walk. Read as a boolean the -1 said
+    // "array", so a value JS itself refuses to inspect came back as an ordinary
+    // empty Array, indistinguishable from a genuine one. js_resolve_proxy
+    // throws on both paths, a TypeError for the revoked case and a stack
+    // overflow for the deep one, and it is the guest's own either way: what
+    // Array.isArray would have reported. Rendering it hands the caller that,
+    // and takes the exception off the context on the way.
     int is_array = JS_IsArray(ctx, j_val);
     if (is_array < 0)
       return raise_js_exception(ctx); // raises
