@@ -89,14 +89,19 @@ static void js_reject_with_ruby_error(JSContext *ctx, JSValueConst *resolving_fu
 // nothing beside the OpenSSL work every caller goes on to do.
 static VALUE r_crypto_key_class(void)
 {
-  // Gated too, though Init_quickjsrb defines it before any of this can run:
-  // the callers hold a promise and its two resolving functions across this
-  // call, so a NameError from here would take them with it, which is the whole
-  // thing this function is arranged to avoid.
+  // Gated too, though Init_quickjsrb defines it before any of this can run.
+  // Not for the promise, which every caller creates after resolving the key,
+  // but because a raise out of a JSCFunction unwinds past QuickJS's own call
+  // frame, which is what this function exists to answer instead of.
   if (!rb_const_defined_at(rb_cObject, rb_intern("Quickjs")))
     return Qnil;
 
   VALUE r_quickjs = rb_const_get(rb_cObject, rb_intern("Quickjs"));
+  // Same reason the inner one is type-checked: rb_const_defined_at reads a
+  // constant table off its receiver, so a non-module bound to the name is
+  // worse than the NameError being avoided.
+  if (!RB_TYPE_P(r_quickjs, T_MODULE))
+    return Qnil;
   if (!rb_const_defined_at(r_quickjs, rb_intern("CryptoKey")))
     return Qnil;
 
@@ -119,6 +124,10 @@ static VALUE r_find_alive_crypto_key(JSContext *ctx, JSValueConst j_key)
     return Qnil;
   VMData *data = JS_GetContextOpaque(ctx);
   VALUE r_key = rb_hash_aref(data->alive_objects, LONG2NUM(handle));
+  // Before the class lookup, which is otherwise paid on the path a guest can
+  // repeat for free: sign('HMAC', {}, buf) reaches no OpenSSL work to dwarf it.
+  if (NIL_P(r_key))
+    return Qnil;
   // The handle is read off whatever the guest passed as the key, and
   // alive_objects also holds bridged exceptions and the Ruby object behind a
   // File proxy. Without this an object carrying another entry's id reaches the

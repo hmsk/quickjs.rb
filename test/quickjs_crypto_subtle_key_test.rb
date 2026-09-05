@@ -161,6 +161,29 @@ describe "crypto.subtle key management" do
       vm&.dispose!
     end
 
+    # to_js_value has no case for Quickjs::CryptoKey, so a key handed back to
+    # JS converts by way of inspect. With the bytes in that string a guest
+    # reads a key generated extractable: false straight out of any pass-through
+    # host function, which exportKey refuses one call away.
+    it "does not put key material in the string a guest gets back" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      host_key = nil
+      vm.define_function(:echo) { |k| host_key = k; k }
+      vm.eval_code("globalThis.k = await crypto.subtle.generateKey({name: 'AES-GCM', length: 256}, false, ['encrypt', 'decrypt'])")
+
+      seen = vm.eval_code("echo(globalThis.k)").to_s
+      bytes = host_key.key_data.to_s
+
+      _(bytes.bytesize).must_equal 32
+      _(seen).wont_include bytes
+      _(seen).must_include '[FILTERED]'
+      # The parts that are not the secret still describe the key.
+      _(seen).must_include 'AES-GCM'
+      _(seen).must_include 'extractable=false'
+    ensure
+      vm&.dispose!
+    end
+
     # Guards against re-introducing a cache rather than pinning the lookup as
     # it stands: a class held only by a constant table is movable, so a C
     # static would keep an address the collector has since handed on. Passes
