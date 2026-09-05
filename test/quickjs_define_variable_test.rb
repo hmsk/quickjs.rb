@@ -872,6 +872,37 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code('v')).must_equal 'fine'
   end
 
+  # Rendering a JS exception announces it to on_log before raising, so asking
+  # whether a binding is live by provoking a redeclaration error put a
+  # console.error the caller never wrote into their log stream, once per
+  # redefine, on a path that succeeded. This is the README's own example.
+  it "does not log anything of its own when redefining" do
+    logged = []
+    vm = Quickjs::VM.new
+    vm.on_log { |entry| logged << [entry.severity, entry.raw.to_s] }
+
+    vm.define_let(:counter, 1)
+    vm.define_let(:counter, 2)
+    vm.define_var(:v, 1)
+    vm.define_var(:v, 2)
+    vm.define_const(:c, 1)
+    _ { vm.define_const(:c, 2) }.must_raise ArgumentError
+
+    _(logged).must_equal []
+    _(vm.eval_code("counter")).must_equal 2
+  end
+
+  # A sealed globalThis refuses a var declaration at runtime. The guard exists
+  # so that a var the VM cannot be given raises ArgumentError rather than some
+  # other class from further in.
+  it "refuses a var when globalThis takes no new properties" do
+    vm = Quickjs::VM.new
+    vm.eval_code("Object.preventExtensions(globalThis);")
+
+    err = _ { vm.define_var(:n, 1) }.must_raise ArgumentError
+
+    _(err.message).must_match(/extensible/)
+  end
   # Assigning to a name with no binding writes globalThis: sloppy mode invents
   # the property, and strict mode is no answer either, since it only refuses to
   # invent one and writes a global that already exists quite happily. The bare
@@ -940,6 +971,7 @@ describe "values the serializer must not take at face value" do
   # VM refusing a second define, or quietly turning a let into a global, are
   # both worse than what the ordering was introduced to fix.
   it "corrects a record that ran ahead of its declaration" do
+    reached = 0
     # const and let only. A var probes globalThis before it declares, and that
     # probe is the eval that raises, so no record is ever recorded ahead.
     %i[const let].each do |kind|
@@ -956,6 +988,7 @@ describe "values the serializer must not take at face value" do
       rescue ThreadError
       end
       busy.join
+      reached += 1 if vm.eval_code("typeof cfg") == "undefined"
       next unless vm.eval_code("typeof cfg") == "undefined"
 
       vm.public_send(:"define_#{kind}", :cfg, 2)
@@ -965,6 +998,10 @@ describe "values the serializer must not take at face value" do
       # been invented as a global by sloppy mode.
       _(vm.eval_code("typeof globalThis.cfg")).must_equal "undefined"
     end
+
+    # Both siblings of this test say so when the window was missed; without
+    # this it would report a pass having asserted nothing.
+    skip "neither define was refused in the window" if reached.zero?
   end
   # Thread.handle_interrupt defers Timeout and Thread#raise. It does not defer
   # a trap handler: that runs at the checkpoint regardless of the mask, and a

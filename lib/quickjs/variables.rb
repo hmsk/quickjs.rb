@@ -91,16 +91,27 @@ module Quickjs
         raise ::ArgumentError,
           "#{key} is already defined as a #{existing}; it cannot be redefined as a #{kind}"
       elsif kind == :const
-        # The declaration itself is the question. Redeclaring a live const is a
-        # parse error, thrown before anything runs, so this asks without running
-        # any of the guest's code and without writing anything. Succeeding means
-        # the registry was ahead of a declaration that never happened, and the
-        # const the caller asked for is now there.
+        # Same question, and the same reason not to ask it by provoking a parse
+        # error: a refusal is not a place to emit a console.error the caller
+        # never wrote. If the name reads as something no `globalThis` property
+        # could account for, the const is there and that is the answer.
+        if _live_lexical?(key)
+          raise ::ArgumentError,
+            "#{key} is already defined as a const; a const cannot be redefined"
+        end
+
+        # Otherwise the declaration itself is the question. Redeclaring a live
+        # const is a parse error, thrown before anything runs, so this asks
+        # without running any of the guest's code and without writing anything.
+        # Succeeding means the registry was ahead of a declaration that never
+        # happened, and the const the caller asked for is now there.
         begin
           return _declare(declared, kind, key, literal)
-        rescue Quickjs::SyntaxError
-          # _declare took the record out on its way past. The const is real, so
-          # put it back and tell the caller what they did.
+        rescue Quickjs::RuntimeError
+          # _declare takes the record out for any QuickJS error, not only the
+          # redeclaration this expects, and a guest can decide which Ruby class
+          # a JS error maps to. The const is real either way, so put the record
+          # back before the error goes on.
           declared[key] = :const
           raise ::ArgumentError,
             "#{key} is already defined as a const; a const cannot be redefined"
@@ -119,16 +130,32 @@ module Quickjs
         # `globalThis`, which is the one thing this form promises does not
         # happen, and it stayed there for every later define.
         #
-        # `let #{key};` costs a parse and answers both cases. A live binding
-        # refuses it, at parse time, with nothing evaluated and nothing changed.
-        # An absent one gets the binding it was missing, which is the registry
-        # being ahead of a declaration that never ran. Both leave a lexical
-        # binding for the assignment to find, and a lexical binding shadows any
-        # `globalThis` property of the same name.
-        begin
-          eval_code("#{JS_KEYWORDS.fetch(kind)} #{key};")
-        rescue Quickjs::SyntaxError
-          # Already declared, which is the ordinary case.
+        # A live binding refuses the declaration, at parse time, with nothing
+        # evaluated and nothing changed. An absent one gets the binding it was
+        # missing. Both leave something for the assignment to find: a lexical
+        # binding for a `let`, which shadows any `globalThis` property of the
+        # same name, and the global property itself for a `var`.
+        #
+        # Provoking that parse error is not free. Rendering a JS exception
+        # announces it to `on_log` first, so a question asked internally came
+        # out of the VM as a console.error the caller never wrote, once per
+        # redefine, on a path that succeeded. So ask a question that cannot
+        # throw first, and only fall back to the declaration when its answer is
+        # not decisive.
+        #
+        # Decisive means: the name reads as something, and no `globalThis`
+        # property could be what it read. That is a lexical binding, which is
+        # what makes the assignment safe. `in` tests for the property without
+        # reading it, and it is tested first, so a guest accessor never runs. Redeclaring a `var` is
+        # legal, so that form never provokes anything and skips this.
+        unless kind == :var || _live_lexical?(key)
+          begin
+            eval_code("#{JS_KEYWORDS.fetch(kind)} #{key};")
+          rescue Quickjs::SyntaxError
+            # Already declared. Reached when the binding holds undefined, or
+            # when it shadows a guest global of the same name, since neither is
+            # decisive above. Those two still log.
+          end
         end
 
         # `void` so the statement has no completion value. An assignment
@@ -199,8 +226,9 @@ module Quickjs
       rescue Quickjs::RuntimeError
         # The name is the caller's to use again. The source built here is a
         # declaration of a literal, with no call in it, so the only ways the eval
-        # itself can fail are a parse error, which creates no binding, and
-        # out-of-memory, which poisons the whole VM and makes the registry moot.
+        # itself can fail are a parse error and out-of-memory, neither of which
+        # leaves a binding, and a var declaration refused by a non-extensible
+        # globalThis, which does not get that far either.
         # A declaration whose initializer threw would leave a binding behind, but
         # nothing here can generate one.
         declared.delete(key)
@@ -222,6 +250,15 @@ module Quickjs
     # VM that has evaluated untrusted JavaScript owns its own environment, and
     # there is no way to hand a value into it unobserved. Define before running
     # code you do not control.
+    # Whether the name resolves to a lexical binding: no `globalThis` property
+    # could account for it, and it reads as something. The property test comes
+    # first so that `&&` short-circuits before `typeof` can read a name that is
+    # only a global, which would run a guest accessor's getter. Not decisive
+    # in both directions, and does not have to be. A false answer only means the
+    # caller pays for the declaration that asks properly.
+    def _live_lexical?(key)
+      eval_code("!(#{::JSON.generate(::String.new(key))} in globalThis) && typeof #{key} !== 'undefined'") == true
+    end
     def _refuse_unusable_global(key)
       state = eval_code(<<~JS)
         (() => {
@@ -229,6 +266,10 @@ module Quickjs
           // in which case the lookup below answers for whatever took its place
           // and reports a clean global that is not there.
           if (typeof globalThis !== 'object' || globalThis === null) return 'broken';
+          // A sealed globalThis refuses the declaration at runtime rather than
+          // swallowing it, but the caller is owed the same ArgumentError as any
+          // other global it cannot be given.
+          if (!Object.isExtensible(globalThis)) return 'sealed';
           const d = Object.getOwnPropertyDescriptor(globalThis, #{::JSON.generate(::String.new(key))});
           if (!d) return 'absent';
           if (d.get !== undefined || d.set !== undefined) return 'accessor';
@@ -246,6 +287,10 @@ module Quickjs
       when 'readonly'
         raise ::ArgumentError,
           "cannot define var #{key}: globalThis.#{key} is not writable, so the assignment would be discarded"
+      when 'sealed'
+        raise ::ArgumentError,
+          "cannot define var #{key}: this VM's globalThis is not extensible, so the declaration " \
+          "would be refused"
       else
         # The probe reads globalThis and Object, so a caller who has already
         # replaced either of those has taken the check away from itself. That
