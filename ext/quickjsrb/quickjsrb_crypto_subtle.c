@@ -304,8 +304,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
 static JSValue js_crypto_key_to_js(JSContext *ctx, VALUE r_key)
 {
   VMData *data = JS_GetContextOpaque(ctx);
-  VALUE r_object_id = rb_funcall(r_key, rb_intern("object_id"), 0);
-  rb_hash_aset(data->alive_objects, r_object_id, r_key);
+  VALUE r_object_id = alive_objects_register(data, r_key);
   int64_t handle = NUM2LONG(r_object_id);
 
   VALUE r_type = rb_funcall(r_key, rb_intern("type"), 0);

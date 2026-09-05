@@ -302,6 +302,29 @@ static VALUE vm_alloc(VALUE r_self)
 #define QUICKJSRB_GENERATED_NAME_LEN 12
 #define QUICKJSRB_GENERATED_NAME_SIZE (QUICKJSRB_GENERATED_NAME_LEN + 1)
 
+// The handle a bridged object is published to the guest under. It was the
+// Ruby object_id, which is a small sequential integer, and nothing ever leaves
+// alive_objects — so a script could walk 1..4000 and be handed back objects it
+// had never held: a File to read, a CryptoKey to sign with after every JS
+// reference to it was gone. Drawn from 2^48 instead, which stays exact in a JS
+// double and is not a space to walk. Collisions are re-drawn rather than
+// trusted to be unlikely, since one would hand two subsystems the same entry.
+#define QUICKJSRB_HANDLE_BITS 48
+
+static VALUE alive_objects_register(VMData *data, VALUE r_object)
+{
+  VALUE r_secure_random = rb_const_get(rb_cClass, rb_intern("SecureRandom"));
+  VALUE r_limit = rb_funcall(INT2NUM(2), rb_intern("**"), 1, INT2NUM(QUICKJSRB_HANDLE_BITS));
+  VALUE r_handle;
+  do
+  {
+    r_handle = rb_funcall(r_secure_random, rb_intern("random_number"), 1, r_limit);
+  } while (!NIL_P(rb_hash_lookup2(data->alive_objects, r_handle, Qnil)));
+
+  rb_hash_aset(data->alive_objects, r_handle, r_object);
+  return r_handle;
+}
+
 static void random_filename(char buf[QUICKJSRB_GENERATED_NAME_SIZE])
 {
   VALUE r_rand = rb_funcall(

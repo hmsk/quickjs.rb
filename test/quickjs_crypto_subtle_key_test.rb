@@ -161,6 +161,28 @@ describe "crypto.subtle key management" do
       vm&.dispose!
     end
 
+    it "cannot be recovered by scanning the handle space" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      vm.eval_code("globalThis.k = await crypto.subtle.generateKey({name: 'HMAC', hash: 'SHA-256'}, false, ['sign', 'verify'])")
+      _(vm.eval_code("(await crypto.subtle.sign('HMAC', globalThis.k, new Uint8Array([1, 2, 3]))).byteLength")).must_equal 32
+      vm.eval_code('delete globalThis.k; 1')
+
+      found = vm.eval_code(<<~JS)
+        let found = 'none';
+        for (let i = 1; i < 5000; i++) {
+          try {
+            const s = await crypto.subtle.sign('HMAC', {rb_object_id: i}, new Uint8Array([1, 2, 3]));
+            if (s) { found = 'recovered at ' + i; break }
+          } catch (e) {}
+        }
+        found
+      JS
+
+      _(found).must_equal 'none'
+    ensure
+      vm&.dispose!
+    end
+
     # to_js_value has no case for Quickjs::CryptoKey, so a key handed back to
     # JS converts by way of inspect. With the bytes in that string a guest
     # reads a key generated extractable: false straight out of any pass-through

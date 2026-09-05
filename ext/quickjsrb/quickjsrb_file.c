@@ -221,8 +221,7 @@ void quickjsrb_init_file_proxy(VMData *data)
 JSValue quickjsrb_file_to_js(JSContext *ctx, VALUE r_file)
 {
   VMData *data = JS_GetContextOpaque(ctx);
-  VALUE r_object_id = rb_funcall(r_file, rb_intern("object_id"), 0);
-  rb_hash_aset(data->alive_objects, r_object_id, r_file);
+  VALUE r_object_id = alive_objects_register(data, r_file);
   JSValue j_handle = JS_NewInt64(ctx, NUM2LONG(r_object_id));
   JSValue j_proxy = JS_Call(ctx, data->j_file_proxy_creator, JS_UNDEFINED, 1, &j_handle);
   JS_FreeValue(ctx, j_handle);

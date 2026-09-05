@@ -48,13 +48,11 @@ JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
   JSValue j_error = JS_NewError(ctx); // may wanna have custom error class to determine in JS' end
 
-  VALUE r_object_id = rb_funcall(r_error, rb_intern("object_id"), 0);
-  int objectId = NUM2INT(r_object_id);
-  JS_SetPropertyStr(ctx, j_error, "rb_object_id", JS_NewInt32(ctx, objectId));
-
-  // Keep the error alive in VMData to prevent GC before find_ruby_error retrieves it
+  // Registered before it is published: the handle is what keeps the exception
+  // alive until find_ruby_error takes it back out.
   VMData *data = JS_GetContextOpaque(ctx);
-  rb_hash_aset(data->alive_objects, r_object_id, r_error);
+  VALUE r_object_id = alive_objects_register(data, r_error);
+  JS_SetPropertyStr(ctx, j_error, "rb_object_id", JS_NewInt64(ctx, NUM2LONG(r_object_id)));
 
   VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0);
   const char *errorMessage = StringValueCStr(r_exception_message);
@@ -181,15 +179,17 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
     return Qnil;
 
   JSValue j_errorOriginalRubyObjectId = JS_GetPropertyStr(ctx, j_error, "rb_object_id");
-  int errorOriginalRubyObjectId = 0;
-  if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT)
+  int64_t errorOriginalRubyObjectId = 0;
+  // FLOAT64 as well as INT: the handle is drawn from a range wider than a
+  // tagged int, so QuickJS carries most of them as doubles.
+  if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT || JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_FLOAT64)
   {
-    JS_ToInt32(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
+    JS_ToInt64(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
     JS_FreeValue(ctx, j_errorOriginalRubyObjectId);
     if (errorOriginalRubyObjectId > 0)
     {
       VMData *data = JS_GetContextOpaque(ctx);
-      VALUE r_key = INT2NUM(errorOriginalRubyObjectId);
+      VALUE r_key = LONG2NUM(errorOriginalRubyObjectId);
       VALUE r_error = rb_hash_aref(data->alive_objects, r_key);
       // alive_objects anchors three unrelated things: a bridged exception,
       // waiting to be thrown back, and the Ruby objects behind a File or a

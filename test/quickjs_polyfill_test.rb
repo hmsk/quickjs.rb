@@ -486,6 +486,31 @@ describe "RubyFileProxy" do
     end
   end
 
+  # The handle used to be the Ruby object_id, a small sequential integer that
+  # nothing ever removes from the table, so a later script could walk the space
+  # and be handed a File it had never held.
+  describe "when a later script scans the handle space" do
+    it "does not hand back a file it was never given" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.define_function(:take) { |x| x.is_a?(::File) ? "FILE:#{x.read}" : x.class.to_s }
+      vm.eval_code('get_file(); 1')
+
+      found = vm.eval_code(<<~JS)
+        let found = 'none';
+        for (let i = 1; i < 4000; i++) {
+          const got = take({rb_object_id: i});
+          if (typeof got === 'string' && got.startsWith('FILE:')) { found = 'recovered at ' + i; break }
+        }
+        found
+      JS
+
+      _(found).must_equal 'none'
+    ensure
+      vm&.dispose!
+    end
+  end
+
   # The proxy publishes its rb_object_id to the guest, and a thrown error
   # carrying that id used to reach the same table the exception bridge reads,
   # which deletes what it finds. The File stayed an instance of File and
