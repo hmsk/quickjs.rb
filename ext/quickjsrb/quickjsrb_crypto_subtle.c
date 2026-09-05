@@ -116,7 +116,31 @@ static VALUE r_crypto_key_class(void)
 // Find Ruby CryptoKey from a JS CryptoKey object via rb_object_id handle.
 static VALUE r_find_alive_crypto_key(JSContext *ctx, JSValueConst j_key)
 {
+  // Both of the reads below can run the guest's own code on a value it chose:
+  // a getter for the property, a valueOf for the conversion, either of which
+  // can reach a Ruby bridge. Nothing here can report what that raises, since
+  // this runs after its caller's rb_protect has returned, but the exception it
+  // parked in alive_objects has to come back out: find_ruby_error is the only
+  // thing that takes one out, so leaving it would pin one per call, at a rate
+  // the guest picks.
   JSValue j_handle = JS_GetPropertyStr(ctx, j_key, "rb_object_id");
+  if (JS_IsException(j_handle))
+  {
+    JSValue j_pending = JS_GetException(ctx);
+    find_ruby_error(ctx, j_pending);
+    JS_FreeValue(ctx, j_pending);
+    return Qnil;
+  }
+
+  // Only a number is a handle. Asking JS_ToInt64 for one is what runs valueOf,
+  // and the answer for anything else was never going to be a handle anyway.
+  int32_t tag = JS_VALUE_GET_NORM_TAG(j_handle);
+  if (tag != JS_TAG_INT && tag != JS_TAG_FLOAT64)
+  {
+    JS_FreeValue(ctx, j_handle);
+    return Qnil;
+  }
+
   int64_t handle = 0;
   JS_ToInt64(ctx, &handle, j_handle);
   JS_FreeValue(ctx, j_handle);
@@ -362,7 +386,14 @@ static JSValue js_crypto_key_to_js(JSContext *ctx, VALUE r_key)
       JSValue j_args[3] = {j_pe_buf, JS_NewInt32(ctx, 0), JS_NewInt64(ctx, RSTRING_LEN(r_algo_pub_exp))};
       JSValue j_pe = JS_NewTypedArray(ctx, 3, (JSValueConst *)j_args, JS_TYPED_ARRAY_UINT8);
       JS_FreeValue(ctx, j_pe_buf);
-      if (!JS_IsException(j_pe))
+      if (JS_IsException(j_pe))
+        // Nothing downstream consumes it: the caller resolves its promise and
+        // returns that, never JS_EXCEPTION, so a throw left here would surface
+        // at whatever calls JS_GetException next. Taken instead, and lost. The
+        // only way to get here is the runtime's own allocation failing, which
+        // the next one will fail at too.
+        JS_FreeValue(ctx, JS_GetException(ctx));
+      else
         JS_SetPropertyStr(ctx, j_algo, "publicExponent", j_pe);
     }
   }

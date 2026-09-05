@@ -331,6 +331,10 @@ static VALUE vm_alloc(VALUE r_self)
 // handle as "no entry", and a zero draw would strand the object.
 // Defined in quickjsrb.c: a static here would give every translation unit its
 // own copy, and only the one Init touched would be set.
+// Defined in quickjsrb.c. Declared here because the crypto reader needs it to
+// give back an exception a guest's getter parked on its way through.
+VALUE find_ruby_error(JSContext *ctx, JSValue j_error);
+
 extern VALUE quickjsrb_secure_random;
 extern VALUE quickjsrb_handle_limit;
 void quickjsrb_init_handle_source(void);
