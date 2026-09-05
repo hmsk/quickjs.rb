@@ -180,9 +180,18 @@ module Quickjs
         # Decisive means: the name reads as something, and no `globalThis`
         # property could be what it read. That is a lexical binding, which is
         # what makes the assignment safe. `in` tests for the property without
-        # reading it, and it is tested first, so a guest accessor never runs. Redeclaring a `var` is
+        # reading it, and it is tested first, so a guest accessor's getter does
+        # not run. A `has` trap on a prototype the guest installed does, which
+        # is the tier this file already says it cannot defend. Redeclaring a `var` is
         # legal, so that form never provokes anything and skips this.
-        unless kind == :var || _live_lexical?(key)
+        if kind == :var
+          # Redeclaring a var is legal, so this provokes nothing and needs no
+          # asking. It is not skipped, though: without it the assignment walks
+          # the prototype chain, and a setter inherited from Object.prototype
+          # takes the value while the guard above, which asks only about own
+          # properties, reports a clean global.
+          eval_code("var #{key};")
+        elsif !_live_lexical?(key)
           begin
             eval_code("#{JS_KEYWORDS.fetch(kind)} #{key};")
           rescue Quickjs::SyntaxError
@@ -276,20 +285,26 @@ module Quickjs
     # caller pays for the declaration that asks properly.
     def _live_lexical?(key)
       eval_code(<<~JS) == true
-        (() => {
-          // The same real global the guard below reads, for the same reason. It
-          // read the `globalThis` property until now, which is writable, so a
-          // decoy made this answer "live lexical" about a property of the real
-          // global. The declaration was then skipped and the assignment wrote
-          // that property: a define_let on globalThis, which is the one thing
-          // this form promises does not happen. It also threw outright once
-          // `globalThis` was a number, which define_var(:globalThis, 1) makes
-          // it, and let a guest accessor answer for a const that was not there.
-          const root = (function () { return this })();
-          if (typeof root !== 'object' || root === null) return false;
-          return !(#{::JSON.generate(::String.new(key))} in root) && typeof #{key} !== 'undefined';
-        })()
+        (() => (function () {
+          // The real global object, not the `globalThis` property, which is
+          // writable and can be pointed at a decoy: this answered about the
+          // decoy while the guard below answered about the real one, and a
+          // define_let ended up on globalThis. `false` when it is not an object
+          // at all, which asks by declaration instead.
+          const g = (function () { return this })();
+          if (typeof g !== 'object' || g === null) return false;
+          return !(#{::JSON.generate(::String.new(key))} in g);
+          // The caller's name is read outside this function on purpose. Read
+          // inside it, `typeof <name>` resolves anything declared here first, so
+          // a caller who named their variable after one of these locals was told
+          // it was live on a VM that had never heard of it.
+        })() && typeof #{key} !== 'undefined')()
       JS
+    rescue Quickjs::RuntimeError
+      # Not decisive is a safe answer, and the branches that ask fall back to
+      # asking by declaration. Anything thrown out of a question the caller did
+      # not ask would be theirs to make sense of.
+      false
     end
     # `var` is the only form that lands on `globalThis`, so it is the only one a
     # property already sitting there can intercept. An accessor takes the value

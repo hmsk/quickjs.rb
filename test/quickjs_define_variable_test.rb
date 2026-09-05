@@ -1247,6 +1247,50 @@ describe "when the VM can no longer answer about its own globals" do
     _(err.message).must_match(/accessor/)
   end
 
+  # The liveness check builds a small piece of JavaScript around the caller's
+  # name, so any identifier that source declares is one the caller must not be
+  # able to collide with. It declared one in the scope that then resolved the
+  # name, and answered "live" for it on a VM that had never heard of it.
+  it "does not answer for its own locals" do
+    vm = Quickjs::VM.new
+
+    %w[root g key literal kind name value].each do |candidate|
+      _(vm.eval_code("typeof #{candidate}")).must_equal "undefined"
+      _(vm.send(:_live_lexical?, candidate)).must_equal false
+    end
+  end
+
+  it "keeps a let named after one of them off globalThis too" do
+    vm = Quickjs::VM.new
+    # The record ahead of a declaration that never ran, injected rather than
+    # raced for, since the name is what this is about and not the timing.
+    vm.instance_variable_set(:@_defined_variables, { "root" => :let })
+
+    vm.define_let(:root, 42)
+
+    _(vm.eval_code("root")).must_equal 42
+    _(vm.eval_code("typeof globalThis.root")).must_equal "undefined"
+  end
+
+  # The guard asks about own properties; a bare assignment walks the prototype
+  # chain. Declaring the var first is what keeps the two talking about the same
+  # thing, so a setter the guest put on Object.prototype cannot take the value
+  # while the guard reports a clean global.
+  it "does not hand a var to a setter inherited from Object.prototype" do
+    vm = Quickjs::VM.new
+    vm.eval_code(<<~JS)
+      globalThis.stolen = null;
+      Object.defineProperty(Object.prototype, "CFG", {
+        set(v) { stolen = v }, get() { return "FROMGETTER" }, configurable: true,
+      });
+    JS
+    vm.instance_variable_set(:@_defined_variables, { "CFG" => :var })
+
+    vm.define_var(:CFG, { "secret" => 1 })
+
+    _(vm.eval_code("stolen")).must_be_nil
+    _(vm.eval_code("JSON.stringify(CFG)")).must_equal %q({"secret":1})
+  end
   # Every redefine consults the liveness check, and it read the `globalThis`
   # property while the guard above had moved to the real global. A decoy split
   # them: the check reported a property of the real global as a lexical
