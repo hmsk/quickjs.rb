@@ -467,6 +467,41 @@ describe Quickjs do
         end
       end
 
+      # The argument loop is a JSCFunction with nothing between it and the
+      # interpreter, so a raise there used to longjmp past the JS_FreeValue and
+      # pin the argument's whole graph on the JS heap, once per call and
+      # repeatable, which condemns the VM rather than merely leaking.
+      describe "as a define_function argument" do
+        it "reaches the guest as a catchable error" do
+          vm = Quickjs::VM.new
+          vm.define_function(:take) { |x| 'unreachable' }
+
+          caught = vm.eval_code("#{revoked} let c = 'none'; try { take(proxy) } catch (e) { c = e.message } c")
+
+          _(caught).must_equal 'revoked proxy'
+        ensure
+          vm&.dispose!
+        end
+
+        it "does not accumulate on the JS heap across calls" do
+          vm = Quickjs::VM.new
+          vm.define_function(:take) { |x| 1 }
+          vm.eval_code('globalThis.mk = () => { const {proxy, revoke} = Proxy.revocable({a: 1, big: new Array(200).fill(0)}, {}); revoke(); return proxy }')
+          200.times { vm.eval_code('try { take(mk()) } catch (e) {}') }
+          vm.gc!
+          before = vm.memory_usage
+
+          500.times { vm.eval_code('try { take(mk()) } catch (e) {}') }
+          vm.gc!
+          after = vm.memory_usage
+
+          _((after[:obj_count] - before[:obj_count]) / 500.0).must_be :<, 1.0
+          _(vm.memory_poisoned?).must_equal false
+        ensure
+          vm&.dispose!
+        end
+      end
+
       # Only the one refusal is substituted. A host failure met while walking a
       # logged value is not the log path's to swallow.
       it "still lets a host error out of a logged value" do
