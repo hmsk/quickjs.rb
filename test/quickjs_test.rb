@@ -380,16 +380,46 @@ describe Quickjs do
           vm&.dispose!
         end
 
+        # Over a function target it still reports, and that is deliberate.
         # JS_IsFunction answers off is_func without resolving, so this one is
-        # claimed by the function branch and refuses at its toString instead.
-        it "is still substituted, over a function target" do
+        # claimed by the function branch and refuses at its toString, where the
+        # throw already pending is not necessarily the proxy's: it can be an
+        # out-of-memory, which has to reach the renderer that latches the VM.
+        # Substituting there would swallow it. The row is lost for this one
+        # shape rather than the latch for every shape.
+        it "reports rather than substitutes, over a function target" do
           vm = Quickjs::VM.new
           rows = []
           vm.on_log { |l| rows << l.raw }
           vm.eval_code(self_revoking('function(){}'))
 
-          _(vm.eval_code("console.log(mk(), mk()); 'after'")).must_equal 'after'
-          _(rows).must_equal [['(unrenderable value)', '(unrenderable value)']]
+          _ { vm.eval_code("console.log(mk()); 'after'") }.must_raise Quickjs::TypeError
+          _(rows).must_equal []
+        ensure
+          vm&.dispose!
+        end
+
+        # The reason the substitution stops at the function branch.
+        it "still condemns the VM when the trap runs the heap out" do
+          vm = Quickjs::VM.new(memory_limit: 8 * 1024 * 1024)
+          vm.on_log { |l| }
+          vm.eval_code(<<~JS)
+            globalThis.mk = () => {
+              let rev;
+              const t = function(){};
+              const p = new Proxy(t, { get(x, k) {
+                if (rev) { rev(); rev = null; const a = []; for (;;) a.push(new Array(10000).fill(0)) }
+                return x[k]
+              } });
+              const r = Proxy.revocable(p, {});
+              rev = r.revoke;
+              return r.proxy;
+            };
+          JS
+
+          error = _ { vm.eval_code("console.log(mk()); 'after'") }.must_raise Quickjs::RuntimeError
+          _(error.message).must_match(/out of memory/)
+          _(vm.memory_poisoned?).must_equal true
         ensure
           vm&.dispose!
         end
