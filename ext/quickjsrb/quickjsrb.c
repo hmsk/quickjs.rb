@@ -967,34 +967,7 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
       // Checked before the call for the same reason as the BigInt branch:
       // calling JS_EXCEPTION throws "not a function" over the real error.
       if (JS_IsException(j_toStringFunc))
-      {
-        // A function target reaches this branch before the check at the top of
-        // the case can be repeated, since JS_IsFunction answers off is_func
-        // without resolving. So the question is asked here, holding the throw
-        // aside because asking replaces it, and putting it back if the proxy
-        // was not the reason: a host error still comes out of a logged value.
-        if (conv->substitute_unresolvable)
-        {
-          JSValue j_pending = JS_GetException(ctx);
-          if (JS_IsArray(ctx, j_val) < 0)
-          {
-            JS_FreeValue(ctx, JS_GetException(ctx));
-            // The trap that revoked can have raised on the way, and a throw
-            // carrying a Ruby exception is a bridge reporting a host failure:
-            // it has to come back out, and find_ruby_error is the only thing
-            // that takes it out of alive_objects, so discarding it would pin
-            // it for the life of the VM at a rate the guest picks.
-            VALUE r_ruby_error = find_ruby_error(ctx, j_pending);
-            JS_FreeValue(ctx, j_pending);
-            if (!NIL_P(r_ruby_error))
-              rb_exc_raise(r_ruby_error);
-            conv_frame_pop(conv);
-            return rb_str_new2(QUICKJSRB_UNRENDERABLE);
-          }
-          JS_Throw(ctx, j_pending);
-        }
         return raise_js_exception(ctx);
-      }
       JSValue j_source = JS_Call(ctx, j_toStringFunc, j_val, 0, NULL);
       conv_return(conv, depth);
       conv_borrow(conv, depth, j_source);
@@ -1005,33 +978,7 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
       // dispose! reached from a toString gets to report ThreadError. The frame
       // still holds j_source, so conv_release hands it back on the way out.
       if (source == NULL)
-      {
-        // Same question as the read above, and the same care with the throw:
-        // calling toString with a revoked proxy as `this` is how a function
-        // target refuses, and a log row substitutes for that while still
-        // letting a bridge's Ruby exception through.
-        if (conv->substitute_unresolvable)
-        {
-          JSValue j_pending = JS_GetException(ctx);
-          if (JS_IsArray(ctx, j_val) < 0)
-          {
-            JS_FreeValue(ctx, JS_GetException(ctx));
-            // The trap that revoked can have raised on the way, and a throw
-            // carrying a Ruby exception is a bridge reporting a host failure:
-            // it has to come back out, and find_ruby_error is the only thing
-            // that takes it out of alive_objects, so discarding it would pin
-            // it for the life of the VM at a rate the guest picks.
-            VALUE r_ruby_error = find_ruby_error(ctx, j_pending);
-            JS_FreeValue(ctx, j_pending);
-            if (!NIL_P(r_ruby_error))
-              rb_exc_raise(r_ruby_error);
-            conv_frame_pop(conv);
-            return rb_str_new2(QUICKJSRB_UNRENDERABLE);
-          }
-          JS_Throw(ctx, j_pending);
-        }
         return raise_js_exception(ctx);
-      }
       conv_borrow_key(conv, depth, source);
       VALUE r_source = rb_str_new2(source);
       conv_frame_pop(conv);
