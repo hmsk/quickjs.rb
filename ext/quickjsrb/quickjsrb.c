@@ -578,6 +578,18 @@ static bool eval_budget_lapsed(VMData *data)
   return data->eval_timer_armed && eval_elapsed_ms(data->eval_time) >= data->eval_time->limit_ms;
 }
 
+// Whether the allocator refused an allocation inside the operation now
+// running. This is the whole of the out-of-memory test: the refusal happens
+// in quickjsrb_malloc, below the guest, before QuickJS has decided whether it
+// can even afford to build an error, so no property is read, nothing
+// guest-written runs on a throw that is about to be discarded, and there is
+// no sentence for a guest to write. The scope is opened by enter_oom_scope
+// at every public entry point.
+static bool allocator_refused(VMData *data)
+{
+  return data->alloc_refusals > data->alloc_refusals_at_scope;
+}
+
 // JS_ToCString converts through the value's own toString, so it answers NULL
 // whenever that throws — a getter that raises, a Symbol, a Proxy that refuses —
 // and not only when it runs out of memory. This keeps the NULL, for the two
@@ -585,6 +597,12 @@ static bool eval_budget_lapsed(VMData *data)
 // stand in for it.
 static const char *js_hold_cstring_or_null(JsHold *hold, JSValue j_val)
 {
+  VMData *data = JS_GetContextOpaque(hold->ctx);
+  // The window is this read, not the call it sits in. Asked of the whole
+  // scope, a read that answers NULL for its own reasons — a Symbol, a toString
+  // written to throw — would report a refusal the guest had already caught and
+  // recovered from, and condemn a VM whose call went on to return normally.
+  uint64_t refusals_before = data->alloc_refusals;
   const char *str = JS_ToCString(hold->ctx, j_val);
   if (str != NULL)
     return js_hold_own_cstring(hold, str);
@@ -601,11 +619,18 @@ static const char *js_hold_cstring_or_null(JsHold *hold, JSValue j_val)
   // remembering is not the throw but the clock: a read the budget outlived says
   // nothing about the value and everything about the evaluation.
   JSValue j_pending = js_hold_value(hold, JS_GetException(hold->ctx));
+
+  // Before the bridge exit below, which raises: a read that ran out and then
+  // found a host error waiting would unwind past the latch and leave the VM
+  // running on the heap that refused.
+  if (data->alloc_refusals > refusals_before)
+    data->oom_poisoned = true;
+
   VALUE r_ruby_error = find_ruby_error(hold->ctx, j_pending);
   if (!NIL_P(r_ruby_error))
     rb_exc_raise(r_ruby_error);
 
-  if (eval_budget_lapsed(JS_GetContextOpaque(hold->ctx)))
+  if (eval_budget_lapsed(data))
     hold->interrupted = true;
 
   return NULL;
@@ -699,16 +724,48 @@ static void raise_if_interrupted(JsHold *hold)
     rb_exc_raise(r_interrupted_error());
 }
 
+// The heap running out inside a read outranks both the read and the budget:
+// the VM is already condemned, and the caller is told what a top-level
+// out-of-memory tells it, so the advice to recreate the VM reads the same.
+static VALUE r_out_of_memory_error(void)
+{
+  VALUE r_message = rb_str_new2("out of memory");
+  return rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_message, Qnil);
+}
+
+// Asked of the scope rather than of one hold. The flag a hold used to carry
+// was set only where allocator_refused was already true and read where it
+// still is, so it said nothing the counter does not, and a flag copied along
+// a path that can raise is a flag that can be lost. The scope also covers the
+// throw being rendered, including the end where QuickJS could not allocate
+// the error object either and what is pending is not an Error at all.
+//
+// A refusal outranks the class the throw carries: a guest that catches an
+// out-of-memory and then throws a TypeError hears "out of memory" rather than
+// TypeError. That is the heap talking rather than the guest, and the VM is
+// condemned either way, so the caller is better told why.
+static void raise_if_out_of_memory(VMData *data)
+{
+  if (!allocator_refused(data))
+    return;
+
+  data->oom_poisoned = true;
+  rb_exc_raise(r_out_of_memory_error());
+}
+
 struct js_exception_render
 {
   JSContext *ctx;
   // Whether the exception is the evaluation's own result. Only then is it news:
-  // it gets the "Uncaught" row the console would have printed, and an
-  // out-of-memory in it condemns the VM. An exception raised part-way through
-  // converting a value that did return is on its way to the caller as that
-  // call's error — telling the log listener it went uncaught would be the
-  // opposite of what happened, and the heap it was found on is the heap of a
-  // run that finished.
+  // it gets the "Uncaught" row the console would have printed. An exception
+  // raised part-way through converting a value that did return is on its way to
+  // the caller as that call's error, and telling the log listener it went
+  // uncaught would be the opposite of what happened.
+  //
+  // The out-of-memory latch is not keyed on this and reads the same either way.
+  // It was, while the latch lived in the class cascade below and only the
+  // uncaught path reached it; the heap is a fact about the call rather than
+  // about which of its exceptions is being rendered.
   bool uncaught;
   JsHold hold;
 };
@@ -732,6 +789,7 @@ static VALUE js_exception_render_run(VALUE r_render)
       VALUE r_headline = rb_str_new2(js_hold_format(hold, "Uncaught '%s'", errorMessage));
       dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
     }
+    raise_if_out_of_memory(data);
     raise_if_interrupted(hold);
 
     rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, rb_str_new2(errorMessage), Qnil));
@@ -739,7 +797,17 @@ static VALUE js_exception_render_run(VALUE r_render)
 
   VALUE r_maybe_ruby_error = find_ruby_error(ctx, j_exceptionVal);
   if (!NIL_P(r_maybe_ruby_error))
+  {
+    // The host error is what comes back out: it is the bridge reporting a
+    // failure of its own, and find_ruby_error is the only thing that takes it
+    // out of alive_objects. But the heap is condemned all the same, and this
+    // exit is above every reader that would have said so, so a guest that
+    // catches its own out-of-memory and calls a bridge that raises left the
+    // VM running on a refused heap.
+    if (allocator_refused(data))
+      data->oom_poisoned = true;
     rb_exc_raise(r_maybe_ruby_error);
+  }
   // will support other errors like just returning an instance of Error
 
   JSValue j_errorClassName = js_hold_value(hold, JS_GetPropertyStr(ctx, j_exceptionVal, "name"));
@@ -763,6 +831,7 @@ static VALUE js_exception_render_run(VALUE r_render)
     VALUE r_headline = rb_str_new2(js_hold_format(hold, "Uncaught %s: %s\n%s", errorClassName, errorClassMessage, stackTrace));
     dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
   }
+  raise_if_out_of_memory(data);
   raise_if_interrupted(hold);
 
   VALUE r_error_class, r_error_message = rb_str_new2(errorClassMessage);
@@ -779,23 +848,6 @@ static VALUE js_exception_render_run(VALUE r_render)
   else if (strcmp(errorClassName, "Quickjs::InterruptedError") == 0)
   {
     r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_INTERRUPTED_ERROR);
-  }
-  else if (strcmp(errorClassName, "InternalError") == 0 && strstr(errorClassMessage, "out of memory") != NULL)
-  {
-    // Once OOM has fired, the QuickJS heap is in a state where another
-    // throw inside the parser-error path can corrupt the shape table and
-    // segfault. Mark the VM so further eval/call calls refuse cleanly.
-    //
-    // This is the one thing the uncaught path does not keep to itself. Running
-    // out of memory is a fact about the heap, not about who was asking: a
-    // getter on an object the evaluation successfully returned allocates on the
-    // same heap as the evaluation did, and `({get x() { return new
-    // Array(2_000_000).fill(0) }})` reaches OOM here with the result already in
-    // hand. Both strings are guest-writable, so a forged InternalError condemns
-    // the VM too — but that is reachable from any getter and always has been,
-    // and refusing to latch here would trade a real guard for no ground.
-    data->oom_poisoned = true;
-    r_error_class = QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR);
   }
   else
   {
@@ -1296,10 +1348,24 @@ static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason)
   conversion.ctx = ctx;
   conversion.j_reason = j_reason;
   js_hold_init(&conversion.hold, ctx);
+  VMData *data = JS_GetContextOpaque(ctx);
+  // The window is the conversion, for the reason the hold's own read narrows
+  // to itself: a refusal the guest met and caught earlier in the call says
+  // nothing about this reason, and reporting it here would hand the listener
+  // "out of memory" in place of the rejection it is waiting to hear about.
+  uint64_t refusals_before = data->alloc_refusals;
   VALUE r_exc = rb_ensure(js_reason_conversion_run, (VALUE)&conversion, js_hold_release, (VALUE)&conversion.hold);
-  // The flag outlives the release, which is why it is sticky: a budget that
-  // lapsed while the reason was read is what the listener hears about, since
-  // the tracker cannot raise out and there may be no next interrupt check.
+  // Read after the release: a heap that ran out or a budget that lapsed while
+  // the reason was read is what the listener hears about, since the tracker
+  // cannot raise out and there may be no next interrupt check. The lapse is a
+  // flag the hold carries, because a re-armed clock forgets; the refusal is a
+  // count on the VM, which forgets nothing. The same precedence as the
+  // renderer.
+  if (data->alloc_refusals > refusals_before)
+  {
+    data->oom_poisoned = true;
+    return r_out_of_memory_error();
+  }
   return conversion.hold.interrupted ? r_interrupted_error() : r_exc;
 }
 
@@ -1335,6 +1401,22 @@ static void quickjsrb_promise_rejection_tracker(
     return;
 
   VMData *data = JS_GetContextOpaque(ctx);
+
+  // A rejection nobody handled is not a recovery, so a refusal met anywhere in
+  // this call condemns the heap here, and does so before the listener check:
+  // with no listener registered there is no reader below at all, and a job
+  // that ran out inside drain_jobs! left the VM running on the heap that
+  // refused. Read of the call rather than of the reason conversion, because
+  // the allocation that failed is the one the job was making when it rejected,
+  // and reading its reason afterwards allocates nothing.
+  //
+  // The cost is a guest that catches its own out-of-memory and, in the same
+  // call, leaves an unrelated rejection unhandled: that VM is condemned too.
+  // Nothing here can tell the two apart, and of the two mistakes this is the
+  // one that does not leave a caller evaluating on a refused heap.
+  if (allocator_refused(data))
+    data->oom_poisoned = true;
+
   if (NIL_P(data->on_unhandled_rejection))
     return;
 
@@ -1536,13 +1618,31 @@ struct quickjsrb_log_call
   // Set when the budget lapsed inside one of the logged values; read back on
   // the QuickJS side of the protect, where it can be thrown as the interrupt.
   bool interrupted;
+  // Set when the allocator refused while the row was being built. Written by
+  // the ensure that owns the build, which runs on the raising path too, so
+  // unlike a flag copied after the build it cannot be skipped by an unwind.
+  bool refused;
 };
 
 struct log_row_build
 {
   struct quickjsrb_log_call *call;
   JsHold hold;
+  // The count as the build began. The window is the build alone: the listener
+  // runs after it and can re-enter the VM, and a nested call that meets a
+  // refusal and recovers from it is that call's business, not this row's.
+  uint64_t refusals_before;
 };
+
+// Owns the build's exit, raising or not: releases what the row held, and
+// records whether the heap ran out while it was being built.
+static VALUE r_log_row_ensure(VALUE r_build)
+{
+  struct log_row_build *build = (struct log_row_build *)r_build;
+  VMData *data = JS_GetContextOpaque(build->hold.ctx);
+  build->call->refused = data->alloc_refusals > build->refusals_before;
+  return js_hold_release((VALUE)&build->hold);
+}
 
 static VALUE r_build_log_row(VALUE r_build)
 {
@@ -1603,7 +1703,8 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
   struct log_row_build build;
   build.call = call;
   js_hold_init(&build.hold, call->ctx);
-  VALUE r_row = rb_ensure(r_build_log_row, (VALUE)&build, js_hold_release, (VALUE)&build.hold);
+  build.refusals_before = data->alloc_refusals;
+  VALUE r_row = rb_ensure(r_build_log_row, (VALUE)&build, r_log_row_ensure, (VALUE)&build);
 
   // Carried out rather than raised here: a Ruby exception would be bridged
   // into a catchable JS Error, and a guest wrapping console.log in try/catch
@@ -1621,9 +1722,30 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
 // JS exception instead of a cross-boundary longjmp.
 static JSValue js_quickjsrb_log_inner(JSContext *ctx, int argc, JSValueConst *argv, const char *severity)
 {
-  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED, false};
+  VMData *data = JS_GetContextOpaque(ctx);
+  // The row build records this for us, in the ensure that owns its exit, so it
+  // survives an argument whose conversion raises past everything after it and
+  // it does not answer for a nested call the listener made.
+  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED, false, false};
   int error;
   rb_protect(r_build_and_dispatch_log, (VALUE)&call, &error);
+  if (call.refused)
+  {
+    // Ahead of the lapse, as in the renderer: a heap that ran out is a fact
+    // about the VM rather than about this evaluation. Without this the
+    // evaluation ran on, because QuickJS was never told its heap had run out:
+    // the throw that said so was substituted away for the log row, or bridged
+    // back as an ordinary catchable Error for the guest to swallow.
+    data->oom_poisoned = true;
+    if (error)
+      rb_set_errinfo(Qnil);
+    // Uncatchable for the reason the lapse is: a catchable Error here is one
+    // the guest can swallow, and it would pin a Ruby exception in
+    // alive_objects per catch on a heap that has nothing left to give.
+    JS_ThrowInternalError(ctx, "out of memory");
+    JS_SetUncatchableException(ctx, TRUE);
+    return JS_EXCEPTION;
+  }
   if (call.interrupted)
   {
     // The lapse outranks a raise from the listener, as it does in the uncaught
@@ -2018,6 +2140,16 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   JS_SetPropertyStr(data->context, j_global, "console", j_console);
   JS_FreeValue(data->context, j_global);
 
+  // Construction opens no scope, since there is no earlier call to be told
+  // apart from: every refusal counted so far happened building this VM. Some
+  // of them raise on their way out, but the feature module loads free their
+  // results unchecked, so a std or os module that ran out is discarded here
+  // and the VM is handed back on a heap that has already refused. The first
+  // call would find it only by refusing too, and the scope it opens masks
+  // the count that would have said so.
+  if (data->alloc_refusals > 0)
+    data->oom_poisoned = true;
+
   return r_self;
 }
 
@@ -2064,13 +2196,30 @@ static VALUE to_rb_return_value(JSContext *ctx, JSValue j_val)
   return rb_ensure(to_rb_return_value_body, (VALUE)&owned, to_rb_return_value_release, (VALUE)&owned);
 }
 
-static void check_oom_poisoned(VMData *data)
+// Refuses a VM the heap has already condemned, and then opens the scope the
+// out-of-memory readers measure against: one public API call is one
+// operation, and "the allocator refused" means it refused inside this one.
+//
+// The snapshot lives here, rather than beside each caller, because every
+// public entry point already begins with this line — and because the scope
+// cannot be a JS entry. An evaluation is two counted entries, the run and
+// then the rendering of what it left pending, so a snapshot taken as an
+// entry opens would be re-taken after the refusal and before the renderer
+// that has to see it.
+static void enter_oom_scope(VMData *data)
 {
   if (data->oom_poisoned)
   {
     VALUE r_msg = rb_str_new2("VM is poisoned: a previous evaluation hit out-of-memory; further evaluation may segfault. Recreate the Quickjs::VM.");
     rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
   }
+
+  // Only the outermost call opens a scope. A nested one — a define_function
+  // proc or an on_log listener re-entering the VM while JS is in flight —
+  // inherits the scope it was made from, because taking its own would drop a
+  // refusal the enclosing call has already met and is still going to report.
+  if (data->evals_in_flight == 0)
+    data->alloc_refusals_at_scope = data->alloc_refusals;
 }
 
 static void check_disposed(VMData *data)
@@ -2624,7 +2773,7 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  enter_oom_scope(data);
   check_js_entry_owner(data);
 
   VALUE r_code, r_opts;
@@ -2841,7 +2990,7 @@ static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  enter_oom_scope(data);
   check_js_entry_owner(data);
 
   VALUE r_code, r_opts;
@@ -2955,7 +3104,7 @@ static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  enter_oom_scope(data);
   check_js_entry_owner(data);
   Check_Type(r_code, T_STRING);
   Check_Type(r_name, T_STRING);
@@ -3044,7 +3193,7 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  enter_oom_scope(data);
   check_js_entry_owner(data);
 
   // Strict String rather than StringValue's coercion, matching
@@ -3150,7 +3299,7 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  enter_oom_scope(data);
   check_js_entry_owner(data);
 
   if (!RB_TYPE_P(r_bytecode, T_STRING))
@@ -3235,7 +3384,7 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   }
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  enter_oom_scope(data);
   check_js_entry_owner(data);
 
   // "Unbudgeted" needs enforcing, not just skipping arm_eval_timer: the
@@ -3460,6 +3609,12 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
+  // The one entry point that opened no scope. Two things followed: it ran on a
+  // condemned VM instead of refusing, and the readers it reaches through its
+  // own JS_Eval measured against whatever call last opened a scope, so a
+  // refusal an earlier call had already recovered from could be reported here
+  // as this one running out.
+  enter_oom_scope(data);
   check_no_gvl_release_in_flight(data);
 
   struct define_function_call call = {
@@ -3672,7 +3827,7 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  enter_oom_scope(data);
   check_js_entry_owner(data);
 
   // evals_in_flight stays elevated for the whole call, not just the
@@ -3840,7 +3995,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  enter_oom_scope(data);
   check_js_entry_owner(data);
 
   // Module top-level code is user JS like any eval — budget it. Without
@@ -3950,7 +4105,7 @@ static VALUE vm_m_drainJobs(VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  enter_oom_scope(data);
   check_js_entry_owner(data);
 
   if (!JS_IsJobPending(JS_GetRuntime(data->context)))

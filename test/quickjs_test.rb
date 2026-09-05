@@ -473,6 +473,62 @@ describe Quickjs::VM do
     end
   end
 
+  # The runtime is created with our own JSMallocFunctions rather than QuickJS’s
+  # default ones, so malloc_size and malloc_count are ours to maintain: they are
+  # what memory_limit is compared against and what memory_usage reports. A
+  # mismatch between the malloc and free sides does not fail loudly, it drifts,
+  # and the limit is then enforced against a number that is not the heap.
+  describe "OwnedAllocator" do
+    it "accounts an allocation while it is held and gives the bytes back when it is released" do
+      vm = Quickjs::VM.new
+      vm.eval_code("void 0")
+      vm.gc!
+      baseline = vm.memory_usage[:malloc_size]
+
+      vm.eval_code("globalThis.hold = new Array(50_000).fill(7); void 0")
+      vm.gc!
+      held = vm.memory_usage[:malloc_size]
+
+      vm.eval_code("globalThis.hold = null; void 0")
+      vm.gc!
+      released = vm.memory_usage[:malloc_size]
+
+      _(held - baseline).must_be :>, 350_000
+      # Shapes and atoms the first evaluation interned stay for the life of the
+      # VM, so this is the array’s bytes coming back rather than an exact return.
+      _(released - baseline).must_be :<, 50_000
+    ensure
+      vm.dispose!
+    end
+
+    it "does not drift over repeated allocation and release" do
+      vm = Quickjs::VM.new
+      cycle = "globalThis.hold = new Array(2_000).fill(1); globalThis.hold = null; void 0"
+      5.times { vm.eval_code(cycle) }
+      vm.gc!
+      before = vm.memory_usage[:malloc_size]
+
+      200.times { vm.eval_code(cycle) }
+      vm.gc!
+
+      # Measured at 0 on macOS and Linux. The slack is for a platform whose
+      # malloc rounds a request differently between the two sides, not for an
+      # asymmetry in the bookkeeping, which would grow with the iteration count.
+      _(vm.memory_usage[:malloc_size] - before).must_be :<, 4_096
+    ensure
+      vm.dispose!
+    end
+
+    it "still enforces memory_limit, and reports the limit it was given" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      _(vm.memory_usage[:malloc_limit]).must_equal 1024 * 1024
+
+      _ { vm.eval_code("new Array(2_000_000).fill(0); void 0") }.must_raise Quickjs::RuntimeError
+    ensure
+      vm.dispose!
+    end
+  end
+
   # A conversion that raises partway through — a Promise nested in the graph is
   # the reachable case — must release everything it was holding on that exit.
   # What leaks is guest-chosen and never returned, so a long-lived VM fills up
@@ -920,6 +976,415 @@ describe Quickjs::VM do
     # memory is a fact about the heap rather than about who was asking, and this
     # is the shape that proves the split cannot own it: the evaluation returns
     # its object and the allocation that fails is in a getter read afterwards.
+    # The heap can run out inside one of the renderer's own reads. The getter
+    # here succeeds — big + big is a rope — and it is the read's own
+    # JS_ToCString, flattening it, that runs out. That throw took the
+    # substitution path like any other, so the caller got a normal-looking
+    # RuntimeError, the latch never set, and the next evaluation ran on the
+    # heap the latch exists to refuse.
+    it "condemns the VM for an out-of-memory met inside a read it was rendering" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          const big = 'x'.repeat(480 * 1024);
+          const e = new Error('m');
+          Object.defineProperty(e, 'message', {get() { return big + big }});
+          throw e;
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_match(/out of memory/)
+      _(vm.memory_poisoned?).must_equal true
+      err = _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
+      _(err.message).must_match(/poisoned/)
+    ensure
+      vm.dispose!
+    end
+
+    # The same shape with nothing actually running out. The getter throws an
+    # error whose message is large and non-ASCII, which is what it took to make
+    # the old detector — the one that read the discarded throw's message
+    # looking for a sentence — run out of memory inside its own inspection and
+    # condemn the VM on the strength of it. Nothing reads that message now, so
+    # the heap is never asked for the string, and a throwing getter is a
+    # throwing getter.
+    it "substitutes for a throwing getter whose error is expensive to render, without condemning the VM" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          const big = 'x'.repeat(600 * 1024);
+          const e = new Error('m');
+          Object.defineProperty(e, 'message', {get() {
+            const inner = new Error('q');
+            inner.message = 'out of memory ' + 'é'.repeat(150 * 1024);
+            throw inner;
+          }});
+          throw e;
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal "(unrenderable value)"
+      _(vm.memory_poisoned?).must_equal false
+      _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm.dispose!
+    end
+
+    # The sentence is the guest's to write, so it cannot be the signal. Every
+    # forgery below reached the latch before the allocator was ours, and each
+    # one condemned a VM whose heap was never touched.
+    it "does not condemn the VM for an InternalError the guest wrote itself" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      _ do
+        vm.eval_code("const e = new Error('out of memory'); e.name = 'InternalError'; throw e;")
+      end.must_raise Quickjs::RuntimeError
+
+      _(vm.memory_poisoned?).must_equal false
+      _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm.dispose!
+    end
+
+    it "does not condemn the VM for a forged out-of-memory thrown from a logged value" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      logged = []
+      vm.on_log {|log| logged << log.to_s }
+
+      _(vm.eval_code(<<~JS)).must_equal 'done'
+        console.log({toString() {
+          const e = new Error('out of memory');
+          e.name = 'InternalError';
+          throw e;
+        }});
+        'done';
+      JS
+
+      _(logged).must_equal ['(unrenderable value)']
+      _(vm.memory_poisoned?).must_equal false
+    ensure
+      vm.dispose!
+    end
+
+    # The sentence this issue is really about: application code reporting that
+    # something else ran out of memory, in a message the VM has no business
+    # reading as news about its own heap.
+    it "does not condemn the VM for a guest error that merely says it ran out of memory" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      error = _ do
+        vm.eval_code("'' + {toString() { throw new Error('worker ran out of memory, retrying') }}")
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'worker ran out of memory, retrying'
+      _(vm.memory_poisoned?).must_equal false
+      _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm.dispose!
+    end
+
+    # The other end, which no sentence could reach: the refusal is counted
+    # where it happens, so an evaluation that runs out is condemned whatever
+    # the throw that comes back says, and whether or not one comes back at all.
+    it "condemns the VM for a real out-of-memory the guest caught and threw something else over" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      error = _ do
+        vm.eval_code("try { new Array(2_000_000).fill(0) } catch (e) {} ; throw new TypeError('after')")
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'out of memory'
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
+    # A nested call must not open a scope of its own. The refusal here happens
+    # in the enclosing evaluation, before a bridge re-enters the VM; a snapshot
+    # taken by that inner call would move the window past it, and the render
+    # that follows would report the guest's TypeError over a heap that had run
+    # out and hand back a VM nobody had condemned.
+    it "keeps the scope of the enclosing call when a bridge re-enters the VM" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      vm.define_function(:reenter) { vm.eval_code('1 + 1') }
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          try { new Array(2_000_000).fill(0) } catch (e) {}
+          reenter();
+          throw new TypeError('after');
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'out of memory'
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
+    # Every reader below asks about the conversion it is reporting on, not
+    # about the call the conversion sits in. Asked of the whole call, each one
+    # answers for a refusal the guest already caught and recovered from, and
+    # condemns a VM whose call went on to return normally.
+    it "leaves the VM alone when an unrelated value cannot be stringified after a recovered out-of-memory" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      vm.on_log {|log| }
+
+      _(vm.eval_code(<<~JS)).must_equal 'ok'
+        try { new Array(2_000_000).fill(0) } catch (e) {}
+        console.log(Symbol('s'));
+        'ok';
+      JS
+
+      _(vm.memory_poisoned?).must_equal false
+      _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm.dispose!
+    end
+
+    # What the listener hears is decided by the conversion: it gets the real
+    # rejection, not "out of memory" borrowed from a refusal the guest had
+    # already caught. Whether the VM survives is decided separately, and an
+    # unhandled rejection is not a recovery, so this one does condemn it.
+    it "hands the listener the real rejection reason after a recovered out-of-memory" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      seen = []
+      vm.on_unhandled_rejection {|err| seen << err }
+
+      _(vm.eval_code(<<~JS)).must_equal 'ok'
+        try { new Array(2_000_000).fill(0) } catch (e) {}
+        void Promise.reject(new TypeError('real reason'));
+        'ok';
+      JS
+
+      _(seen.map(&:class)).must_equal [Quickjs::TypeError]
+      _(seen.map(&:message)).must_equal ['real reason']
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
+    # The rejection nobody handled, with no listener to read its reason: the
+    # only reader below the tracker is one nobody registered, so a job that ran
+    # out inside drain_jobs! left the VM running on the heap that refused.
+    it "condemns the VM for an out-of-memory a drained job left unhandled" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      ran = []
+      vm.define_function(:mark) {|m| ran << m }
+
+      _(vm.eval_code(<<~JS)).must_equal 'ok'
+        Promise.resolve().then(() => { mark('job ran'); new Array(2_000_000).fill(0); mark('allocated') });
+        'ok';
+      JS
+      _(vm.memory_poisoned?).must_equal false
+
+      vm.drain_jobs!
+
+      _(ran).must_equal ['job ran']
+      _(vm.memory_poisoned?).must_equal true
+      _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
+    ensure
+      vm.dispose!
+    end
+    # The listener runs after the row is built and can re-enter the VM, so the
+    # window has to close before it: a nested call that meets a refusal and
+    # recovers from it is that call's business, not this row's.
+    it "does not condemn the outer call for an out-of-memory a log listener's own call recovered from" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      vm.on_log {|log| vm.eval_code('try { new Array(2_000_000).fill(0) } catch (e) {} ; 1') }
+
+      _(vm.eval_code("console.log('hi'); 'done'")).must_equal 'done'
+      _(vm.memory_poisoned?).must_equal false
+    ensure
+      vm.dispose!
+    end
+
+    # The bridge's own exit is above every reader that would have said so: the
+    # host error is what comes back out, since find_ruby_error is the only
+    # thing that takes it out of alive_objects, but the heap is condemned all
+    # the same.
+    it "condemns the VM when a bridge raises over an out-of-memory the guest caught" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      vm.define_function(:boom) { raise IOError, 'host error' }
+
+      error = _ do
+        vm.eval_code('try { new Array(2_000_000).fill(0) } catch (e) { boom() }')
+      end.must_raise IOError
+
+      _(error.message).must_equal 'host error'
+      _(vm.memory_poisoned?).must_equal true
+      _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
+    ensure
+      vm.dispose!
+    end
+
+    # define_function evaluates JS and renders what that evaluation throws, so
+    # it belongs with the entry points that refuse a condemned VM rather than
+    # with the ones that only read.
+    it "refuses define_function on a VM the heap has condemned" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      _ { vm.eval_code('new Array(2_000_000).fill(0); void 0') }.must_raise Quickjs::RuntimeError
+      _(vm.memory_poisoned?).must_equal true
+
+      error = _ { vm.define_function(:hello) { 1 } }.must_raise Quickjs::RuntimeError
+      _(error.message).must_match(/poisoned/)
+    ensure
+      vm.dispose!
+    end
+
+    # Construction opens no scope, because there is no earlier call to tell it
+    # apart from, so every refusal counted while a VM is built belongs to that
+    # VM. Some of them raise on the way out. The feature module loads do not:
+    # they free their results unchecked, so a std module that ran out is
+    # discarded and the VM handed back on a heap that had already refused,
+    # with the first call finding it only by refusing too.
+    #
+    # Either outcome below is correct, and which one a platform takes depends
+    # on where its own allocations fall. Neither hands back a usable VM.
+    it "does not hand back a VM whose heap refused while it was being built" do
+      vm = nil
+      refused_at_construction = nil
+
+      begin
+        vm = Quickjs::VM.new(memory_limit: 64 * 1024, features: [:feature_std])
+      rescue Quickjs::RuntimeError => e
+        refused_at_construction = e
+      end
+
+      if vm
+        _(vm.memory_poisoned?).must_equal true
+        error = _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
+        _(error.message).must_match(/poisoned/)
+      else
+        _(refused_at_construction.message).must_match(/out of memory/)
+      end
+    ensure
+      vm&.dispose!
+    end
+
+    # Scoped to the call rather than to the VM: a guest that runs out, catches
+    # it and returns is left alone, which is what it was before the allocator
+    # was ours. The scope is what makes that possible to say at all.
+    it "leaves the VM alone when the guest catches its own out-of-memory and returns" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      _(vm.eval_code("try { new Array(2_000_000).fill(0) } catch (e) { 'caught' }")).must_equal 'caught'
+      _(vm.memory_poisoned?).must_equal false
+      _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm.dispose!
+    end
+
+    it "hands the listener the out-of-memory met while a rejection reason was read" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      seen = []
+      vm.on_unhandled_rejection {|err| seen << err }
+      vm.eval_code(<<~JS)
+        const big = 'x'.repeat(480 * 1024);
+        const e = new Error('r');
+        Object.defineProperty(e, 'message', {get() { return big + big }});
+        void Promise.reject(e);
+      JS
+
+      _(seen.map(&:message)).must_equal ['out of memory']
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
+    # The log path has no renderer to report through, so the latch it sets was
+    # written and never read: the evaluation carried on over a heap that had
+    # already run out, and the refusal arrived only at the next call. The flag
+    # is carried out to the QuickJS side of the protect and thrown there, the
+    # same shape a lapsed budget takes.
+    it "stops the evaluation when the heap ran out inside a logged value" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      logged = []
+      vm.on_log {|log| logged << log.to_s }
+      reached = []
+      vm.define_function(:mark) {|m| reached << m }
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          const big = 'x'.repeat(480 * 1024);
+          console.log({toString() { return big + big }});
+          mark('after the log');
+          'returned';
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'out of memory'
+      _(reached).must_equal []
+      _(logged.first).must_equal '(unrenderable value)'
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
+    # The row is built one logged argument at a time, and any of them can raise:
+    # here the first runs out of memory and is substituted for, and the second
+    # throws from a getter while it converts. That raise unwinds the whole
+    # builder, so a flag copied out after it was never copied, and the heap
+    # having run out was bridged back to the guest as an ordinary catchable
+    # Error. Measured on the branch before this: the guest caught it, ran on,
+    # and the evaluation returned its value with the VM already condemned.
+    it "stops the evaluation when a later logged argument raises over the out-of-memory" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      vm.on_log {|log| }
+      reached = []
+      vm.define_function(:mark) {|m| reached << m }
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          const big = 'x'.repeat(480 * 1024);
+          try {
+            console.log({toString() { return big + big }},
+                        {get x() { throw new RangeError('g') }});
+          } catch (e) {
+            mark('swallowed');
+          }
+          mark('kept running');
+          'returned';
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'out of memory'
+      _(reached).must_equal []
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
+    # Uncatchable, for the reason the lapse is: an error the guest can swallow
+    # is one it can go round again, and each catch would pin a Ruby exception
+    # in alive_objects on a heap with nothing left to give.
+    it "does not let the guest catch the out-of-memory thrown from the log path" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      vm.on_log {|log| }
+      reached = []
+      vm.define_function(:mark) {|m| reached << m }
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          const big = 'x'.repeat(480 * 1024);
+          try {
+            console.log({toString() { return big + big }});
+          } catch (e) {
+            mark('swallowed');
+          }
+          'returned';
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'out of memory'
+      _(reached).must_equal []
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
     it "still condemns the VM for an out-of-memory a getter hit during conversion" do
       vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
 
