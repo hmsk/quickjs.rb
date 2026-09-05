@@ -58,8 +58,8 @@ module Quickjs
       # and the source: interpolating a Symbol calls Symbol#to_s, so the bytes
       # that were matched against the pattern were thrown away and the name was
       # asked for again afterwards. A plain String interpolates as itself.
-      key = _validate_variable_name(name)
       budget = _js_source_budget
+      key = _validate_variable_name(name, budget)
       # The per-container check bounds the expanding case; this catches the
       # flat one, a single enormous String or a very wide container, where no
       # inner container ever crosses the line on its own.
@@ -107,14 +107,25 @@ module Quickjs
         # happened, and the const the caller asked for is now there.
         begin
           return _declare(declared, kind, key, literal)
-        rescue Quickjs::RuntimeError
-          # _declare takes the record out for any QuickJS error, not only the
-          # redeclaration this expects, and a guest can decide which Ruby class
-          # a JS error maps to. The const is real either way, so put the record
-          # back before the error goes on.
+        rescue Quickjs::InterruptedError
+          # _declare already recorded what the VM is actually left holding, and
+          # that is more useful to the next caller than being told they
+          # redefined something.
+          raise
+        rescue Quickjs::SyntaxError
+          # The redeclaration this was asking about.
           declared[key] = :const
           raise ::ArgumentError,
             "#{key} is already defined as a const; a const cannot be redefined"
+        rescue Quickjs::RuntimeError
+          # Something else went wrong in the VM: out of memory, or a guest that
+          # renamed the error class this was looking for. _declare took the
+          # record out on the way past and the const may well still be there, so
+          # put it back, but let the real error through. Reporting an
+          # out-of-memory as a redefinition would tell the caller they made a
+          # mistake while the VM is dead.
+          declared[key] = :const
+          raise
         end
       else
         # Redeclaring a live `let` is a parse error, so re-defining one assigns
@@ -309,7 +320,7 @@ module Quickjs
         "Replacing globalThis or Object does this"
     end
 
-    def _validate_variable_name(name)
+    def _validate_variable_name(name, budget)
       # `===` rather than `name.is_a?`, which the object answers for itself.
       unless ::String === name || ::Symbol === name
         raise ::TypeError, "variable's name should be a Symbol or a String, got #{name.class}"
@@ -321,6 +332,16 @@ module Quickjs
       # different name to the interpolation with the other. Everything after
       # this line works on a plain String that answers only for itself.
       str = ::String === name ? ::String.new(name) : ::String.new(name.to_s)
+
+      # Measured against the same budget as a value, since it goes into the same
+      # source. Without this the one piece of the generated JavaScript that was
+      # not bounded was the name: an oversized value was refused and left the VM
+      # healthy, and an oversized name reached the eval and took the VM with it.
+      if budget && str.bytesize > budget
+        raise ::ArgumentError,
+          "the variable's name is longer than #{budget} bytes, which is this VM's memory_limit"
+      end
+
       unless NAME_PATTERN.match?(str)
         raise ::ArgumentError, "#{str.inspect} is not a valid JavaScript identifier"
       end

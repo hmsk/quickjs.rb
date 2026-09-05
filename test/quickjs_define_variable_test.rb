@@ -892,6 +892,32 @@ describe "values the serializer must not take at face value" do
     _(vm.eval_code("counter")).must_equal 2
   end
 
+  # Refusing a const redefine asks by attempting the declaration, so it has to
+  # tell the redeclaration it went looking for apart from the VM failing under
+  # it. Reporting an out-of-memory as "you redefined a const" tells the caller
+  # they made a mistake while the VM is dead.
+  it "does not report a failing VM as a redefinition" do
+    vm = Quickjs::VM.new(memory_limit: 4 * 1024 * 1024)
+    # UNDEFINED so the cheap liveness check cannot answer, which is what makes
+    # the declaration actually run.
+    vm.define_const(:cfg, Quickjs::Value::UNDEFINED)
+
+    err = _ { vm.define_const(:cfg, Array.new(300_000) { |i| i }) }.must_raise Quickjs::RuntimeError
+
+    _(err.message).must_match(/out of memory/)
+  end
+
+  # The name goes into the same source as the value, and was the one piece of
+  # it with no bound. An oversized value is refused and the VM carries on; an
+  # oversized name reached the eval and took the VM with it.
+  it "refuses a name too long to fit the budget, without hurting the VM" do
+    vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+    err = _ { vm.define_const(("n" * 8_000_000).to_sym, 1) }.must_raise ArgumentError
+
+    _(err.message).must_match(/memory_limit/)
+    _(vm.eval_code("1 + 1")).must_equal 2
+  end
   # A sealed globalThis refuses a var declaration at runtime. The guard exists
   # so that a var the VM cannot be given raises ArgumentError rather than some
   # other class from further in.
