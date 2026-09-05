@@ -376,6 +376,97 @@ vm.eval_code("get_file().size")          #=> Integer (byte size)
 vm.eval_code("await get_file().text()") #=> file content as String
 ```
 
+#### `Quickjs::VM#define_const` / `#define_let` / `#define_var`: 📥 Pass Ruby values into JS
+
+Expose a Ruby value to JS without interpolating it into your source. You pick the binding form, and it behaves exactly as the matching JavaScript declaration does:
+
+```rb
+vm = Quickjs::VM.new
+vm.define_const(:user, { name: 'Itadori', tags: ['strong', 'kind'] })
+
+vm.eval_code("user.name + ': ' + user.tags.join(', ')") #=> "Itadori: strong, kind"
+```
+
+| | JS can reassign it | Redeclaring it in JS | On `globalThis` |
+| --- | --- | --- | --- |
+| `define_const` | no, raises `Quickjs::TypeError` | `Quickjs::SyntaxError` | no |
+| `define_let` | yes | `Quickjs::SyntaxError` | no |
+| `define_var` | yes | allowed | **yes** |
+
+Reach for `define_var` when the JS you're running expects a global to already exist — a third-party bundle reading `globalThis.APP_CONFIG`, for instance. It's the only one of the three that's visible there:
+
+```rb
+vm.define_var(:APP_CONFIG, { retries: 3 })
+
+vm.eval_code('globalThis.APP_CONFIG.retries') #=> 3
+```
+
+**Define before you run code you do not control.** `var` is the only form that lands on `globalThis`, which is what makes it useful here and also the only one an existing property can intercept. If JavaScript has already run in the VM and left an accessor or a non-writable property under that name, the assignment would go to its setter or be discarded, so `define_var` raises `ArgumentError` rather than reporting a success that did not happen.
+
+That check reads the VM through JavaScript, so treat it as a guard against a global that is already unusable rather than as a defence: code that has run in a VM owns that VM's environment, and a value handed to it afterwards cannot be hidden from it. `define_const` and `define_let` are unaffected, since neither touches `globalThis`.
+
+**A value is written out once per occurrence.** A Ruby structure that reaches the same object twice serializes it twice rather than sharing it, so a graph whose branches repeat expands as it nests. Values built from YAML aliases or a `Marshal` round-trip are the ones that hit this without meaning to. Serializing stops if the result would exceed the VM's `memory_limit`, since a source larger than the whole JS heap budget could not be evaluated anyway, and raises `ArgumentError` naming the option. A `memory_limit` at or above `2 ** 63` reads back negative through QuickJS and is treated as no limit, which turns that bound off along with it.
+
+This is a ceiling and not a prediction. Object-heavy JavaScript costs several times its source size once parsed, so a value well under `memory_limit` can still exhaust the VM when it runs.
+
+The bound is on the JavaScript being built, not on the Ruby memory used to build it, and serializing stops partway rather than after the whole thing exists. Peak host memory is a multiple of `memory_limit` rather than equal to it, since the source exists in Ruby before it is evaluated and a structure is walked before it is refused. How deep a value may nest is whatever the calling thread's stack allows, which is why no number is quoted here: a Ruby thread gets a fraction of the main thread's stack, so the same structure can convert on one and not the other. QuickJS clamps its own parser limit to the same headroom, so on a thread the parser can be the tighter of the two; either way the refusal is an `ArgumentError`. Running out raises `ArgumentError` rather than the `SystemStackError` that `rescue => e` would not catch.
+
+
+Because these are real declarations rather than property assignments, a colliding declaration at the top level of your JS is a loud error instead of a silent shadow:
+
+```rb
+vm.define_const(:user, 1)
+vm.eval_code('let user = 2;') #=> raise Quickjs::SyntaxError ("redeclaration of 'user'")
+```
+
+Scopes below the top level shadow as JavaScript always does, silently. That includes module scope, so a module you import can declare the same name without hearing about it:
+
+```rb
+vm.define_const(:injected, 1)
+vm.eval_code('(function () { let injected = 2; return injected })()') #=> 2, the outer one is untouched
+```
+
+Defining an existing `let` or `var` again assigns to it. A `const` can't be redefined, and neither can a name switch binding form:
+
+```rb
+vm.define_let(:counter, 1)
+vm.define_let(:counter, 2)
+vm.eval_code('counter')       #=> 2
+
+vm.define_const(:user, 1)
+vm.define_const(:user, 2)     #=> raise ArgumentError
+vm.define_var(:counter, 3)    #=> raise ArgumentError (already defined as a let)
+```
+
+The name is a `String` or `Symbol` and comes back as a `Symbol`. It has to match `/\A[A-Za-z_$][A-Za-z0-9_$]*\z/` and not be a reserved word. That is narrower than JavaScript itself, which also accepts Unicode identifiers like `値`: the name is concatenated into source that gets evaluated, so the pattern is what stops one from smuggling in arbitrary JS.
+
+Values are `Hash`, `Array`, `String`, `Symbol`, `Integer`, `Float`, `true`/`false`/`nil`, plus `Quickjs::Value::UNDEFINED` and `Quickjs::Value::NAN`. Those last two are the plain Symbols `:undefined` and `:NaN`, so a Symbol value of either name arrives as JavaScript's `undefined` or `NaN` rather than as a string, matching what the converter does with a `define_function` return value. `Rational`, `Complex` and `BigDecimal` are not included, since JavaScript has nothing to receive them as. Anything else raises rather than being silently stringified, `TypeError` for a value that has a class to name:
+
+```rb
+vm.define_const(:at, Time.now) #=> raise TypeError
+```
+
+This is a narrower set than the converter used for `define_function` return values, which also handles `File` and `Exception`. Defining is an input path, so an unsupported value is treated as a mistake worth hearing about rather than something to coerce.
+
+A few edges are worth knowing before they surprise you:
+
+- **Strings are taken as text, not as bytes.** An `ASCII-8BIT` string whose bytes happen to be valid UTF-8 is reinterpreted as those characters, so `"\xC3\xA9".b` arrives as `"é"` with length 1. Bytes that are not valid UTF-8 raise `JSON::GeneratorError`, and a name in an encoding that cannot be compared against ASCII raises `Encoding::CompatibilityError`; both are unsupported values reported by the layer that noticed rather than as `TypeError`. Which json ships with your Ruby decides how long the first of those holds: json warns from 2.9 on that passing a binary string will raise in json 3.0, and Ruby 3.4 already ships a json that warns.
+- **Integers lose precision past `2 ** 53`, silently.** JavaScript has one number type, so `2 ** 53 + 1` arrives as `9007199254740992.0`, the same as `2 ** 53`. Past the range of a double it becomes `Infinity` rather than a rounded value: `10 ** 400` is `Infinity` on the JS side. This matches what the rest of the gem does with large integers.
+- **A `__proto__` key stays a key.** In a JS object literal `__proto__: v` sets the prototype instead of defining a property, and quoting it does not opt out, so a `Hash` with that key would otherwise reach JS with no such key and read back as if it had never been sent. It is emitted as a computed key, which is not that special form: `Object.keys` lists it and it round-trips. JavaScript you write yourself is untouched, and `{__proto__: x}` in your own source still sets a prototype.
+- **Hash keys are compared after `to_s`.** `{ 'a' => 1, a: 2 }` and `{ 1 => 'x', '1' => 'y' }` each produce one JS key, and the last value wins, as they would in a JS object literal.
+- **A `const` or `let` defined here shadows a `define_function` of the same name**, in either order and without an error. `define_const(:svc, 1)` followed by `define_function('svc')` leaves `typeof svc` as `"number"`, with the function reachable only as `globalThis.svc`. `define_var` is different: it and `define_function` write the same `globalThis` property, so whichever runs second silently replaces the other.
+- **Reserved words are rejected, built-ins are not.** The name check refuses `class`, `return` and the rest, because QuickJS would too and the failure reads better from Ruby. It does not stop you replacing something that already exists: `define_var(:eval, 1)` succeeds and `typeof eval` becomes `"number"`.
+
+The value is a snapshot taken when you define it, not a live reference. Mutating the Ruby object afterwards won't change what JS sees. Use [`define_function`](#quickjsvmdefine_function--define-a-global-function-for-js-by-ruby) when you want JS to read the current Ruby value on every access:
+
+```rb
+config = { retries: 3 }
+vm.define_function('config') { config }
+
+config[:retries] = 5
+vm.eval_code('config().retries') #=> 5
+```
+
 #### `Quickjs::VM#on_log`: 📡 Handle console logs in real time
 
 Register a block to be called for each `console.(log|info|debug|warn|error)` call.
