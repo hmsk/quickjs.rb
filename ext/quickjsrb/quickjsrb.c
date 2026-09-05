@@ -517,10 +517,6 @@ typedef struct
   // fired inside it. Sticky for the life of the hold rather than per-read: the
   // fact it records is about the evaluation, not about one property.
   bool interrupted;
-  // Set when a conversion was substituted away because the heap ran out inside
-  // it. The VM is condemned at the moment it is noticed; this is for the
-  // renderer to say so rather than report the substituted read.
-  bool oom;
   JsHeld held_inline[JS_HOLD_INLINE];
 } JsHold;
 
@@ -531,7 +527,6 @@ static void js_hold_init(JsHold *hold, JSContext *ctx)
   hold->count = 0;
   hold->capacity = JS_HOLD_INLINE;
   hold->interrupted = false;
-  hold->oom = false;
 }
 
 // The deepest block below holds eight references at once — an exception, three
@@ -627,15 +622,12 @@ static const char *js_hold_cstring_or_null(JsHold *hold, JSValue j_val)
     hold->interrupted = true;
 
   // A heap that ran out inside the read is the one throw here that must not
-  // be quietly substituted: the latch enter_oom_scope depends on would
-  // otherwise never set, and the next evaluation would run on the heap the
-  // latch exists to refuse. Latched here, at every hold, rather than left to
-  // the renderer, since the log row and the rejection reason have no renderer.
+  // be quietly substituted: a read that is substituted for and never reported
+  // would leave the next evaluation running on the heap the latch exists to
+  // refuse. Condemned here, at every hold, rather than left to the renderer,
+  // since the log row and the rejection reason have no renderer.
   if (allocator_refused(data))
-  {
     data->oom_poisoned = true;
-    hold->oom = true;
-  }
 
   return NULL;
 }
@@ -737,20 +729,20 @@ static VALUE r_out_of_memory_error(void)
   return rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_message, Qnil);
 }
 
-// Asked of the whole scope, not only of the renderer’s own reads. The
-// allocation that fails is usually the one the evaluation was making when it
-// threw, so hold->oom covers the narrower case where the renderer itself ran
-// out while reading what was thrown, and the scope covers the throw it is
-// rendering — including the end where QuickJS could not allocate the error
-// object either and what is pending is not an Error at all.
+// Asked of the scope rather than of one hold. The flag a hold used to carry
+// was set only where allocator_refused was already true and read where it
+// still is, so it said nothing the counter does not, and a flag copied along
+// a path that can raise is a flag that can be lost. The scope also covers the
+// throw being rendered, including the end where QuickJS could not allocate
+// the error object either and what is pending is not an Error at all.
 //
-// A refusal therefore outranks the class the throw carries: a guest that
-// catches an out-of-memory and then throws a TypeError hears "out of memory"
-// rather than TypeError. That is the heap talking rather than the guest, and
-// the VM is condemned either way, so the caller is better told why.
-static void raise_if_out_of_memory(VMData *data, JsHold *hold)
+// A refusal outranks the class the throw carries: a guest that catches an
+// out-of-memory and then throws a TypeError hears "out of memory" rather than
+// TypeError. That is the heap talking rather than the guest, and the VM is
+// condemned either way, so the caller is better told why.
+static void raise_if_out_of_memory(VMData *data)
 {
-  if (!hold->oom && !allocator_refused(data))
+  if (!allocator_refused(data))
     return;
 
   data->oom_poisoned = true;
@@ -790,7 +782,7 @@ static VALUE js_exception_render_run(VALUE r_render)
       VALUE r_headline = rb_str_new2(js_hold_format(hold, "Uncaught '%s'", errorMessage));
       dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
     }
-    raise_if_out_of_memory(data, hold);
+    raise_if_out_of_memory(data);
     raise_if_interrupted(hold);
 
     rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, rb_str_new2(errorMessage), Qnil));
@@ -822,7 +814,7 @@ static VALUE js_exception_render_run(VALUE r_render)
     VALUE r_headline = rb_str_new2(js_hold_format(hold, "Uncaught %s: %s\n%s", errorClassName, errorClassMessage, stackTrace));
     dispatch_log(data, "error", rb_ary_new3(1, r_log_body_new(r_headline, r_headline)));
   }
-  raise_if_out_of_memory(data, hold);
+  raise_if_out_of_memory(data);
   raise_if_interrupted(hold);
 
   VALUE r_error_class, r_error_message = rb_str_new2(errorClassMessage);
@@ -1340,12 +1332,14 @@ static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason)
   conversion.j_reason = j_reason;
   js_hold_init(&conversion.hold, ctx);
   VALUE r_exc = rb_ensure(js_reason_conversion_run, (VALUE)&conversion, js_hold_release, (VALUE)&conversion.hold);
-  // The flags outlive the release, which is why they are sticky: a heap that
-  // ran out or a budget that lapsed while the reason was read is what the
-  // listener hears about, since the tracker cannot raise out and there may be
-  // no next interrupt check. The same precedence as the renderer.
+  // Read after the release: a heap that ran out or a budget that lapsed while
+  // the reason was read is what the listener hears about, since the tracker
+  // cannot raise out and there may be no next interrupt check. The lapse is a
+  // flag the hold carries, because a re-armed clock forgets; the refusal is a
+  // count on the VM, which forgets nothing. The same precedence as the
+  // renderer.
   VMData *data = JS_GetContextOpaque(ctx);
-  if (conversion.hold.oom || allocator_refused(data))
+  if (allocator_refused(data))
   {
     data->oom_poisoned = true;
     return r_out_of_memory_error();
@@ -1586,10 +1580,6 @@ struct quickjsrb_log_call
   // Set when the budget lapsed inside one of the logged values; read back on
   // the QuickJS side of the protect, where it can be thrown as the interrupt.
   bool interrupted;
-  // Set when the heap ran out inside one of them, read back at the same
-  // place. The hold has already condemned the VM by then; what this carries is
-  // the news that the evaluation must stop now rather than at the next call.
-  bool oom;
 };
 
 struct log_row_build
@@ -1666,7 +1656,6 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
   // Copied before the listener runs, since a listener that raises unwinds
   // past everything after it.
   call->interrupted = build.hold.interrupted;
-  call->oom = build.hold.oom;
   r_call_log_listener(rb_ary_new3(2, data->log_listener, r_log_new(call->severity, r_row)));
   return Qnil;
 }
@@ -1676,16 +1665,24 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
 // JS exception instead of a cross-boundary longjmp.
 static JSValue js_quickjsrb_log_inner(JSContext *ctx, int argc, JSValueConst *argv, const char *severity)
 {
-  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED, false, false};
+  VMData *data = JS_GetContextOpaque(ctx);
+  // Read either side of the protect rather than carried out on the call. A
+  // flag set inside is only as good as the path that copies it out, and the
+  // paths here raise: a second logged argument whose conversion fails unwinds
+  // past the copy, and the news that the heap had run out goes with it. The
+  // counter is on the VM, and no unwind can lose it.
+  uint64_t refusals_before = data->alloc_refusals;
+  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED, false};
   int error;
   rb_protect(r_build_and_dispatch_log, (VALUE)&call, &error);
-  if (call.oom)
+  if (data->alloc_refusals > refusals_before)
   {
     // Ahead of the lapse, as in the renderer: a heap that ran out is a fact
-    // about the VM rather than about this evaluation, and the VM is already
-    // condemned. Without this the evaluation ran on — QuickJS was never told
-    // its heap had run out, since the throw that said so was substituted away
-    // for the log row — and the refusal arrived only at the next call.
+    // about the VM rather than about this evaluation. Without this the
+    // evaluation ran on, because QuickJS was never told its heap had run out:
+    // the throw that said so was substituted away for the log row, or bridged
+    // back as an ordinary catchable Error for the guest to swallow.
+    data->oom_poisoned = true;
     if (error)
       rb_set_errinfo(Qnil);
     // Uncatchable for the reason the lapse is: a catchable Error here is one

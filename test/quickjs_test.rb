@@ -1183,6 +1183,40 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
+    # The row is built one logged argument at a time, and any of them can raise:
+    # here the first runs out of memory and is substituted for, and the second
+    # throws from a getter while it converts. That raise unwinds the whole
+    # builder, so a flag copied out after it was never copied, and the heap
+    # having run out was bridged back to the guest as an ordinary catchable
+    # Error. Measured on the branch before this: the guest caught it, ran on,
+    # and the evaluation returned its value with the VM already condemned.
+    it "stops the evaluation when a later logged argument raises over the out-of-memory" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      vm.on_log {|log| }
+      reached = []
+      vm.define_function(:mark) {|m| reached << m }
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          const big = 'x'.repeat(480 * 1024);
+          try {
+            console.log({toString() { return big + big }},
+                        {get x() { throw new RangeError('g') }});
+          } catch (e) {
+            mark('swallowed');
+          }
+          mark('kept running');
+          'returned';
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'out of memory'
+      _(reached).must_equal []
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
     # Uncatchable, for the reason the lapse is: an error the guest can swallow
     # is one it can go round again, and each catch would pin a Ruby exception
     # in alive_objects on a heap with nothing left to give.
