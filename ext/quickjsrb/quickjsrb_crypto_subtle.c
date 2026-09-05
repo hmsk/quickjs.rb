@@ -366,7 +366,7 @@ static JSValue js_crypto_key_to_js(JSContext *ctx, VALUE r_key)
     // through the JSCFunction, and every caller stores the result without
     // checking it, so returning JS_EXCEPTION only moves the sentinel up one
     // level. When the guest's shim reaches a Ruby bridge, the exception it
-    // raised stays parked in alive_objects. #121.
+    // raised stays parked in alive_objects. #125.
     if (JS_IsException(j_pe))
       JS_FreeValue(ctx, JS_GetException(ctx));
     else
