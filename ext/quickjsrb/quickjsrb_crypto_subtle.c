@@ -74,6 +74,27 @@ static void js_reject_with_ruby_error(JSContext *ctx, JSValueConst *resolving_fu
   JS_FreeValue(ctx, ret);
 }
 
+// Quickjs::CryptoKey, or Qnil while the Ruby layer that defines it has not been
+// loaded — requiring the extension alone is enough to reach the callers below.
+// Resolved without rb_const_get's raise, because these run inside QuickJS
+// native callbacks with no rb_protect between them and the interpreter: a
+// NameError there longjmps through QuickJS's own frames, past the JS values
+// they still hold. Cached after the first hit; the constant cannot be
+// collected while the module holds it, and never changes for a process.
+static VALUE r_crypto_key_class(void)
+{
+  static VALUE r_class = Qnil;
+  if (!NIL_P(r_class))
+    return r_class;
+
+  VALUE r_quickjs = rb_const_get(rb_cObject, rb_intern("Quickjs"));
+  if (!rb_const_defined_at(r_quickjs, rb_intern("CryptoKey")))
+    return Qnil;
+
+  r_class = rb_const_get(r_quickjs, rb_intern("CryptoKey"));
+  return r_class;
+}
+
 // Find Ruby CryptoKey from a JS CryptoKey object via rb_object_id handle.
 static VALUE r_find_alive_crypto_key(JSContext *ctx, JSValueConst j_key)
 {
@@ -90,7 +111,8 @@ static VALUE r_find_alive_crypto_key(JSContext *ctx, JSValueConst j_key)
   // File proxy. Without this an object carrying another entry's id reaches the
   // operations below as if it were a key, and the caller is told about a
   // method missing on a File rather than about an invalid CryptoKey.
-  if (!rb_obj_is_kind_of(r_key, rb_const_get(rb_const_get(rb_cObject, rb_intern("Quickjs")), rb_intern("CryptoKey"))))
+  VALUE r_key_class = r_crypto_key_class();
+  if (NIL_P(r_key_class) || !rb_obj_is_kind_of(r_key, r_key_class))
     return Qnil;
   return r_key;
 }

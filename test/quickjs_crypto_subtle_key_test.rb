@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
+require "open3"
 
 describe "crypto.subtle key management" do
   before do
@@ -149,12 +150,38 @@ describe "crypto.subtle key management" do
       vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
       vm.define_function(:boom) { raise ArgumentError, 'host' }
       vm.eval_code("globalThis.id = null; try { boom() } catch (e) { globalThis.id = e.rb_object_id }")
+      # Without this the id could go undefined and the pre-existing handle <= 0
+      # check would produce the same message, leaving the test guarding nothing.
+      _(vm.eval_code("typeof globalThis.id")).must_equal 'number'
 
       error = _ { vm.eval_code("await crypto.subtle.sign('HMAC', {rb_object_id: globalThis.id}, new Uint8Array([1, 2, 3]))") }
         .must_raise Quickjs::TypeError
       _(error.message).must_match(/invalid CryptoKey/)
     ensure
       vm.dispose!
+    end
+
+    # The lookup runs inside a QuickJS native callback with no rb_protect
+    # between it and the interpreter, so it must answer rather than raise when
+    # the Ruby layer that defines the class has not been loaded. Requiring the
+    # extension on its own is enough to get there, and a NameError from here
+    # longjmps through QuickJS's frames past the JS values they still hold.
+    it "answers invalid CryptoKey when Quickjs::CryptoKey is not defined" do
+      script = <<~RUBY
+        require "quickjs/quickjsrb"
+        abort "CryptoKey should not be loaded" if Quickjs.const_defined?(:CryptoKey)
+        vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_CRYPTO])
+        begin
+          vm.eval_code('await crypto.subtle.sign("HMAC", {rb_object_id: 1}, new Uint8Array([1]))')
+          puts "no raise"
+        rescue Exception => e
+          puts "\#{e.class}: \#{e.message}"
+        end
+      RUBY
+
+      out, status = Open3.capture2e(RbConfig.ruby, '-I', 'lib', '-e', script)
+      _(status).must_be :success?
+      _(out).must_match(/Quickjs::TypeError: .*invalid CryptoKey/)
     end
   end
 end
