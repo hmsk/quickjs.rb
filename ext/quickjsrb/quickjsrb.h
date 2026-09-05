@@ -317,6 +317,18 @@ static VALUE vm_alloc(VALUE r_self)
 // trusted to be unlikely, since one would hand two subsystems the same entry.
 #define QUICKJSRB_HANDLE_BITS 48
 
+// Resolved once at Init and pinned, rather than looked up per registration.
+// This runs inside QuickJS native callbacks with no rb_protect between them and
+// the interpreter, the hazard r_crypto_key_class is written around, and a
+// constant lookup is exactly the raise that hazard is about. The limit is
+// 2^48 - 1 so the draw below lands in 1 .. 2^48 - 1: every reader treats a zero
+// handle as "no entry", and a zero draw would strand the object.
+// Defined in quickjsrb.c: a static here would give every translation unit its
+// own copy, and only the one Init touched would be set.
+extern VALUE quickjsrb_secure_random;
+extern VALUE quickjsrb_handle_limit;
+void quickjsrb_init_handle_source(void);
+
 static VALUE alive_objects_register(VMData *data, VALUE r_object)
 {
   // One entry per object, not per crossing. The old handle was the object_id,
@@ -331,16 +343,10 @@ static VALUE alive_objects_register(VMData *data, VALUE r_object)
   if (!NIL_P(r_known) && rb_hash_lookup2(data->alive_objects, r_known, Qnil) == r_object)
     return r_known;
 
-  VALUE r_secure_random = rb_const_get(rb_cObject, rb_intern("SecureRandom"));
-  // 1 .. 2^48 - 1, never 0: every reader treats a zero handle as "no entry", so
-  // a zero draw would strand the object and answer as though it had not been
-  // bridged at all.
-  VALUE r_limit = rb_funcall(INT2NUM(2), rb_intern("**"), 1, INT2NUM(QUICKJSRB_HANDLE_BITS));
-  r_limit = rb_funcall(r_limit, rb_intern("-"), 1, INT2NUM(1));
   VALUE r_handle;
   do
   {
-    r_handle = rb_funcall(r_secure_random, rb_intern("random_number"), 1, r_limit);
+    r_handle = rb_funcall(quickjsrb_secure_random, rb_intern("random_number"), 1, quickjsrb_handle_limit);
     r_handle = rb_funcall(r_handle, rb_intern("+"), 1, INT2NUM(1));
   } while (!NIL_P(rb_hash_lookup2(data->alive_objects, r_handle, Qnil)));
 

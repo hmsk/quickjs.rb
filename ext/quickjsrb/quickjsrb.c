@@ -44,6 +44,19 @@ static VALUE vm_m_dispose(VALUE r_self);
 static VALUE vm_m_disposed(VALUE r_self);
 static VALUE vm_m_drainJobs(VALUE r_self);
 
+VALUE quickjsrb_secure_random = Qnil;
+VALUE quickjsrb_handle_limit = Qnil;
+
+void quickjsrb_init_handle_source(void)
+{
+  quickjsrb_secure_random = rb_const_get(rb_cObject, rb_intern("SecureRandom"));
+  rb_gc_register_address(&quickjsrb_secure_random);
+
+  quickjsrb_handle_limit = rb_funcall(INT2NUM(2), rb_intern("**"), 1, INT2NUM(QUICKJSRB_HANDLE_BITS));
+  quickjsrb_handle_limit = rb_funcall(quickjsrb_handle_limit, rb_intern("-"), 1, INT2NUM(1));
+  rb_gc_register_address(&quickjsrb_handle_limit);
+}
+
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
   JSValue j_error = JS_NewError(ctx); // may wanna have custom error class to determine in JS' end
@@ -994,7 +1007,7 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
         if (object_id > 0)
         {
           VMData *data = JS_GetContextOpaque(ctx);
-          VALUE r_obj = rb_hash_aref(data->alive_objects, LONG2NUM(object_id));
+          VALUE r_obj = rb_hash_aref(data->alive_objects, LL2NUM(object_id));
           if (!NIL_P(r_obj) && !rb_obj_is_kind_of(r_obj, rb_eException))
             return r_obj;
         }
@@ -3879,6 +3892,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
 {
   rb_require("json");
   rb_require("securerandom");
+  quickjsrb_init_handle_source();
 
   VALUE r_module_quickjs = rb_define_module("Quickjs");
   r_define_constants(r_module_quickjs);

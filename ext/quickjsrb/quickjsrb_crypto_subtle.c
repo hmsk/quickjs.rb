@@ -360,6 +360,13 @@ static JSValue js_crypto_key_to_js(JSContext *ctx, VALUE r_key)
     // and storing the sentinel would put JS_EXCEPTION on the key as a real own
     // property and leave the throw pending to surface somewhere later. The key
     // is described without the exponent instead.
+    //
+    // The throw itself is still lost, and cannot be reported from here: this
+    // runs after its caller's rb_protect has returned, so a raise would longjmp
+    // through the JSCFunction, and every caller stores the result without
+    // checking it, so returning JS_EXCEPTION only moves the sentinel up one
+    // level. When the guest's shim reaches a Ruby bridge, the exception it
+    // raised stays parked in alive_objects. #121.
     if (JS_IsException(j_pe))
       JS_FreeValue(ctx, JS_GetException(ctx));
     else
