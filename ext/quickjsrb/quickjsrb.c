@@ -44,17 +44,28 @@ static VALUE vm_m_dispose(VALUE r_self);
 static VALUE vm_m_disposed(VALUE r_self);
 static VALUE vm_m_drainJobs(VALUE r_self);
 
+VALUE quickjsrb_secure_random = Qnil;
+VALUE quickjsrb_handle_limit = Qnil;
+
+void quickjsrb_init_handle_source(void)
+{
+  quickjsrb_secure_random = rb_const_get(rb_cObject, rb_intern("SecureRandom"));
+  rb_gc_register_address(&quickjsrb_secure_random);
+
+  quickjsrb_handle_limit = rb_funcall(INT2NUM(2), rb_intern("**"), 1, INT2NUM(QUICKJSRB_HANDLE_BITS));
+  quickjsrb_handle_limit = rb_funcall(quickjsrb_handle_limit, rb_intern("-"), 1, INT2NUM(1));
+  rb_gc_register_address(&quickjsrb_handle_limit);
+}
+
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
   JSValue j_error = JS_NewError(ctx); // may wanna have custom error class to determine in JS' end
 
-  VALUE r_object_id = rb_funcall(r_error, rb_intern("object_id"), 0);
-  int objectId = NUM2INT(r_object_id);
-  JS_SetPropertyStr(ctx, j_error, "rb_object_id", JS_NewInt32(ctx, objectId));
-
-  // Keep the error alive in VMData to prevent GC before find_ruby_error retrieves it
+  // Registered before it is published: the handle is what keeps the exception
+  // alive until find_ruby_error takes it back out.
   VMData *data = JS_GetContextOpaque(ctx);
-  rb_hash_aset(data->alive_objects, r_object_id, r_error);
+  VALUE r_object_id = alive_objects_register(data, r_error);
+  JS_SetPropertyStr(ctx, j_error, "rb_object_id", JS_NewInt64(ctx, NUM2LL(r_object_id)));
 
   VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0);
   const char *errorMessage = StringValueCStr(r_exception_message);
@@ -181,17 +192,36 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
     return Qnil;
 
   JSValue j_errorOriginalRubyObjectId = JS_GetPropertyStr(ctx, j_error, "rb_object_id");
-  int errorOriginalRubyObjectId = 0;
-  if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT)
+  int64_t errorOriginalRubyObjectId = 0;
+  // FLOAT64 as well as INT: the handle is drawn from a range wider than a
+  // tagged int, so QuickJS carries most of them as doubles.
+  if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT || JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_FLOAT64)
   {
-    JS_ToInt32(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
+    JS_ToInt64(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
     JS_FreeValue(ctx, j_errorOriginalRubyObjectId);
     if (errorOriginalRubyObjectId > 0)
     {
       VMData *data = JS_GetContextOpaque(ctx);
-      VALUE r_key = INT2NUM(errorOriginalRubyObjectId);
+      VALUE r_key = LL2NUM(errorOriginalRubyObjectId);
       VALUE r_error = rb_hash_aref(data->alive_objects, r_key);
+      // alive_objects anchors three unrelated things: a bridged exception,
+      // waiting to be thrown back, and the Ruby objects behind a File or a
+      // CryptoKey proxy, which stay reachable for as long as the guest holds
+      // the proxy. Only the first is this function's to take. The id is an
+      // ordinary property the guest can write, so without the check a script
+      // that copies a live proxy's id onto anything throwable severs that
+      // proxy: the entry is deleted, and every property of the File it stood
+      // for reads back as undefined while the object still passes
+      // `instanceof File`. Leaving a foreign entry anchored is the same
+      // answer as never having matched.
+      if (!rb_obj_is_kind_of(r_error, rb_eException))
+        return Qnil;
       rb_hash_delete(data->alive_objects, r_key);
+      // The reverse row goes with it. It is only there so an object bridged
+      // twice keeps one handle, and once the entry is gone there is nothing
+      // for it to point at: leaving it would grow a table nothing else ever
+      // shortens, one row per exception the guest throws back.
+      rb_hash_delete(data->alive_handles, rb_funcall(r_error, rb_intern("object_id"), 0));
       return r_error;
     }
   }
@@ -977,7 +1007,7 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
         if (object_id > 0)
         {
           VMData *data = JS_GetContextOpaque(ctx);
-          VALUE r_obj = rb_hash_aref(data->alive_objects, LONG2NUM(object_id));
+          VALUE r_obj = rb_hash_aref(data->alive_objects, LL2NUM(object_id));
           if (!NIL_P(r_obj) && !rb_obj_is_kind_of(r_obj, rb_eException))
             return r_obj;
         }
@@ -3862,6 +3892,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
 {
   rb_require("json");
   rb_require("securerandom");
+  quickjsrb_init_handle_source();
 
   VALUE r_module_quickjs = rb_define_module("Quickjs");
   r_define_constants(r_module_quickjs);
@@ -4022,6 +4053,7 @@ static VALUE vm_m_dispose(VALUE r_self)
   // collected. Matters for pool-rebuild workloads that dispose eagerly.
   data->defined_functions = rb_hash_new();
   data->alive_objects = rb_hash_new();
+  data->alive_handles = rb_hash_new();
   data->log_listener = Qnil;
   data->module_loader = Qnil;
 

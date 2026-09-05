@@ -74,17 +74,93 @@ static void js_reject_with_ruby_error(JSContext *ctx, JSValueConst *resolving_fu
   JS_FreeValue(ctx, ret);
 }
 
+// Quickjs::CryptoKey, or Qnil while the Ruby layer that defines it has not been
+// loaded — requiring the extension alone is enough to reach the callers below.
+// Resolved without rb_const_get's raise, because these run inside QuickJS
+// native callbacks with no rb_protect between them and the interpreter: a
+// NameError there longjmps through QuickJS's own frames, past the JS values
+// they still hold.
+//
+// Looked up per call rather than cached in a static. A class held only by a
+// constant table is movable, so a cached VALUE survives GC.compact as an
+// address the collector has since handed to something else — which would name
+// the wrong class, or a non-class that makes rb_obj_is_kind_of raise the very
+// unprotected raise this function exists to avoid. Two constant lookups are
+// nothing beside the OpenSSL work every caller goes on to do.
+static VALUE r_crypto_key_class(void)
+{
+  // Gated too, though Init_quickjsrb defines it before any of this can run.
+  // Not for the promise, which every caller creates after resolving the key,
+  // but because a raise out of a JSCFunction unwinds past QuickJS's own call
+  // frame, which is what this function exists to answer instead of.
+  if (!rb_const_defined_at(rb_cObject, rb_intern("Quickjs")))
+    return Qnil;
+
+  VALUE r_quickjs = rb_const_get(rb_cObject, rb_intern("Quickjs"));
+  // Same reason the inner one is type-checked: rb_const_defined_at reads a
+  // constant table off its receiver, so a non-module bound to the name is
+  // worse than the NameError being avoided.
+  if (!RB_TYPE_P(r_quickjs, T_MODULE))
+    return Qnil;
+  if (!rb_const_defined_at(r_quickjs, rb_intern("CryptoKey")))
+    return Qnil;
+
+  VALUE r_class = rb_const_get(r_quickjs, rb_intern("CryptoKey"));
+  // Defined is not the same as a class. rb_obj_is_kind_of takes a class or a
+  // module and raises TypeError on anything else, so a String bound to the
+  // name would make the unprotected raise above; a Module would not raise but
+  // is not what a key is an instance of either. One predicate covers both.
+  return RB_TYPE_P(r_class, T_CLASS) ? r_class : Qnil;
+}
+
 // Find Ruby CryptoKey from a JS CryptoKey object via rb_object_id handle.
 static VALUE r_find_alive_crypto_key(JSContext *ctx, JSValueConst j_key)
 {
+  // Both of the reads below can run the guest's own code on a value it chose:
+  // a getter for the property, a valueOf for the conversion, either of which
+  // can reach a Ruby bridge. Nothing here can report what that raises, since
+  // this runs after its caller's rb_protect has returned, but the exception it
+  // parked in alive_objects has to come back out: find_ruby_error is the only
+  // thing that takes one out, so leaving it would pin one per call, at a rate
+  // the guest picks.
   JSValue j_handle = JS_GetPropertyStr(ctx, j_key, "rb_object_id");
+  if (JS_IsException(j_handle))
+  {
+    JSValue j_pending = JS_GetException(ctx);
+    find_ruby_error(ctx, j_pending);
+    JS_FreeValue(ctx, j_pending);
+    return Qnil;
+  }
+
+  // Only a number is a handle. Asking JS_ToInt64 for one is what runs valueOf,
+  // and the answer for anything else was never going to be a handle anyway.
+  int32_t tag = JS_VALUE_GET_NORM_TAG(j_handle);
+  if (tag != JS_TAG_INT && tag != JS_TAG_FLOAT64)
+  {
+    JS_FreeValue(ctx, j_handle);
+    return Qnil;
+  }
+
   int64_t handle = 0;
   JS_ToInt64(ctx, &handle, j_handle);
   JS_FreeValue(ctx, j_handle);
   if (handle <= 0)
     return Qnil;
   VMData *data = JS_GetContextOpaque(ctx);
-  return rb_hash_aref(data->alive_objects, LONG2NUM(handle));
+  VALUE r_key = rb_hash_aref(data->alive_objects, LL2NUM(handle));
+  // Before the class lookup, which is otherwise paid on the path a guest can
+  // repeat for free: sign('HMAC', {}, buf) reaches no OpenSSL work to dwarf it.
+  if (NIL_P(r_key))
+    return Qnil;
+  // The handle is read off whatever the guest passed as the key, and
+  // alive_objects also holds bridged exceptions and the Ruby object behind a
+  // File proxy. Without this an object carrying another entry's id reaches the
+  // operations below as if it were a key, and the caller is told about a
+  // method missing on a File rather than about an invalid CryptoKey.
+  VALUE r_key_class = r_crypto_key_class();
+  if (NIL_P(r_key_class) || !rb_obj_is_kind_of(r_key, r_key_class))
+    return Qnil;
+  return r_key;
 }
 
 // Build a comprehensive Ruby Hash (symbol keys) from a JS algorithm object.
@@ -252,9 +328,8 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
 static JSValue js_crypto_key_to_js(JSContext *ctx, VALUE r_key)
 {
   VMData *data = JS_GetContextOpaque(ctx);
-  VALUE r_object_id = rb_funcall(r_key, rb_intern("object_id"), 0);
-  rb_hash_aset(data->alive_objects, r_object_id, r_key);
-  int64_t handle = NUM2LONG(r_object_id);
+  VALUE r_object_id = alive_objects_register(data, r_key);
+  int64_t handle = NUM2LL(r_object_id);
 
   VALUE r_type = rb_funcall(r_key, rb_intern("type"), 0);
   VALUE r_extractable = rb_funcall(r_key, rb_intern("extractable"), 0);
@@ -294,14 +369,33 @@ static JSValue js_crypto_key_to_js(JSContext *ctx, VALUE r_key)
   VALUE r_algo_pub_exp = rb_hash_aref(r_algorithm, rb_str_new_cstr("publicExponent"));
   if (!NIL_P(r_algo_pub_exp))
   {
+    // Built through JS_NewTypedArray rather than by calling globalThis's
+    // Uint8Array. That constructor is the guest's to delete or replace, and a
+    // replacement can throw anything it likes, including a Ruby exception from
+    // a bridge: nothing here can report it, because this runs after its
+    // caller's rb_protect has returned and every caller stores the result
+    // unchecked. Not reading the global removes the question rather than
+    // answering it. What remains is the runtime's own allocation failing, which
+    // is a genuine out-of-memory, and that is left pending for the renderer to
+    // classify and latch rather than cleared.
     JSValue j_pe_buf = JS_NewArrayBufferCopy(ctx,
                                              (const uint8_t *)RSTRING_PTR(r_algo_pub_exp),
                                              RSTRING_LEN(r_algo_pub_exp));
-    JSValue j_uint8 = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Uint8Array");
-    JSValue j_pe = JS_CallConstructor(ctx, j_uint8, 1, (JSValueConst *)&j_pe_buf);
-    JS_FreeValue(ctx, j_uint8);
-    JS_FreeValue(ctx, j_pe_buf);
-    JS_SetPropertyStr(ctx, j_algo, "publicExponent", j_pe);
+    if (!JS_IsException(j_pe_buf))
+    {
+      JSValue j_args[3] = {j_pe_buf, JS_NewInt32(ctx, 0), JS_NewInt64(ctx, RSTRING_LEN(r_algo_pub_exp))};
+      JSValue j_pe = JS_NewTypedArray(ctx, 3, (JSValueConst *)j_args, JS_TYPED_ARRAY_UINT8);
+      JS_FreeValue(ctx, j_pe_buf);
+      if (JS_IsException(j_pe))
+        // Nothing downstream consumes it: the caller resolves its promise and
+        // returns that, never JS_EXCEPTION, so a throw left here would surface
+        // at whatever calls JS_GetException next. Taken instead, and lost. The
+        // only way to get here is the runtime's own allocation failing, which
+        // the next one will fail at too.
+        JS_FreeValue(ctx, JS_GetException(ctx));
+      else
+        JS_SetPropertyStr(ctx, j_algo, "publicExponent", j_pe);
+    }
   }
 
   JS_SetPropertyStr(ctx, j_key, "algorithm", j_algo);

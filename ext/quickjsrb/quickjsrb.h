@@ -63,6 +63,9 @@ typedef struct VMData
   struct EvalTime *eval_time;
   VALUE log_listener;
   VALUE alive_objects;
+  // object_id -> handle, so an object bridged twice keeps one entry. Private:
+  // the guest is told the handle, never this key.
+  VALUE alive_handles;
   VALUE module_loader;
   VALUE on_unhandled_rejection;
   // Memoize (specifier, importer) → canonical so the user's loader Proc
@@ -210,6 +213,7 @@ static void vm_mark(void *ptr)
   rb_gc_mark_movable(data->defined_functions);
   rb_gc_mark_movable(data->log_listener);
   rb_gc_mark_movable(data->alive_objects);
+  rb_gc_mark_movable(data->alive_handles);
   rb_gc_mark_movable(data->module_loader);
   rb_gc_mark_movable(data->on_unhandled_rejection);
   rb_gc_mark_movable(data->module_resolution_cache);
@@ -227,6 +231,7 @@ static void vm_compact(void *ptr)
   data->defined_functions = rb_gc_location(data->defined_functions);
   data->log_listener = rb_gc_location(data->log_listener);
   data->alive_objects = rb_gc_location(data->alive_objects);
+  data->alive_handles = rb_gc_location(data->alive_handles);
   data->module_loader = rb_gc_location(data->module_loader);
   data->on_unhandled_rejection = rb_gc_location(data->on_unhandled_rejection);
   data->module_resolution_cache = rb_gc_location(data->module_resolution_cache);
@@ -264,6 +269,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->defined_functions = rb_hash_new();
   data->log_listener = Qnil;
   data->alive_objects = rb_hash_new();
+  data->alive_handles = rb_hash_new();
   data->module_loader = Qnil;
   data->on_unhandled_rejection = Qnil;
   data->module_resolution_cache = rb_hash_new();
@@ -301,6 +307,63 @@ static VALUE vm_alloc(VALUE r_self)
 // shorter name than asked for the moment anyone raised the entropy.
 #define QUICKJSRB_GENERATED_NAME_LEN 12
 #define QUICKJSRB_GENERATED_NAME_SIZE (QUICKJSRB_GENERATED_NAME_LEN + 1)
+
+// The handle a bridged object is published to the guest under. It was the
+// Ruby object_id, which is a small sequential integer, and nothing ever leaves
+// alive_objects — so a script could walk 1..4000 and be handed back objects it
+// had never held: a File to read, a CryptoKey to sign with after every JS
+// reference to it was gone. Drawn from 2^48 instead, which stays exact in a JS
+// double and is not a space to walk. Collisions are re-drawn rather than
+// trusted to be unlikely, since one would hand two subsystems the same entry.
+#define QUICKJSRB_HANDLE_BITS 48
+
+// Narrowed, not closed: the draw below still calls into Ruby, so a
+// NoMemoryError or an entropy failure raises from inside a QuickJS callback
+// with nothing between it and the interpreter. Pre-resolving takes the
+// reachable cause off that path; the rest is #114's to remove along with the
+// table itself.
+//
+// Resolved once at Init and pinned, rather than looked up per registration.
+// This runs inside QuickJS native callbacks with no rb_protect between them and
+// the interpreter, the hazard r_crypto_key_class is written around, and a
+// constant lookup is exactly the raise that hazard is about. The limit is
+// 2^48 - 1 so the draw below lands in 1 .. 2^48 - 1: every reader treats a zero
+// handle as "no entry", and a zero draw would strand the object.
+// Defined in quickjsrb.c: a static here would give every translation unit its
+// own copy, and only the one Init touched would be set.
+// Defined in quickjsrb.c. Declared here because the crypto reader needs it to
+// give back an exception a guest's getter parked on its way through.
+VALUE find_ruby_error(JSContext *ctx, JSValue j_error);
+
+extern VALUE quickjsrb_secure_random;
+extern VALUE quickjsrb_handle_limit;
+void quickjsrb_init_handle_source(void);
+
+static VALUE alive_objects_register(VMData *data, VALUE r_object)
+{
+  // One entry per object, not per crossing. The old handle was the object_id,
+  // so re-bridging the same File or exception overwrote its own row; drawing a
+  // fresh handle every time would instead add one, and nothing is ever removed,
+  // so `for (i = 0; i < 200000; i++) f()` would grow the table by 200000.
+  VALUE r_object_id = rb_funcall(r_object, rb_intern("object_id"), 0);
+  VALUE r_known = rb_hash_lookup2(data->alive_handles, r_object_id, Qnil);
+  // Reused only when the row still holds this object. Asking merely whether
+  // the handle is occupied would hand back one that a later draw had given to
+  // something else, since an object_id is only unique among live objects.
+  if (!NIL_P(r_known) && rb_hash_lookup2(data->alive_objects, r_known, Qnil) == r_object)
+    return r_known;
+
+  VALUE r_handle;
+  do
+  {
+    r_handle = rb_funcall(quickjsrb_secure_random, rb_intern("random_number"), 1, quickjsrb_handle_limit);
+    r_handle = rb_funcall(r_handle, rb_intern("+"), 1, INT2NUM(1));
+  } while (!NIL_P(rb_hash_lookup2(data->alive_objects, r_handle, Qnil)));
+
+  rb_hash_aset(data->alive_objects, r_handle, r_object);
+  rb_hash_aset(data->alive_handles, r_object_id, r_handle);
+  return r_handle;
+}
 
 static void random_filename(char buf[QUICKJSRB_GENERATED_NAME_SIZE])
 {

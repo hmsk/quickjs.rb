@@ -485,6 +485,86 @@ describe "RubyFileProxy" do
       _(result).must_include '#<File:'
     end
   end
+
+  # One entry per object rather than per crossing. The handle used to be the
+  # object_id, so re-bridging overwrote its own row; a fresh draw each time
+  # would add one instead, and nothing is ever removed from the table.
+  describe "crossing into JS more than once" do
+    it "keeps one handle for one object" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+
+      first = vm.eval_code('get_file().rb_object_id')
+      _(vm.eval_code("for (let i = 0; i < 500; i++) get_file(); get_file().rb_object_id")).must_equal first
+      _(first).must_be :>, 0
+    ensure
+      vm&.dispose!
+    end
+
+    it "still converts back to the same Ruby object" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.define_function(:same) { |x| x.equal?(@file) }
+
+      _(vm.eval_code('get_file(); same(get_file())')).must_equal true
+    ensure
+      vm&.dispose!
+    end
+  end
+
+  # The handle used to be the Ruby object_id, a small sequential integer that
+  # nothing ever removes from the table, so a later script could walk the space
+  # and be handed a File it had never held.
+  describe "when a later script scans the handle space" do
+    it "does not hand back a file it was never given" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.define_function(:take) { |x| x.is_a?(::File) ? "FILE:#{x.read}" : x.class.to_s }
+      vm.eval_code('get_file(); 1')
+
+      found = vm.eval_code(<<~JS)
+        let found = 'none';
+        for (let i = 1; i < 4000; i++) {
+          const got = take({rb_object_id: i});
+          if (typeof got === 'string' && got.startsWith('FILE:')) { found = 'recovered at ' + i; break }
+        }
+        found
+      JS
+
+      _(found).must_equal 'none'
+    ensure
+      vm&.dispose!
+    end
+  end
+
+  # The proxy publishes its rb_object_id to the guest, and a thrown error
+  # carrying that id used to reach the same table the exception bridge reads,
+  # which deletes what it finds. The File stayed an instance of File and
+  # answered undefined for everything.
+  describe "when the guest throws the proxy's own rb_object_id" do
+    before do
+      @vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      @vm.define_function(:get_file) { @file }
+      @vm.eval_code('globalThis.h = get_file();')
+    end
+
+    after { @vm.dispose! }
+
+    it "leaves the file readable" do
+      _ { @vm.eval_code('throw Object.assign(new Error("guest"), {rb_object_id: globalThis.h.rb_object_id})') }
+        .must_raise Quickjs::RuntimeError
+
+      _(@vm.eval_code('globalThis.h.name')).must_equal File.basename(@file.path)
+      _(@vm.eval_code('globalThis.h.size')).must_equal 'hello world'.bytesize
+    end
+
+    it "reports the forged throw as the guest's own error" do
+      error = _ { @vm.eval_code('throw Object.assign(new Error("guest"), {rb_object_id: globalThis.h.rb_object_id})') }
+        .must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'guest'
+    end
+  end
 end
 
 describe "JS File to Ruby" do

@@ -6,7 +6,7 @@ static VALUE r_find_alive_rb_file(JSContext *ctx, JSValue j_handle)
   int64_t handle;
   JS_ToInt64(ctx, &handle, j_handle);
   VMData *data = JS_GetContextOpaque(ctx);
-  return rb_hash_aref(data->alive_objects, LONG2NUM(handle));
+  return rb_hash_aref(data->alive_objects, LL2NUM(handle));
 }
 
 static JSValue js_ruby_file_name(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv)
@@ -221,9 +221,8 @@ void quickjsrb_init_file_proxy(VMData *data)
 JSValue quickjsrb_file_to_js(JSContext *ctx, VALUE r_file)
 {
   VMData *data = JS_GetContextOpaque(ctx);
-  VALUE r_object_id = rb_funcall(r_file, rb_intern("object_id"), 0);
-  rb_hash_aset(data->alive_objects, r_object_id, r_file);
-  JSValue j_handle = JS_NewInt64(ctx, NUM2LONG(r_object_id));
+  VALUE r_object_id = alive_objects_register(data, r_file);
+  JSValue j_handle = JS_NewInt64(ctx, NUM2LL(r_object_id));
   JSValue j_proxy = JS_Call(ctx, data->j_file_proxy_creator, JS_UNDEFINED, 1, &j_handle);
   JS_FreeValue(ctx, j_handle);
   return j_proxy;

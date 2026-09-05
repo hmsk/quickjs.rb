@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
+require "open3"
 
 describe "crypto.subtle key management" do
   before do
@@ -119,6 +120,173 @@ describe "crypto.subtle key management" do
         await crypto.subtle.importKey("raw", raw, {name: "AES-GCM"}, true, ["encrypt"])
       JS
       _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::RuntimeError
+    end
+  end
+
+  # A CryptoKey publishes its rb_object_id to the guest, and a thrown error
+  # carrying that id used to reach the table the exception bridge reads, which
+  # deletes what it finds. The key survived as an object and failed every
+  # operation with "invalid CryptoKey".
+  describe "when the guest throws the key's own rb_object_id" do
+    it "leaves the key usable" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      vm.eval_code("globalThis.k = await crypto.subtle.generateKey({name: 'HMAC', hash: 'SHA-256'}, true, ['sign', 'verify'])")
+      sign = "(await crypto.subtle.sign('HMAC', globalThis.k, new Uint8Array([1, 2, 3]))).byteLength"
+      _(vm.eval_code(sign)).must_equal 32
+
+      error = _ { vm.eval_code("throw Object.assign(new Error('guest'), {rb_object_id: globalThis.k.rb_object_id})") }
+        .must_raise Quickjs::RuntimeError
+      _(error.message).must_equal 'guest'
+
+      _(vm.eval_code(sign)).must_equal 32
+    ensure
+      vm&.dispose!
+    end
+
+    # The handle is read off whatever the guest passes as the key argument, so
+    # unlike the File proxy's closure-captured one it is the guest's to choose.
+    # An id belonging to another entry used to reach the operation as a key.
+    it "refuses an id that belongs to something else in the table" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      vm.define_function(:boom) { raise ArgumentError, 'host' }
+      vm.eval_code("globalThis.id = null; try { boom() } catch (e) { globalThis.id = e.rb_object_id }")
+      # Without this the id could go undefined and the pre-existing handle <= 0
+      # check would produce the same message, leaving the test guarding nothing.
+      _(vm.eval_code("typeof globalThis.id")).must_equal 'number'
+
+      error = _ { vm.eval_code("await crypto.subtle.sign('HMAC', {rb_object_id: globalThis.id}, new Uint8Array([1, 2, 3]))") }
+        .must_raise Quickjs::TypeError
+      _(error.message).must_match(/invalid CryptoKey/)
+    ensure
+      vm&.dispose!
+    end
+
+    # The exponent used to be handed to JS by calling globalThis's Uint8Array,
+    # which the guest can delete or replace with anything, including a shim
+    # that throws. It is built directly now, so what the guest does to that
+    # name cannot reach the description.
+    it "describes the key in full even when Uint8Array is gone" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      vm.eval_code('globalThis.PE = new Uint8Array([1, 0, 1]); delete globalThis.Uint8Array; 1')
+
+      described = vm.eval_code(<<~JS)
+        const k = await crypto.subtle.generateKey({name: 'RSA-OAEP', modulusLength: 2048, publicExponent: PE, hash: 'SHA-256'}, true, ['encrypt', 'decrypt']);
+        [Object.keys(k.publicKey.algorithm).join(','), Array.from(k.publicKey.algorithm.publicExponent).join('.')].join(' | ')
+      JS
+
+      _(described).must_equal 'name,hash,modulusLength,publicExponent | 1.0.1'
+      _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm&.dispose!
+    end
+
+    # A replacement that reaches a Ruby bridge used to have its exception
+    # swallowed and left parked in alive_objects.
+    it "does not run a replaced Uint8Array at all" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      calls = 0
+      vm.define_function(:boom) { calls += 1; raise ArgumentError, 'host' }
+      vm.eval_code('globalThis.PE = new Uint8Array([1, 0, 1]); globalThis.Uint8Array = function () { boom() }; 1')
+
+      vm.eval_code("const k = await crypto.subtle.generateKey({name: 'RSA-OAEP', modulusLength: 2048, publicExponent: PE, hash: 'SHA-256'}, true, ['encrypt', 'decrypt']); 'resolved'")
+
+      _(calls).must_equal 0
+    ensure
+      vm&.dispose!
+    end
+
+    it "cannot be recovered by scanning the handle space" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      vm.eval_code("globalThis.k = await crypto.subtle.generateKey({name: 'HMAC', hash: 'SHA-256'}, false, ['sign', 'verify'])")
+      _(vm.eval_code("(await crypto.subtle.sign('HMAC', globalThis.k, new Uint8Array([1, 2, 3]))).byteLength")).must_equal 32
+      vm.eval_code('delete globalThis.k; 1')
+
+      found = vm.eval_code(<<~JS)
+        let found = 'none';
+        for (let i = 1; i < 5000; i++) {
+          try {
+            const s = await crypto.subtle.sign('HMAC', {rb_object_id: i}, new Uint8Array([1, 2, 3]));
+            if (s) { found = 'recovered at ' + i; break }
+          } catch (e) {}
+        }
+        found
+      JS
+
+      _(found).must_equal 'none'
+    ensure
+      vm&.dispose!
+    end
+
+    # to_js_value has no case for Quickjs::CryptoKey, so a key handed back to
+    # JS converts by way of inspect. With the bytes in that string a guest
+    # reads a key generated extractable: false straight out of any pass-through
+    # host function, which exportKey refuses one call away.
+    it "does not put key material in the string a guest gets back" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      host_key = nil
+      vm.define_function(:echo) { |k| host_key = k; k }
+      vm.eval_code("globalThis.k = await crypto.subtle.generateKey({name: 'AES-GCM', length: 256}, false, ['encrypt', 'decrypt'])")
+
+      seen = vm.eval_code("echo(globalThis.k)").to_s
+      bytes = host_key.key_data.to_s
+
+      _(bytes.bytesize).must_equal 32
+      _(seen).wont_include bytes
+      _(seen).must_include '[FILTERED]'
+      # The parts that are not the secret still describe the key.
+      _(seen).must_include 'AES-GCM'
+      _(seen).must_include 'extractable=false'
+    ensure
+      vm&.dispose!
+    end
+
+    # Guards against re-introducing a cache rather than pinning the lookup as
+    # it stands: a class held only by a constant table is movable, so a C
+    # static would keep an address the collector has since handed on. Passes
+    # either way today, since nothing is cached.
+    it "keeps working across a compaction" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      vm.eval_code("globalThis.k = await crypto.subtle.generateKey({name: 'HMAC', hash: 'SHA-256'}, true, ['sign', 'verify'])")
+      sign = "(await crypto.subtle.sign('HMAC', globalThis.k, new Uint8Array([1, 2, 3]))).byteLength"
+      _(vm.eval_code(sign)).must_equal 32
+
+      5.times { GC.compact }
+
+      _(vm.eval_code(sign)).must_equal 32
+    ensure
+      vm&.dispose!
+    end
+
+    # The lookup runs inside a QuickJS native callback with no rb_protect
+    # between it and the interpreter, so it must answer rather than raise when
+    # the Ruby layer that defines the class has not been loaded. Requiring the
+    # extension on its own is enough to get there, and a NameError from here
+    # longjmps through QuickJS's frames past the JS values they still hold.
+    it "answers invalid CryptoKey when Quickjs::CryptoKey is not defined" do
+      script = <<~RUBY
+        require "quickjs/quickjsrb"
+        abort "CryptoKey should not be loaded" if Quickjs.const_defined?(:CryptoKey)
+        vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_CRYPTO])
+        # A real entry rather than a made-up id: 1 is in no table, so the nil
+        # hash hit alone would satisfy the callers and the class lookup would
+        # never be reached.
+        vm.define_function(:boom) { raise ArgumentError, 'host' }
+        vm.eval_code("globalThis.id = null; try { boom() } catch (e) { globalThis.id = e.rb_object_id }")
+        abort "no id was planted" unless vm.eval_code("typeof globalThis.id") == 'number'
+        begin
+          vm.eval_code('await crypto.subtle.sign("HMAC", {rb_object_id: globalThis.id}, new Uint8Array([1]))')
+          puts "no raise"
+        rescue Exception => e
+          puts "\#{e.class}: \#{e.message}"
+        end
+      RUBY
+
+      lib = File.expand_path('../lib', __dir__)
+      out, status = Open3.capture2e(RbConfig.ruby, '-I', lib, '-e', script)
+      # Asserted before the exit status so the abort guard's own message, or a
+      # LoadError, is what a failure reports rather than "expected success?".
+      _(out).must_match(/Quickjs::TypeError: .*invalid CryptoKey/)
+      _(status).must_be :success?
     end
   end
 end
