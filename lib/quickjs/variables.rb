@@ -206,7 +206,7 @@ module Quickjs
             # A record we confirmed means our own binding is there and this is an
             # ordinary redeclaration of it. Only an unconfirmed one can be sitting
             # over a name JavaScript will never hand over.
-            _refuse_restricted_global(key, kind) unless _confirmed[key]
+            _refuse_restricted_global(key, kind) unless _confirmed[key] == kind
           end
         end
 
@@ -261,9 +261,16 @@ module Quickjs
     # next define instead of standing for the life of the VM.
     def _declare(declared, kind, key, literal)
       declared[key] = kind
+      # What was confirmed before, so a declaration that did not run can be told
+      # from one that did. A failed declaration cannot have removed a binding an
+      # earlier one made, and clearing the record as though it had made the next
+      # define refuse a name whose binding was live the whole time.
+      was_confirmed = _confirmed[key]
+      declared_ok = false
       begin
         ::Thread.handle_interrupt(::Exception => :never) do
           eval_code("#{JS_KEYWORDS.fetch(kind)} #{key} = #{literal};")
+          declared_ok = true
         end
       rescue Quickjs::InterruptedError
         # QuickJS created the binding and the interrupt landed before it was
@@ -274,8 +281,21 @@ module Quickjs
         #
         # A var is left alone, since redeclaring one is legal JS and works.
         declared[key] = kind == :var ? :var : :interrupted
-        _confirmed.delete(key)
         raise
+      rescue Quickjs::SyntaxError => e
+        # The Ruby walk is not the only stack this runs out of. On a Ruby thread,
+        # whose stack is a fraction of the main one, QuickJS clamps its own limit
+        # to the same headroom and the parser gives out first, in a band where
+        # the walk still had room. A caller told to rescue ArgumentError got a
+        # Quickjs::SyntaxError instead, and on a worker thread that is fatal.
+        #
+        # Matching the message is safe here in a way it would not be elsewhere:
+        # the source being parsed is the one this method just built, so a parse
+        # error about it comes from the engine and describes our own literal.
+        declared.delete(key)
+        raise unless e.message.include?("stack overflow")
+
+        raise ::ArgumentError, "value nests too deeply to convert on this thread's stack"
       rescue Quickjs::RuntimeError
         # The name is the caller's to use again. The source built here is a
         # declaration of a literal, with no call in it, so the only ways the eval
@@ -285,14 +305,19 @@ module Quickjs
         # A declaration whose initializer threw would leave a binding behind, but
         # nothing here can generate one.
         declared.delete(key)
-        _confirmed.delete(key)
         raise
+      ensure
+        # Keyed by kind, not just by name. The record is written before the eval,
+        # so a define of a different form that then fails would otherwise leave
+        # the previous form's confirmation standing for a name it never declared.
+        if declared_ok
+          _confirmed[key] = kind
+        elsif was_confirmed
+          _confirmed[key] = was_confirmed
+        else
+          _confirmed.delete(key)
+        end
       end
-      # The declaration ran, so a global lexical binding exists, and JavaScript
-      # never takes one away again. Later refusals of a bare declaration of this
-      # name are redeclarations of our own binding rather than a name the VM
-      # cannot give us.
-      _confirmed[key] = true
       key.to_sym
     end
 

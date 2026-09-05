@@ -498,6 +498,66 @@ describe "a value that expands past what the VM could hold" do
     _(vm.eval_code("1 + 1")).must_equal 2
   end
 
+  # The confirmation that a declaration ran is what keeps a binding we made
+  # from being mistaken for one JavaScript will never grant. It was cleared by
+  # any failed declaration, and a failed one cannot have removed a binding an
+  # earlier one made, so a single refused define in between bricked the name.
+  it "keeps a live let usable after a refused define of another form" do
+    vm = Quickjs::VM.new
+    vm.define_let(:x, 1)
+    vm.eval_code(<<~JS)
+      Object.defineProperty(globalThis, "x", {
+        value: "decoy", configurable: false, writable: true, enumerable: true,
+      });
+    JS
+    _ { vm.define_const(:x, 2) }.must_raise ArgumentError
+
+    vm.define_let(:x, 3)
+
+    _(vm.eval_code("x")).must_equal 3
+    _(vm.eval_code(%q{(function () { return this })().x})).must_equal "decoy"
+  end
+
+  # And it records which form was declared, not just the name, so a define of a
+  # different form that fails cannot leave the previous form's confirmation
+  # standing for a binding it never made.
+  it "does not carry one form's confirmation over to another" do
+    vm = Quickjs::VM.new
+    vm.define_var(:x, 1)
+    vm.singleton_class.prepend(Module.new do
+      def eval_code(source, **options)
+        raise ThreadError, "injected" if source.start_with?("let x =")
+
+        super
+      end
+    end)
+    _ { vm.define_let(:x, 2) }.must_raise ThreadError
+
+    _ { vm.define_let(:x, 3) }.must_raise ArgumentError
+
+    _(vm.eval_code(%q{(function () { return this })().x})).must_equal 1
+  end
+
+  # A Ruby thread gets a fraction of the main stack, and QuickJS clamps its own
+  # limit to the same headroom, so there is a band where the parser gives out
+  # while the Ruby walk still had room. The caller is told to rescue
+  # ArgumentError, and on a worker thread a raw Quickjs::SyntaxError is fatal.
+  it "raises the same error when the parser runs out first" do
+    raised = [400, 550, 700, 1500].map do |depth|
+      value = (1..depth).reduce([1]) { |inner, _| [inner] }
+      ::Thread.new do
+        vm = Quickjs::VM.new
+        begin
+          vm.define_const(:deep, value)
+          :accepted
+        rescue ArgumentError
+          :refused
+        end
+      end.value
+    end
+
+    _(raised).must_equal [:accepted, :refused, :refused, :refused]
+  end
   # undefined, NaN and Infinity are not literals in JavaScript, they are
   # properties of the global object, and QuickJS lets a guest redefine them
   # with defineProperty even though the spec says it should not. Writing them
@@ -517,13 +577,16 @@ describe "a value that expands past what the VM could hold" do
     vm.define_const(:b, Quickjs::Value::NAN)
     vm.define_const(:c, Float::INFINITY)
     vm.define_const(:d, -Float::INFINITY)
-    vm.define_const(:e, { "x" => Quickjs::Value::UNDEFINED })
+    vm.define_const(:f, Float::NAN)
+    vm.define_const(:e, { "x" => Quickjs::Value::UNDEFINED, "y" => Float::NAN })
 
     _(vm.eval_code("typeof a")).must_equal "undefined"
     _(vm.eval_code("Number.isNaN(b)")).must_equal true
     _(vm.eval_code("c")).must_equal Float::INFINITY
     _(vm.eval_code("d")).must_equal(-Float::INFINITY)
+    _(vm.eval_code("Number.isNaN(f)")).must_equal true
     _(vm.eval_code("typeof e.x")).must_equal "undefined"
+    _(vm.eval_code("Number.isNaN(e.y)")).must_equal true
   end
 
   # The guard asks the VM about its globals, and a VM that has stopped working
