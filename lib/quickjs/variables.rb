@@ -186,17 +186,14 @@ module Quickjs
         # legal, so that form never provokes anything and skips this.
         if kind == :var
           # Redeclaring a var is legal, so this provokes nothing and needs no
-          # asking. It is not skipped, though: without it the assignment walks
+          # asking, and a guest lexical of the same name refusing it is a real
+          # collision rather than noise. Swallowing that let the assignment
+          # below write the guest's binding and report success for a define_var
+          # that never reached globalThis at all. It is not skipped, though: without it the assignment walks
           # the prototype chain, and a setter inherited from Object.prototype
           # takes the value while the guard above, which asks only about own
           # properties, reports a clean global.
-          begin
-            eval_code("var #{key};")
-          rescue Quickjs::SyntaxError
-            # A guest lexical of the same name refuses it. Reachable only with a
-            # record ahead of a declaration that never ran, and the assignment
-            # below reports it the same way any other collision is reported.
-          end
+          eval_code("var #{key};")
         elsif !_live_lexical?(key)
           begin
             eval_code("#{JS_KEYWORDS.fetch(kind)} #{key};")
@@ -306,6 +303,9 @@ module Quickjs
           // it was live on a VM that had never heard of it.
         })() && typeof #{key} !== 'undefined')()
       JS
+    rescue Quickjs::InterruptedError
+      # The evaluation is over, and saying so is more use than an answer.
+      raise
     rescue Quickjs::RuntimeError
       # Not decisive is a safe answer, and the branches that ask fall back to
       # asking by declaration. Anything thrown out of a question the caller did
@@ -343,13 +343,16 @@ module Quickjs
           // property already on it takes the declaration quite happily, and
           // refusing that told the caller something untrue about their VM.
           if (!d) return Object.isExtensible(root) ? 'absent' : 'sealed';
-          // Own keys only. A descriptor is an ordinary object, so reading `get`
-          // off it walks the prototype chain, and a stray Object.prototype.get
-          // (a gadget, or a library that just assigns it) made every var look
-          // like an accessor. It only ever failed closed, but it named a cause
-          // that was not there.
-          const has = (k) => Object.prototype.hasOwnProperty.call(d, k);
-          if (has('get') || has('set')) return 'accessor';
+          // Own keys only, and read without asking anything that can be
+          // replaced. Reading `get` off a descriptor walks the prototype chain,
+          // so a stray Object.prototype.get made every var look like an
+          // accessor; going through hasOwnProperty instead only moved the
+          // problem, since that is a method a guest can replace, and `writable`
+          // was still being read through the chain. Two gadgets together made
+          // an accessor answer `writable` and its setter took the value.
+          // Cutting the descriptor loose from its prototype settles all of it.
+          Object.setPrototypeOf(d, null);
+          if ('get' in d || 'set' in d) return 'accessor';
           return d.writable ? 'writable' : 'readonly';
         })()
       JS

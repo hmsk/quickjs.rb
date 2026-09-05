@@ -492,6 +492,87 @@ describe "a value that expands past what the VM could hold" do
     _(vm.eval_code("1 + 1")).must_equal 2
   end
 
+  # define_var promises the value is visible on globalThis. A guest lexical of
+  # the same name refuses the declaration, and swallowing that let the
+  # assignment write the guest's binding and report success for a define that
+  # never reached globalThis at all.
+  it "does not report success when a guest lexical took the name" do
+    vm = Quickjs::VM.new
+    vm.eval_code("let CFG = 'guest';")
+    vm.instance_variable_set(:@_defined_variables, { "CFG" => :var })
+
+    _ { vm.define_var(:CFG, { "secret" => 1 }) }.must_raise Quickjs::SyntaxError
+
+    _(vm.eval_code("CFG")).must_equal "guest"
+  end
+
+  # The descriptor is read with nothing dispatched and nothing inherited. Going
+  # through hasOwnProperty only moved the problem: that is a method a guest can
+  # replace, and `writable` was still read through the chain, so two gadgets
+  # together made an accessor answer "writable" and its setter took the value.
+  it "does not let two prototype gadgets disguise an accessor" do
+    vm = Quickjs::VM.new
+    vm.eval_code(<<~JS)
+      globalThis.stolen = null;
+      Object.defineProperty(globalThis, "CFG", {
+        configurable: true, get() { return "innocent" }, set(v) { stolen = v },
+      });
+      Object.prototype.writable = true;
+      Object.prototype.hasOwnProperty = function () { return false };
+    JS
+
+    _ { vm.define_var(:CFG, { "api_key" => "s3cret" }) }.must_raise ArgumentError
+
+    _(vm.eval_code("stolen")).must_be_nil
+  end
+
+  # The two probes ask different questions and must keep walking different
+  # chains. This one has to see an inherited name, or it would call it lexical,
+  # skip the declaration, and let the assignment reach an inherited setter.
+  it "sees a name inherited from Object.prototype as not lexical" do
+    vm = Quickjs::VM.new
+    vm.eval_code("Object.prototype.INH = 1;")
+
+    _(vm.send(:_live_lexical?, "INH")).must_equal false
+
+    vm.define_let(:INH, 2)
+    vm.define_let(:INH, 3)
+
+    _(vm.eval_code("INH")).must_equal 3
+    _(vm.eval_code(%q{Object.prototype.hasOwnProperty.call((function () { return this })(), "INH")})).must_equal false
+  end
+
+  # The guard runs on the redefine path too. A var we declared is
+  # non-configurable so it cannot become an accessor, but it can be made
+  # non-writable, and then the assignment would be discarded in sloppy mode.
+  it "refuses a redefine onto a var that has been made non-writable" do
+    vm = Quickjs::VM.new
+    vm.define_var(:v, 1)
+    vm.eval_code("Object.defineProperty(globalThis, 'v', { writable: false });")
+
+    err = _ { vm.define_var(:v, 2) }.must_raise ArgumentError
+
+    _(err.message).must_match(/not writable/)
+    _(vm.eval_code("v")).must_equal 1
+  end
+
+  # And on the path that changes binding form, which declares a var it has no
+  # record of.
+  it "refuses a form change onto a global it cannot write" do
+    vm = Quickjs::VM.new
+    vm.define_let(:w, 1)
+    vm.instance_variable_set(:@_defined_variables, { "w" => :let })
+    vm.eval_code(<<~JS)
+      globalThis.stolen = null;
+      Object.defineProperty(globalThis, "w", {
+        configurable: true, get() { return 1 }, set(v) { stolen = v },
+      });
+    JS
+
+    _ { vm.define_var(:w, 2) }.must_raise ArgumentError
+
+    _(vm.eval_code("stolen")).must_be_nil
+  end
   # Extensibility decides whether a property can be added, so it has nothing to
   # say about a name already there. Asking first refused a redefine the VM
   # would have taken, and told the caller why in terms that were not true.
