@@ -902,6 +902,22 @@ static VALUE to_rb_value_for_log(JSContext *ctx, JSValue j_val)
   return to_rb_value_with(ctx, j_val, true);
 }
 
+// The placeholder a console row gets for a proxy it cannot resolve. The throw
+// is discarded, but not before find_ruby_error has looked at it: a trap can
+// revoke and reach a Ruby bridge in the same breath, and that throw carries the
+// host's exception, which has to come back out and is only taken out of
+// alive_objects here.
+static VALUE r_substituted_unresolvable(JSContext *ctx)
+{
+  JSValue j_pending = JS_GetException(ctx);
+  VALUE r_ruby_error = find_ruby_error(ctx, j_pending);
+  JS_FreeValue(ctx, j_pending);
+  if (!NIL_P(r_ruby_error))
+    rb_exc_raise(r_ruby_error);
+
+  return rb_str_new2(QUICKJSRB_UNRENDERABLE);
+}
+
 static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
 {
   switch (JS_VALUE_GET_NORM_TAG(j_val))
@@ -945,10 +961,7 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
     // before the r_seen marking, so a proxy met twice in one row is two
     // substitutions rather than a second one reading as a cycle.
     if (conv != NULL && conv->substitute_unresolvable && JS_IsArray(ctx, j_val) < 0)
-    {
-      JS_FreeValue(ctx, JS_GetException(ctx));
-      return rb_str_new2(QUICKJSRB_UNRENDERABLE);
-    }
+      return r_substituted_unresolvable(ctx);
 
     int promiseState = JS_PromiseState(ctx, j_val);
     if (promiseState != -1)
@@ -1063,9 +1076,8 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
       // That is #119 rather than the tri-state this branch is about.
       if (conv->substitute_unresolvable)
       {
-        JS_FreeValue(ctx, JS_GetException(ctx));
         rb_hash_delete(conv->r_seen, r_key);
-        return rb_str_new2(QUICKJSRB_UNRENDERABLE);
+        return r_substituted_unresolvable(ctx);
       }
       return raise_js_exception(ctx); // raises
     }
@@ -1441,6 +1453,31 @@ static VALUE r_try_call_proc(VALUE r_try_args)
   );
 }
 
+struct js_arg_conversion
+{
+  JSContext *ctx;
+  JSValue j_val;
+};
+
+static VALUE js_arg_conversion_run(VALUE r_conversion)
+{
+  struct js_arg_conversion *conversion = (struct js_arg_conversion *)r_conversion;
+  return to_rb_value(conversion->ctx, conversion->j_val);
+}
+
+// Hands a Ruby exception back to the guest as a JS throw, the way a raise from
+// the block itself is already handed back, so the caller sees an error instead
+// of the conversion silently yielding nothing. A Ruby throw leaves internal
+// data rather than an Exception in errinfo and has nowhere to go from here.
+static JSValue j_throw_from_ruby_errinfo(JSContext *ctx)
+{
+  VALUE r_error = rb_errinfo();
+  rb_set_errinfo(Qnil);
+  if (!rb_obj_is_kind_of(r_error, rb_eException))
+    return JS_ThrowInternalError(ctx, "an argument could not be converted");
+  return JS_Throw(ctx, j_error_from_ruby_error(ctx, r_error));
+}
+
 static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, int _magic, JSValue *func_data)
 {
   // func_data[0] holds the Ruby Symbol ID for the defined function (stored by
@@ -1460,12 +1497,22 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   VALUE r_call_args = rb_ary_new();
   rb_ary_push(r_call_args, r_proc);
 
+  // Converted under a protect, because to_rb_value raises for an argument it
+  // cannot represent and this is a JSCFunction: the longjmp would go out
+  // through QuickJS's own frames, past the JS_FreeValue below, pinning the
+  // argument and everything it holds on the JS heap for the life of the VM.
+  // Repeatable by the guest, which is enough to condemn a VM by out-of-memory
+  // rather than merely to leak.
   VALUE r_argv = rb_ary_new();
   for (int i = 0; i < argc; i++)
   {
-    JSValue j_v = JS_DupValue(ctx, argv[i]);
-    rb_ary_push(r_argv, to_rb_value(ctx, j_v));
-    JS_FreeValue(ctx, j_v);
+    struct js_arg_conversion conversion = {ctx, JS_DupValue(ctx, argv[i])};
+    int state;
+    VALUE r_converted = rb_protect(js_arg_conversion_run, (VALUE)&conversion, &state);
+    JS_FreeValue(ctx, conversion.j_val);
+    if (state)
+      return j_throw_from_ruby_errinfo(ctx);
+    rb_ary_push(r_argv, r_converted);
   }
   rb_ary_push(r_call_args, r_argv);
   rb_ary_push(r_call_args, ULONG2NUM(data->eval_time->limit_ms));
