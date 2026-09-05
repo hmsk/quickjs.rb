@@ -473,6 +473,62 @@ describe Quickjs::VM do
     end
   end
 
+  # The runtime is created with our own JSMallocFunctions rather than QuickJS’s
+  # default ones, so malloc_size and malloc_count are ours to maintain: they are
+  # what memory_limit is compared against and what memory_usage reports. A
+  # mismatch between the malloc and free sides does not fail loudly, it drifts,
+  # and the limit is then enforced against a number that is not the heap.
+  describe "OwnedAllocator" do
+    it "accounts an allocation while it is held and gives the bytes back when it is released" do
+      vm = Quickjs::VM.new
+      vm.eval_code("void 0")
+      vm.gc!
+      baseline = vm.memory_usage[:malloc_size]
+
+      vm.eval_code("globalThis.hold = new Array(50_000).fill(7); void 0")
+      vm.gc!
+      held = vm.memory_usage[:malloc_size]
+
+      vm.eval_code("globalThis.hold = null; void 0")
+      vm.gc!
+      released = vm.memory_usage[:malloc_size]
+
+      _(held - baseline).must_be :>, 350_000
+      # Shapes and atoms the first evaluation interned stay for the life of the
+      # VM, so this is the array’s bytes coming back rather than an exact return.
+      _(released - baseline).must_be :<, 50_000
+    ensure
+      vm.dispose!
+    end
+
+    it "does not drift over repeated allocation and release" do
+      vm = Quickjs::VM.new
+      cycle = "globalThis.hold = new Array(2_000).fill(1); globalThis.hold = null; void 0"
+      5.times { vm.eval_code(cycle) }
+      vm.gc!
+      before = vm.memory_usage[:malloc_size]
+
+      200.times { vm.eval_code(cycle) }
+      vm.gc!
+
+      # Measured at 0 on macOS and Linux. The slack is for a platform whose
+      # malloc rounds a request differently between the two sides, not for an
+      # asymmetry in the bookkeeping, which would grow with the iteration count.
+      _(vm.memory_usage[:malloc_size] - before).must_be :<, 4_096
+    ensure
+      vm.dispose!
+    end
+
+    it "still enforces memory_limit, and reports the limit it was given" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      _(vm.memory_usage[:malloc_limit]).must_equal 1024 * 1024
+
+      _ { vm.eval_code("new Array(2_000_000).fill(0); void 0") }.must_raise Quickjs::RuntimeError
+    ensure
+      vm.dispose!
+    end
+  end
+
   # A conversion that raises partway through — a Promise nested in the graph is
   # the reachable case — must release everything it was holding on that exit.
   # What leaks is guest-chosen and never returned, so a long-lived VM fills up

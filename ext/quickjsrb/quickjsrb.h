@@ -16,6 +16,17 @@
 #include <string.h>
 #include <time.h>
 
+// The same ladder quickjs.c walks for its own allocator, mirrored rather than
+// referenced: js_def_malloc_usable_size is static, and the submodule is not
+// ours to change.
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#elif defined(__linux__) || defined(__GLIBC__)
+#include <malloc.h>
+#elif defined(__FreeBSD__)
+#include <malloc_np.h>
+#endif
+
 extern const uint32_t qjsc_polyfill_file_min_size;
 extern const uint8_t qjsc_polyfill_file_min;
 extern const uint32_t qjsc_polyfill_encoding_min_size;
@@ -81,6 +92,14 @@ typedef struct VMData
   // ReferenceError when the loader doesn't know the name.
   VALUE preloaded_module_names;
   JSValue j_file_proxy_creator;
+  // Number of allocations the runtime asked this extension for and did not
+  // get, either because the request would have crossed memory_limit or
+  // because the system refused. Monotonic for the life of the VM, and read
+  // by taking a snapshot and comparing: the question the readers ask is
+  // whether the allocator refused during a window they name, which is the
+  // one signal a guest cannot write to. Only mutated from the thread running
+  // JS, which is one at a time per VM.
+  uint64_t alloc_refusals;
   // Once the runtime has hit JS-level "out of memory", the QuickJS heap is in
   // a fragile state where further evaluation can trigger a use-after-free in
   // the parser-error-during-OOM cascade (segfault inside js_shape_hash_unlink).
@@ -188,7 +207,9 @@ static void vm_free(void *ptr)
   VMData *data = (VMData *)ptr;
   free(data->eval_time);
 
-  if (!data->disposed)
+  // NULL when the runtime could not be allocated at all: vm_alloc raises,
+  // and the half-built object still reaches here.
+  if (!data->disposed && data->context != NULL)
   {
     if (!JS_IsUndefined(data->j_file_proxy_creator))
       JS_FreeValue(data->context, data->j_file_proxy_creator);
@@ -245,15 +266,130 @@ static const rb_data_type_t vm_type = {
     .flags = RUBY_TYPED_FREE_IMMEDIATELY,
 };
 
+// quickjs.c reports "out of memory" by throwing an error, and a guest can
+// write that same sentence. The refusal itself cannot be written: it happens
+// below the guest, in the allocator, before QuickJS has decided whether it
+// can even afford an error object. So the runtime is created with our own
+// JSMallocFunctions, which are js_def_malloc and friends with one line
+// added, and every refusal is counted on the VM.
+//
+// The accounting has to be reproduced exactly rather than approximated:
+// js_def_malloc is where memory_limit is enforced, and malloc_count and
+// malloc_size are what JS_ComputeMemoryUsage reports through VM#memory_usage.
+// Both the limit comparison and the usable-size bookkeeping below are
+// therefore copied from quickjs.c as they stand.
+#if defined(__APPLE__)
+#define QUICKJSRB_MALLOC_OVERHEAD 0
+#else
+#define QUICKJSRB_MALLOC_OVERHEAD 8
+#endif
+
+static size_t quickjsrb_malloc_usable_size(const void *ptr)
+{
+#if defined(__APPLE__)
+  return malloc_size(ptr);
+#elif defined(_WIN32)
+  return _msize((void *)ptr);
+#elif defined(__EMSCRIPTEN__)
+  return 0;
+#elif defined(__linux__) || defined(__GLIBC__)
+  return malloc_usable_size((void *)ptr);
+#else
+  return malloc_usable_size((void *)ptr);
+#endif
+}
+
+// The added line, in the one place both refusal paths pass through. The
+// opaque is the VMData handed to JS_NewRuntime2; it is NULL-checked because
+// the first allocation JS_NewRuntime2 makes is the runtime itself, before
+// any runtime exists to hold it.
+static void *quickjsrb_malloc_refused(JSMallocState *s)
+{
+  VMData *data = s->opaque;
+  if (data != NULL)
+    data->alloc_refusals++;
+  return NULL;
+}
+
+static void *quickjsrb_malloc(JSMallocState *s, size_t size)
+{
+  void *ptr;
+
+  if (unlikely(s->malloc_size + size > s->malloc_limit))
+    return quickjsrb_malloc_refused(s);
+
+  ptr = malloc(size);
+  if (!ptr)
+    return quickjsrb_malloc_refused(s);
+
+  s->malloc_count++;
+  s->malloc_size += quickjsrb_malloc_usable_size(ptr) + QUICKJSRB_MALLOC_OVERHEAD;
+  return ptr;
+}
+
+static void quickjsrb_free(JSMallocState *s, void *ptr)
+{
+  if (!ptr)
+    return;
+
+  s->malloc_count--;
+  s->malloc_size -= quickjsrb_malloc_usable_size(ptr) + QUICKJSRB_MALLOC_OVERHEAD;
+  free(ptr);
+}
+
+static void *quickjsrb_realloc(JSMallocState *s, void *ptr, size_t size)
+{
+  size_t old_size;
+
+  if (!ptr)
+  {
+    if (size == 0)
+      return NULL;
+    return quickjsrb_malloc(s, size);
+  }
+  old_size = quickjsrb_malloc_usable_size(ptr);
+  // A resize to zero is a free that answers NULL. Nothing was refused.
+  if (size == 0)
+  {
+    s->malloc_count--;
+    s->malloc_size -= old_size + QUICKJSRB_MALLOC_OVERHEAD;
+    free(ptr);
+    return NULL;
+  }
+  if (s->malloc_size + size - old_size > s->malloc_limit)
+    return quickjsrb_malloc_refused(s);
+
+  ptr = realloc(ptr, size);
+  if (!ptr)
+    return quickjsrb_malloc_refused(s);
+
+  s->malloc_size += quickjsrb_malloc_usable_size(ptr) - old_size;
+  return ptr;
+}
+
+static const JSMallocFunctions quickjsrb_malloc_funcs = {
+    quickjsrb_malloc,
+    quickjsrb_free,
+    quickjsrb_realloc,
+    quickjsrb_malloc_usable_size,
+};
+
 struct vm_create_args
 {
+  VMData *data;
   JSContext *context;
 };
 
 static void *vm_create_no_gvl(void *p)
 {
   struct vm_create_args *args = p;
-  args->context = JS_NewContext(JS_NewRuntime());
+  // JS_NewRuntime2 answers NULL when it cannot allocate the runtime, and
+  // JS_NewContext(NULL) dereferences it. Nothing checked this before, when
+  // the same NULL was reachable through JS_NewRuntime.
+  JSRuntime *runtime = JS_NewRuntime2(&quickjsrb_malloc_funcs, args->data);
+  args->context = runtime == NULL ? NULL : JS_NewContext(runtime);
+  if (runtime != NULL && args->context == NULL)
+    JS_FreeRuntime(runtime);
   return NULL;
 }
 
@@ -270,6 +406,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->module_source_cache = rb_hash_new();
   data->preloaded_module_names = rb_hash_new();
   data->j_file_proxy_creator = JS_UNDEFINED;
+  data->alloc_refusals = 0;
   data->oom_poisoned = false;
   data->eval_timer_armed = false;
   data->disposed = false;
@@ -287,9 +424,11 @@ static VALUE vm_alloc(VALUE r_self)
   // JSRuntime / JSContext creation is pure QuickJS C work — no Ruby state
   // touched. Release the GVL so a background warmer thread can run this in
   // parallel with the main thread on multi-core hosts.
-  struct vm_create_args args = {NULL};
+  struct vm_create_args args = {data, NULL};
   rb_thread_call_without_gvl(vm_create_no_gvl, &args, NULL, NULL);
   data->context = args.context;
+  if (data->context == NULL)
+    rb_raise(rb_eNoMemError, "failed to allocate a JS runtime");
 
   return obj;
 }
