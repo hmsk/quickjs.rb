@@ -123,7 +123,7 @@ static VALUE r_find_alive_crypto_key(JSContext *ctx, JSValueConst j_key)
   if (handle <= 0)
     return Qnil;
   VMData *data = JS_GetContextOpaque(ctx);
-  VALUE r_key = rb_hash_aref(data->alive_objects, LONG2NUM(handle));
+  VALUE r_key = rb_hash_aref(data->alive_objects, LL2NUM(handle));
   // Before the class lookup, which is otherwise paid on the path a guest can
   // repeat for free: sign('HMAC', {}, buf) reaches no OpenSSL work to dwarf it.
   if (NIL_P(r_key))
@@ -305,7 +305,7 @@ static JSValue js_crypto_key_to_js(JSContext *ctx, VALUE r_key)
 {
   VMData *data = JS_GetContextOpaque(ctx);
   VALUE r_object_id = alive_objects_register(data, r_key);
-  int64_t handle = NUM2LONG(r_object_id);
+  int64_t handle = NUM2LL(r_object_id);
 
   VALUE r_type = rb_funcall(r_key, rb_intern("type"), 0);
   VALUE r_extractable = rb_funcall(r_key, rb_intern("extractable"), 0);
@@ -356,7 +356,14 @@ static JSValue js_crypto_key_to_js(JSContext *ctx, VALUE r_key)
     JSValue j_pe = JS_CallConstructor(ctx, j_uint8, 1, (JSValueConst *)&j_pe_buf);
     JS_FreeValue(ctx, j_uint8);
     JS_FreeValue(ctx, j_pe_buf);
-    JS_SetPropertyStr(ctx, j_algo, "publicExponent", j_pe);
+    // A guest that deleted or shadowed Uint8Array makes the construction throw,
+    // and storing the sentinel would put JS_EXCEPTION on the key as a real own
+    // property and leave the throw pending to surface somewhere later. The key
+    // is described without the exponent instead.
+    if (JS_IsException(j_pe))
+      JS_FreeValue(ctx, JS_GetException(ctx));
+    else
+      JS_SetPropertyStr(ctx, j_algo, "publicExponent", j_pe);
   }
 
   JS_SetPropertyStr(ctx, j_key, "algorithm", j_algo);

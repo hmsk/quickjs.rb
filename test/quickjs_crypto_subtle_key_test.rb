@@ -161,6 +161,24 @@ describe "crypto.subtle key management" do
       vm&.dispose!
     end
 
+    # The exponent is handed to JS through Uint8Array, which the guest can take
+    # away. Storing the failed construction would put the exception sentinel on
+    # the key as a real property and leave the throw to surface later.
+    it "describes the key without the exponent when Uint8Array is gone" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      vm.eval_code('globalThis.PE = new Uint8Array([1, 0, 1]); delete globalThis.Uint8Array; 1')
+
+      described = vm.eval_code(<<~JS)
+        const k = await crypto.subtle.generateKey({name: 'RSA-OAEP', modulusLength: 2048, publicExponent: PE, hash: 'SHA-256'}, true, ['encrypt', 'decrypt']);
+        [Object.keys(k.publicKey.algorithm).join(','), typeof k.publicKey.algorithm.publicExponent].join(' | ')
+      JS
+
+      _(described).must_equal 'name,hash,modulusLength | undefined'
+      _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm&.dispose!
+    end
+
     it "cannot be recovered by scanning the handle space" do
       vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
       vm.eval_code("globalThis.k = await crypto.subtle.generateKey({name: 'HMAC', hash: 'SHA-256'}, false, ['sign', 'verify'])")

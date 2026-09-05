@@ -52,7 +52,7 @@ JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
   // alive until find_ruby_error takes it back out.
   VMData *data = JS_GetContextOpaque(ctx);
   VALUE r_object_id = alive_objects_register(data, r_error);
-  JS_SetPropertyStr(ctx, j_error, "rb_object_id", JS_NewInt64(ctx, NUM2LONG(r_object_id)));
+  JS_SetPropertyStr(ctx, j_error, "rb_object_id", JS_NewInt64(ctx, NUM2LL(r_object_id)));
 
   VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0);
   const char *errorMessage = StringValueCStr(r_exception_message);
@@ -189,7 +189,7 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
     if (errorOriginalRubyObjectId > 0)
     {
       VMData *data = JS_GetContextOpaque(ctx);
-      VALUE r_key = LONG2NUM(errorOriginalRubyObjectId);
+      VALUE r_key = LL2NUM(errorOriginalRubyObjectId);
       VALUE r_error = rb_hash_aref(data->alive_objects, r_key);
       // alive_objects anchors three unrelated things: a bridged exception,
       // waiting to be thrown back, and the Ruby objects behind a File or a
@@ -204,6 +204,11 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
       if (!rb_obj_is_kind_of(r_error, rb_eException))
         return Qnil;
       rb_hash_delete(data->alive_objects, r_key);
+      // The reverse row goes with it. It is only there so an object bridged
+      // twice keeps one handle, and once the entry is gone there is nothing
+      // for it to point at: leaving it would grow a table nothing else ever
+      // shortens, one row per exception the guest throws back.
+      rb_hash_delete(data->alive_handles, rb_funcall(r_error, rb_intern("object_id"), 0));
       return r_error;
     }
   }
@@ -4034,6 +4039,7 @@ static VALUE vm_m_dispose(VALUE r_self)
   // collected. Matters for pool-rebuild workloads that dispose eagerly.
   data->defined_functions = rb_hash_new();
   data->alive_objects = rb_hash_new();
+  data->alive_handles = rb_hash_new();
   data->log_listener = Qnil;
   data->module_loader = Qnil;
 

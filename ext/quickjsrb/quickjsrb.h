@@ -325,7 +325,10 @@ static VALUE alive_objects_register(VMData *data, VALUE r_object)
   // so `for (i = 0; i < 200000; i++) f()` would grow the table by 200000.
   VALUE r_object_id = rb_funcall(r_object, rb_intern("object_id"), 0);
   VALUE r_known = rb_hash_lookup2(data->alive_handles, r_object_id, Qnil);
-  if (!NIL_P(r_known) && !NIL_P(rb_hash_lookup2(data->alive_objects, r_known, Qnil)))
+  // Reused only when the row still holds this object. Asking merely whether
+  // the handle is occupied would hand back one that a later draw had given to
+  // something else, since an object_id is only unique among live objects.
+  if (!NIL_P(r_known) && rb_hash_lookup2(data->alive_objects, r_known, Qnil) == r_object)
     return r_known;
 
   VALUE r_secure_random = rb_const_get(rb_cObject, rb_intern("SecureRandom"));
