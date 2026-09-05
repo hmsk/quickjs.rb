@@ -218,7 +218,14 @@ static VALUE r_backtrace_from_js_stack(const char *stack)
   if (stack == NULL || stack[0] == '\0')
     return Qnil;
 
-  VALUE r_lines = rb_str_split(rb_str_new_cstr(stack), "\n");
+  // Through rb_funcall and not rb_str_split: the latter enters String#split
+  // directly, so it honours whatever block the current C frame was called
+  // with. Any entry point has one if the caller passed one — eval_code with a
+  // stray block, define_function always — and there split yielded every line
+  // of the JS stack to that block and answered the String instead of an
+  // Array, which rb_ary_entry then dereferenced as one. rb_funcall never
+  // forwards a block.
+  VALUE r_lines = rb_funcall(rb_str_new_cstr(stack), rb_intern("split"), 1, rb_str_new_cstr("\n"));
   VALUE r_filtered = rb_ary_new();
   for (long i = 0; i < RARRAY_LEN(r_lines); i++)
   {
@@ -3288,129 +3295,164 @@ struct define_function_call
   VALUE r_block;
 };
 
+// What a define holds while it resolves its path: the parent it is walking
+// and the two values the bridge function captures. Owned by an ensure from
+// before any of them exists, because resolution runs guest JS — the first
+// segment is an eval and every later one a property read, any of which can
+// be a getter that reaches a bridge, raises, or outlives the budget — and the
+// install itself can run a setter. Every one of those unwinds through here.
+struct define_function_install
+{
+  JSContext *ctx;
+  JSValue j_parent;
+  JSValue ruby_data[2];
+};
+
+static VALUE define_function_release(VALUE p)
+{
+  struct define_function_install *install = (struct define_function_install *)p;
+  JS_FreeValue(install->ctx, install->j_parent);
+  JS_FreeValue(install->ctx, install->ruby_data[0]);
+  JS_FreeValue(install->ctx, install->ruby_data[1]);
+  return Qnil;
+}
+
+struct define_function_run
+{
+  struct define_function_call *call;
+  struct define_function_install *install;
+  VALUE r_segs;    // the segments as Strings, stringified once, outside the region
+  VALUE r_key_sym; // the key the bridge looks the block up by
+};
+
+// Two answers a resolution step can give that are not the object asked for,
+// and they are different failures. A pending exception is the guest's own —
+// a bridge raising in a getter, the budget lapsing, a dispose! reached from
+// the path — and folding it into "not an object" both blamed the caller's
+// path for it and left the Ruby exception behind it parked in alive_objects
+// for the life of the VM. Only a value that really is not an object is the
+// caller's mistake.
+static void check_path_segment(JSContext *ctx, JSValueConst j_val, const char *segment)
+{
+  if (JS_IsException(j_val))
+    raise_js_exception(ctx);
+  if (!JS_IsObject(j_val))
+    rb_raise(rb_eArgError, "cannot define function: '%s' is not an object", segment);
+}
+
+static VALUE define_function_resolve_and_install(VALUE p)
+{
+  struct define_function_run *run = (struct define_function_run *)p;
+  VMData *data = run->call->data;
+  JSContext *ctx = data->context;
+  struct define_function_install *install = run->install;
+  VALUE r_segs = run->r_segs;
+  long path_len = RARRAY_LEN(r_segs);
+
+  install->ruby_data[0] = JS_NewInt64(ctx, (int64_t)SYM2ID(run->r_key_sym));
+  install->ruby_data[1] = JS_NewBool(ctx, RTEST(rb_funcall(run->call->r_flags, rb_intern("include?"), 1, ID2SYM(rb_intern("async")))));
+
+  if (path_len > 1)
+  {
+    // Resolving the path runs guest JS under whatever interrupt handler the
+    // previous entry left armed. Refresh the clock, or a lapsed budget fires in
+    // the first getter and is reported as that getter's fault. Unconditional,
+    // as it always was here: nested under a bridge this resets the enclosing
+    // eval's clock, which vm_m_compile's comment records as a class deferred to
+    // its own PR rather than something to change one entry point at a time.
+    arm_eval_timer(data);
+
+    // The first segment is not a lookup, it is an eval: `myLib` can be a
+    // lexical binding as well as a global property, and either can be an
+    // accessor.
+    const char *first_seg = StringValueCStr(RARRAY_AREF(r_segs, 0));
+    install->j_parent = JS_Eval(ctx, first_seg, strlen(first_seg), vmInternalFilename, JS_EVAL_TYPE_GLOBAL);
+    check_path_segment(ctx, install->j_parent, first_seg);
+
+    for (long i = 1; i < path_len - 1; i++)
+    {
+      const char *seg = StringValueCStr(RARRAY_AREF(r_segs, i));
+      JSValue j_next = JS_GetPropertyStr(ctx, install->j_parent, seg);
+      JS_FreeValue(ctx, install->j_parent);
+      install->j_parent = j_next;
+      check_path_segment(ctx, j_next, seg);
+    }
+  }
+  else
+  {
+    // A plain name never armed before, and the only JS it can run is a setter
+    // on globalThis. It gets a clock of its own only as the outermost entry:
+    // nested under a bridge, the enclosing eval's budget governs, and arming
+    // here unconditionally let a bridge that defined a function on every
+    // call keep the enclosing eval alive past its timeout_msec.
+    if (data->evals_in_flight == 1)
+      arm_eval_timer(data);
+    install->j_parent = JS_GetGlobalObject(ctx);
+  }
+
+  const char *funcName = StringValueCStr(RARRAY_AREF(r_segs, path_len - 1));
+
+  JSValue j_func = JS_NewCFunctionData(ctx, js_quickjsrb_call_global, 1, 0, 2, install->ruby_data);
+  if (JS_IsException(j_func))
+    return raise_js_exception(ctx);
+
+  // JS_SetPropertyStr consumes j_func on every path and, with JS_PROP_THROW,
+  // answers -1 with the TypeError pending when the target refuses — a frozen
+  // parent, a frozen globalThis, a setter that throws. Ignored, that was a
+  // define that reported success for a function which did not exist, and a
+  // stale exception left on the context for whatever ran next.
+  if (JS_SetPropertyStr(ctx, install->j_parent, funcName, j_func) < 0)
+    return raise_js_exception(ctx);
+
+  // Recorded only now that the property is installed. can_eval_gvl_free reads
+  // this table as "a bridge can fire during eval", and an entry left behind by
+  // a define that failed took the VM off the GVL-release path for good.
+  rb_hash_aset(data->defined_functions, run->r_key_sym, run->call->r_block);
+  return Qnil;
+}
+
 static VALUE define_global_function_body(VALUE p)
 {
   struct define_function_call *call = (struct define_function_call *)p;
   VMData *data = call->data;
   VALUE r_name = call->r_name;
-  VALUE r_flags = call->r_flags;
-  VALUE r_block = call->r_block;
 
-  if (RB_TYPE_P(r_name, T_ARRAY))
+  // A plain name is a path of one segment whose parent is the global object;
+  // the only difference is what the caller gets back.
+  bool as_path = RB_TYPE_P(r_name, T_ARRAY);
+  VALUE r_path = as_path ? r_name : rb_ary_new3(1, r_name);
+  long path_len = RARRAY_LEN(r_path);
+  if (path_len < 1)
+    rb_raise(rb_eArgError, "function's path array must not be empty");
+
+  for (long i = 0; i < path_len; i++)
   {
-    long path_len = RARRAY_LEN(r_name);
-    if (path_len < 1)
-      rb_raise(rb_eArgError, "function's path array must not be empty");
-
-    for (long i = 0; i < path_len; i++)
-    {
-      VALUE r_seg = RARRAY_AREF(r_name, i);
-      if (!(SYMBOL_P(r_seg) || RB_TYPE_P(r_seg, T_STRING)))
-        rb_raise(rb_eTypeError, "function's name should be a Symbol or a String");
-    }
-
-    // Build internal lookup key by joining path segments with "."
-    // e.g. ["myLib", "hello"] -> :"myLib.hello"
-    VALUE r_segs = rb_ary_new();
-    for (long i = 0; i < path_len; i++)
-      rb_ary_push(r_segs, rb_funcall(RARRAY_AREF(r_name, i), rb_intern("to_s"), 0));
-    VALUE r_key_str = rb_funcall(r_segs, rb_intern("join"), 1, rb_str_new2("."));
-    VALUE r_key_sym = rb_funcall(r_key_str, rb_intern("to_sym"), 0);
-    rb_hash_aset(data->defined_functions, r_key_sym, r_block);
-
-    VALUE r_func_seg_str = rb_funcall(RARRAY_AREF(r_name, path_len - 1), rb_intern("to_s"), 0);
-    char *funcName = StringValueCStr(r_func_seg_str);
-
-    JSValueConst ruby_data[2];
-    ruby_data[0] = JS_NewInt64(data->context, (int64_t)SYM2ID(r_key_sym));
-    ruby_data[1] = JS_NewBool(data->context, RTEST(rb_funcall(r_flags, rb_intern("include?"), 1, ID2SYM(rb_intern("async")))));
-
-    // Resolve the parent object to attach the function to.
-    // For a single-element array, parent is the global object.
-    // For multi-element arrays, traverse path[0..n-2] using JS_Eval for the first
-    // segment (so lexical const/let bindings are resolved, not just global properties)
-    // and JS_GetPropertyStr for subsequent segments.
-    JSValue j_parent;
-    if (path_len == 1)
-    {
-      j_parent = JS_GetGlobalObject(data->context);
-    }
-    else
-    {
-      VALUE r_first_str = rb_funcall(RARRAY_AREF(r_name, 0), rb_intern("to_s"), 0);
-      const char *first_seg = StringValueCStr(r_first_str);
-      // Resolving the first segment is not a lookup, it is an eval: `myLib`
-      // can be an accessor property, so this runs arbitrary JS and can reach
-      // a Ruby bridge. It runs under whatever interrupt handler the previous
-      // eval left armed, so refresh the clock — a lapsed budget misfires here
-      // and masquerades as "'%s' is not an object", blaming the caller's path
-      // for what was a timeout.
-      arm_eval_timer(data);
-      j_parent = JS_Eval(data->context, first_seg, strlen(first_seg), vmInternalFilename, JS_EVAL_TYPE_GLOBAL);
-
-      if (JS_IsException(j_parent) || !JS_IsObject(j_parent))
-      {
-        JS_FreeValue(data->context, j_parent);
-        JS_FreeValue(data->context, ruby_data[0]);
-        JS_FreeValue(data->context, ruby_data[1]);
-        rb_raise(rb_eArgError, "cannot define function: '%s' is not an object", first_seg);
-      }
-
-      for (long i = 1; i < path_len - 1; i++)
-      {
-        VALUE r_seg_str = rb_funcall(RARRAY_AREF(r_name, i), rb_intern("to_s"), 0);
-        JSValue j_next = JS_GetPropertyStr(data->context, j_parent, StringValueCStr(r_seg_str));
-        JS_FreeValue(data->context, j_parent);
-
-        if (JS_IsException(j_next) || !JS_IsObject(j_next))
-        {
-          JS_FreeValue(data->context, j_next);
-          JS_FreeValue(data->context, ruby_data[0]);
-          JS_FreeValue(data->context, ruby_data[1]);
-          rb_raise(rb_eArgError, "cannot define function: '%s' is not an object", StringValueCStr(r_seg_str));
-        }
-        j_parent = j_next;
-      }
-    }
-
-    JS_SetPropertyStr(
-        data->context, j_parent, funcName,
-        JS_NewCFunctionData(data->context, js_quickjsrb_call_global, 1, 0, 2, ruby_data));
-    JS_FreeValue(data->context, j_parent);
-    JS_FreeValue(data->context, ruby_data[0]);
-    JS_FreeValue(data->context, ruby_data[1]);
-
-    VALUE r_result = rb_ary_new();
-    for (long i = 0; i < path_len; i++)
-      rb_ary_push(r_result, rb_funcall(RARRAY_AREF(r_name, i), rb_intern("to_sym"), 0));
-    return r_result;
+    VALUE r_seg = RARRAY_AREF(r_path, i);
+    if (!(SYMBOL_P(r_seg) || RB_TYPE_P(r_seg, T_STRING)))
+      rb_raise(rb_eTypeError, "function's name should be a Symbol or a String");
   }
-  else if (SYMBOL_P(r_name) || RB_TYPE_P(r_name, T_STRING))
-  {
-    VALUE r_name_sym = rb_funcall(r_name, rb_intern("to_sym"), 0);
 
-    rb_hash_aset(data->defined_functions, r_name_sym, r_block);
-    VALUE r_name_str = rb_funcall(r_name, rb_intern("to_s"), 0);
-    char *funcName = StringValueCStr(r_name_str);
+  // Stringified once, here, and handed to the resolution as Strings: to_s on
+  // a caller's object is a yield point and can raise, and neither belongs
+  // inside the region that holds JS values. The bridge looks its block up by
+  // the segments joined with ".", e.g. ["myLib", "hello"] -> :"myLib.hello",
+  // and a plain name as itself.
+  VALUE r_segs = rb_ary_new();
+  for (long i = 0; i < path_len; i++)
+    rb_ary_push(r_segs, rb_funcall(RARRAY_AREF(r_path, i), rb_intern("to_s"), 0));
+  VALUE r_key_sym = rb_funcall(rb_funcall(r_segs, rb_intern("join"), 1, rb_str_new2(".")), rb_intern("to_sym"), 0);
 
-    JSValueConst ruby_data[2];
-    ruby_data[0] = JS_NewInt64(data->context, (int64_t)SYM2ID(r_name_sym));
-    ruby_data[1] = JS_NewBool(data->context, RTEST(rb_funcall(r_flags, rb_intern("include?"), 1, ID2SYM(rb_intern("async")))));
+  struct define_function_install install = {data->context, JS_UNDEFINED, {JS_UNDEFINED, JS_UNDEFINED}};
+  struct define_function_run run = {call, &install, r_segs, r_key_sym};
+  rb_ensure(define_function_resolve_and_install, (VALUE)&run, define_function_release, (VALUE)&install);
 
-    JSValue j_global = JS_GetGlobalObject(data->context);
-    JS_SetPropertyStr(
-        data->context, j_global, funcName,
-        JS_NewCFunctionData(data->context, js_quickjsrb_call_global, 1, 0, 2, ruby_data));
-    JS_FreeValue(data->context, j_global);
-    JS_FreeValue(data->context, ruby_data[0]);
-    JS_FreeValue(data->context, ruby_data[1]);
+  if (!as_path)
+    return r_key_sym;
 
-    return r_name_sym;
-  }
-  else
-  {
-    rb_raise(rb_eTypeError, "function's name should be a Symbol or a String");
-  }
+  VALUE r_result = rb_ary_new();
+  for (long i = 0; i < path_len; i++)
+    rb_ary_push(r_result, rb_funcall(RARRAY_AREF(r_segs, i), rb_intern("to_sym"), 0));
+  return r_result;
 }
 
 // Registering a function is a JS entry point like any other, and was the one

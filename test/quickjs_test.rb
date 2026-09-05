@@ -903,6 +903,22 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
+    # The renderer split the JS stack with a call that enters String#split
+    # directly, which honours whatever block the calling C frame had — so a
+    # stray block on eval_code was handed every line of the stack and the
+    # String came back where an Array was expected. A segfault on main.
+    it "renders a JS error for a caller that passed a block" do
+      vm = Quickjs::VM.new
+      seen = []
+
+      error = _ { vm.eval_code("throw new RangeError('with block')") {|*args| seen << args } }.must_raise Quickjs::RangeError
+
+      _(error.message).must_equal 'with block'
+      _(seen).must_equal []
+    ensure
+      vm.dispose!
+    end
+
     it "still announces an error that reached the top level uncaught" do
       vm = Quickjs::VM.new
       logged = []
@@ -2039,8 +2055,12 @@ end
         _(@vm.eval_code("await lib.fetch().then(r => r + '!')")).must_equal "data!"
       end
 
-      it "raises ArgumentError when parent does not exist" do
-        err = _ { @vm.define_function(["nonexistent", "fn"]) { } }.must_raise ArgumentError
+      # The first segment is an eval, and evaluating a name that is not bound
+      # is a ReferenceError in JS. It is reported as that rather than folded
+      # into "is not an object", which is reserved for a value that resolved
+      # and simply is not one.
+      it "reports the ReferenceError when the parent does not exist" do
+        err = _ { @vm.define_function(["nonexistent", "fn"]) { } }.must_raise Quickjs::ReferenceError
         _(err.message).must_include "nonexistent"
       end
 
@@ -2053,6 +2073,184 @@ end
       it "single-element array registers on the global object" do
         @vm.define_function(["lone"]) { 42 }
         _(@vm.eval_code("lone()")).must_equal 42
+      end
+
+      # Resolving the path runs guest JS: the first segment is an eval and
+      # every later one a property read, and either can be a getter. What that
+      # getter did used to be folded into "is not an object" — a bridge
+      # raising, the budget lapsing, a dispose! — blaming the caller's path for
+      # it, and the Ruby exception behind a bridge stayed parked in
+      # alive_objects for the life of the VM since nothing ever retrieved it.
+      describe "when resolving the path runs into an error" do
+        it "reports a bridge error from a getter as that error" do
+          @vm.define_function('probe') { raise IOError, 'boom' }
+          @vm.eval_code("Object.defineProperty(globalThis, 'myLib', {get() { probe(); return {} }}); 0")
+
+          err = _ { @vm.define_function(['myLib', 'hello']) { 1 } }.must_raise IOError
+          _(err.message).must_equal 'boom'
+          _(@vm.eval_code('1 + 1')).must_equal 2
+        end
+
+        it "reports a getter's own throw as that error" do
+          @vm.eval_code("Object.defineProperty(globalThis, 'throwingLib', {get() { throw new RangeError('from getter') }}); 0")
+
+          err = _ { @vm.define_function(['throwingLib', 'hello']) { 1 } }.must_raise Quickjs::RangeError
+          _(err.message).must_equal 'from getter'
+        end
+
+        it "reports a lapsed budget as InterruptedError, not as a bad path" do
+          vm = Quickjs::VM.new(timeout_msec: 50)
+          vm.eval_code("Object.defineProperty(globalThis, 'slowLib', {get() { const t = Date.now(); while (Date.now() - t < 1000) {}; return {} }}); 0")
+
+          _ { vm.define_function(['slowLib', 'hello']) { 1 } }.must_raise Quickjs::InterruptedError
+        ensure
+          vm.dispose!
+        end
+
+        it "reports a dispose! reached from a getter as the ThreadError it owes" do
+          vm = Quickjs::VM.new
+          vm.define_function('bye') { vm.dispose! }
+          vm.eval_code("Object.defineProperty(globalThis, 'dyingLib', {get() { bye(); return {} }}); 0")
+
+          _ { vm.define_function(['dyingLib', 'hello']) { 1 } }.must_raise ThreadError
+          _(vm.disposed?).must_equal false
+          _(vm.eval_code('1 + 1')).must_equal 2
+        ensure
+          vm.dispose!
+        end
+
+        # The plain-name path never armed, and giving it a clock of its own
+        # unconditionally let a bridge that defines a function on every call
+        # reset the enclosing eval's clock each time, past its timeout_msec.
+        it "does not let a nested plain-name define reset the enclosing budget" do
+          vm = Quickjs::VM.new(timeout_msec: 100)
+          vm.define_function('redefine') { vm.define_function('b') { 1 }; 1 }
+
+          _ do
+            vm.eval_code('const t = Date.now(); while (Date.now() - t < 1500) redefine(); 1')
+          end.must_raise Quickjs::InterruptedError
+        ensure
+          vm.dispose!
+        end
+
+        it "still calls a genuinely non-object segment the caller's mistake" do
+          @vm.eval_code("globalThis.lib = {leaf: 42}; 0")
+          err = _ { @vm.define_function(['lib', 'leaf', 'fn']) { } }.must_raise ArgumentError
+          _(err.message).must_include 'leaf'
+        end
+
+        # The masked bridge error never reached find_ruby_error, the only
+        # thing that takes a bridged exception out of alive_objects.
+        it "no longer pins the bridge's Ruby exception for the life of the VM" do
+          marker = Class.new(StandardError)
+          @vm.define_function('probe') { raise marker, 'boom' }
+          @vm.eval_code("Object.defineProperty(globalThis, 'myLib', {get() { probe(); return {} }}); 0")
+          attempt = proc { @vm.define_function(['myLib', 'hello']) { 1 } rescue marker }
+
+          3.times(&attempt)
+          GC.start
+          before = ObjectSpace.each_object(marker).count
+          200.times(&attempt)
+          GC.start
+
+          _(ObjectSpace.each_object(marker).count - before).must_equal 0
+        end
+
+        # The renderer splits the JS stack into lines, and did so through a
+        # call that honours the current C frame's block — which define_function
+        # has. Every line of the stack was yielded to the caller's block, and
+        # the String came back where an Array was expected.
+        it "does not hand the JS stack trace to the block being defined" do
+          seen = []
+          @vm.eval_code("Object.defineProperty(globalThis, 'throwingLib', {get() { throw new RangeError('x') }}); 0")
+
+          _ { @vm.define_function(['throwingLib', 'hello']) {|*args| seen << args } }.must_raise Quickjs::RangeError
+
+          _(seen).must_equal []
+        end
+      end
+
+      # JS_SetPropertyStr answers -1 with a TypeError pending when the target
+      # refuses, and that answer was ignored: the define reported success for
+      # a function that did not exist, and the TypeError stayed pending on the
+      # context for whatever ran next.
+      describe "when the target refuses the property" do
+        it "raises the TypeError for a frozen parent instead of reporting success" do
+          @vm.eval_code('globalThis.frozenLib = Object.freeze({}); 0')
+
+          _ { @vm.define_function(['frozenLib', 'hello']) { 42 } }.must_raise Quickjs::TypeError
+          _(@vm.eval_code('typeof frozenLib.hello')).must_equal 'undefined'
+        end
+
+        it "raises the TypeError for a frozen globalThis and a plain name" do
+          @vm.eval_code('Object.freeze(globalThis); 0')
+
+          _ { @vm.define_function('lonely') { 42 } }.must_raise Quickjs::TypeError
+          _(@vm.eval_code('typeof lonely')).must_equal 'undefined'
+        end
+
+        it "reports a setter that throws as that error" do
+          @vm.eval_code("Object.defineProperty(globalThis, 'guarded', {set(v) { throw new RangeError('no') }}); 0")
+
+          err = _ { @vm.define_function('guarded') { 42 } }.must_raise Quickjs::RangeError
+          _(err.message).must_equal 'no'
+        end
+      end
+
+      # can_eval_gvl_free reads defined_functions as "a bridge can fire during
+      # eval". The block was recorded before the path resolved, so a define
+      # that failed left its entry behind and took the VM off the GVL-release
+      # path for good. The probe: a VM on that path refuses a bridge
+      # registration while another thread's eval is in flight, since the eval
+      # runs with the GVL released; a demoted one holds the GVL for the whole
+      # eval, so the same call blocks and then succeeds.
+      describe "when the define fails" do
+        def still_releases_the_gvl?(vm)
+          started = Queue.new
+          runner = Thread.new do
+            started << :go
+            vm.eval_code('const t = Date.now(); while (Date.now() - t < 400) {}; 1')
+          end
+          started.pop
+          sleep 0.05
+          begin
+            vm.define_function('probe_after_failure') { 1 }
+            false
+          rescue ThreadError => e
+            e.message.include?('GVL released')
+          ensure
+            runner.join
+          end
+        end
+
+        it "leaves no bridge behind after a path that does not resolve" do
+          vm = Quickjs::VM.new(timeout_msec: 5_000)
+          _ { vm.define_function(%w[nonexistent fn]) { 1 } }.must_raise Quickjs::ReferenceError
+
+          _(still_releases_the_gvl?(vm)).must_equal true
+        ensure
+          vm.dispose!
+        end
+
+        it "leaves no bridge behind after a target that refused" do
+          vm = Quickjs::VM.new(timeout_msec: 5_000)
+          vm.eval_code('Object.freeze(globalThis); 0')
+          _ { vm.define_function('lonely') { 1 } }.must_raise Quickjs::TypeError
+
+          _(still_releases_the_gvl?(vm)).must_equal true
+        ensure
+          vm.dispose!
+        end
+
+        it "still records the block once the property is installed" do
+          vm = Quickjs::VM.new(timeout_msec: 5_000)
+          vm.define_function('installed') { 1 }
+
+          _(still_releases_the_gvl?(vm)).must_equal false
+          _(vm.eval_code('installed()')).must_equal 1
+        ensure
+          vm.dispose!
+        end
       end
 
       it "single-element array returns a one-element array of symbols" do
