@@ -2153,7 +2153,12 @@ static void enter_oom_scope(VMData *data)
     rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
   }
 
-  data->alloc_refusals_at_scope = data->alloc_refusals;
+  // Only the outermost call opens a scope. A nested one — a define_function
+  // proc or an on_log listener re-entering the VM while JS is in flight —
+  // inherits the scope it was made from, because taking its own would drop a
+  // refusal the enclosing call has already met and is still going to report.
+  if (data->evals_in_flight == 0)
+    data->alloc_refusals_at_scope = data->alloc_refusals;
 }
 
 static void check_disposed(VMData *data)

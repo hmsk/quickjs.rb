@@ -1101,6 +1101,29 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
+    # A nested call must not open a scope of its own. The refusal here happens
+    # in the enclosing evaluation, before a bridge re-enters the VM; a snapshot
+    # taken by that inner call would move the window past it, and the render
+    # that follows would report the guest's TypeError over a heap that had run
+    # out and hand back a VM nobody had condemned.
+    it "keeps the scope of the enclosing call when a bridge re-enters the VM" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      vm.define_function(:reenter) { vm.eval_code('1 + 1') }
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          try { new Array(2_000_000).fill(0) } catch (e) {}
+          reenter();
+          throw new TypeError('after');
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'out of memory'
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
     # Scoped to the call rather than to the VM: a guest that runs out, catches
     # it and returns is left alone, which is what it was before the allocator
     # was ours. The scope is what makes that possible to say at all.
