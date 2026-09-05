@@ -255,21 +255,23 @@ describe Quickjs do
     # and read as a boolean that took the array path: a value whose every trap
     # throws came back as [], indistinguishable from a genuine empty Array.
     describe "a revoked Proxy" do
-      REVOKED = "const {proxy, revoke} = Proxy.revocable({a: 1}, {}); revoke();"
+      def revoked
+        "const {proxy, revoke} = Proxy.revocable({a: 1}, {}); revoke();"
+      end
 
       it "reports the TypeError the guest would see" do
-        error = _ { ::Quickjs.eval_code("#{REVOKED} proxy") }.must_raise Quickjs::TypeError
+        error = _ { ::Quickjs.eval_code("#{revoked} proxy") }.must_raise Quickjs::TypeError
         _(error.message).must_equal 'revoked proxy'
       end
 
       it "reports it from inside a container too" do
-        _ { ::Quickjs.eval_code("#{REVOKED} ({ok: 1, bad: proxy})") }.must_raise Quickjs::TypeError
-        _ { ::Quickjs.eval_code("#{REVOKED} [1, proxy]") }.must_raise Quickjs::TypeError
+        _ { ::Quickjs.eval_code("#{revoked} ({ok: 1, bad: proxy})") }.must_raise Quickjs::TypeError
+        _ { ::Quickjs.eval_code("#{revoked} [1, proxy]") }.must_raise Quickjs::TypeError
       end
 
       it "leaves the VM usable, having taken the throw off the context" do
         vm = Quickjs::VM.new
-        _ { vm.eval_code("#{REVOKED} proxy") }.must_raise Quickjs::TypeError
+        _ { vm.eval_code("#{revoked} proxy") }.must_raise Quickjs::TypeError
         _(vm.eval_code('1 + 1')).must_equal 2
       ensure
         vm.dispose!
@@ -280,6 +282,23 @@ describe Quickjs do
       it "does not change what a live Proxy converts to" do
         assert_code("new Proxy([1, 2, 3], {})", [1, 2, 3])
         assert_code("new Proxy({a: 1}, {})", {'a' => 1})
+      end
+
+      # A log line must not decide whether the statement after it runs, so the
+      # row builder substitutes the way it does for a Promise, rather than
+      # letting the conversion report. The raise would also come back to the
+      # guest catchable, pinning a Ruby exception per catch.
+      it "is substituted in a log row rather than reported" do
+        vm = Quickjs::VM.new
+        rows = []
+        vm.on_log { |l| rows << l.to_s }
+
+        result = vm.eval_code("#{revoked} let c = 'none'; try { console.log('x', proxy) } catch (e) { c = e.message } c")
+
+        _(result).must_equal 'none'
+        _(rows).must_equal ['x (unrenderable value)']
+      ensure
+        vm.dispose!
       end
 
       # The other way js_resolve_proxy answers -1. Reported rather than
