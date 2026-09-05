@@ -1400,10 +1400,13 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
 
   VMData *data = JS_GetContextOpaque(ctx);
   VALUE r_proc = rb_hash_aref(data->defined_functions, ID2SYM((ID)key_id));
-  // Shouldn't happen
+  // Entries are never removed, and the block is recorded once the property is
+  // installed, so the one way to get here is from inside that install: a
+  // setter on the target that calls the value it was handed. Say so, rather
+  // than report an internal fault to a caller whose setter did exactly that.
   if (r_proc == Qnil)
   {
-    return JS_ThrowReferenceError(ctx, "Proc is not defined");
+    return JS_ThrowReferenceError(ctx, "'%s' cannot be called yet: define_function has not finished installing it", rb_id2name((ID)key_id));
   }
 
   VALUE r_call_args = rb_ary_new();

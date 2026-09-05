@@ -2189,6 +2189,18 @@ end
           _(@vm.eval_code('typeof lonely')).must_equal 'undefined'
         end
 
+        # The block is recorded once the property is installed, and a setter on
+        # the target runs during that install. One that calls the value it was
+        # handed reaches a function with no block behind it yet, and used to be
+        # told "Proc is not defined" — the bridge's internal-fault message for
+        # a case that is not one.
+        it "tells a setter that calls the value that the define has not finished" do
+          @vm.eval_code("Object.defineProperty(globalThis, 'eager', {set(f) { f() }}); 0")
+
+          err = _ { @vm.define_function('eager') { 'from ruby' } }.must_raise Quickjs::ReferenceError
+          _(err.message).must_match(/'eager' cannot be called yet/)
+        end
+
         it "reports a setter that throws as that error" do
           @vm.eval_code("Object.defineProperty(globalThis, 'guarded', {set(v) { throw new RangeError('no') }}); 0")
 
