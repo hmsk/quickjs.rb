@@ -301,6 +301,33 @@ describe Quickjs do
         vm.dispose!
       end
 
+      it "is substituted at whatever depth it sits in a log row" do
+        vm = Quickjs::VM.new
+        rows = []
+        vm.on_log { |l| rows << l.raw }
+
+        result = vm.eval_code("#{revoked} console.log([proxy], {p: proxy}); 'after'")
+
+        _(result).must_equal 'after'
+        _(rows).must_equal [[['(unrenderable value)'], {'p' => '(unrenderable value)'}]]
+      ensure
+        vm.dispose!
+      end
+
+      # Only the one refusal is substituted. A host failure met while walking a
+      # logged value is not the log path's to swallow.
+      it "still lets a host error out of a logged value" do
+        vm = Quickjs::VM.new
+        vm.on_log { |l| }
+        vm.define_function('boom') { raise IOError, 'host' }
+        vm.eval_code("globalThis.C = class { toJSON() { boom() } }")
+
+        error = _ { vm.eval_code("console.log({o: new C()}); 'after'") }.must_raise IOError
+        _(error.message).must_equal 'host'
+      ensure
+        vm.dispose!
+      end
+
       # The other way js_resolve_proxy answers -1. Reported rather than
       # swallowed for the same reason: it is what Array.isArray would have
       # said about the same value.

@@ -313,6 +313,11 @@ struct ConvState
   ConvFrame *frames;
   long frame_count;
   long frame_capacity;
+  // Set for the walk that builds a console row. A log line must not decide
+  // whether the statement after it runs, so a proxy this walk cannot resolve
+  // is substituted at whatever depth it is found rather than reported. Only
+  // that one refusal: a host error met on the way still comes back out.
+  bool substitute_unresolvable;
   ConvFrame frames_inline[CONV_FRAMES_INLINE];
 };
 
@@ -869,7 +874,7 @@ static VALUE js_bigint_conversion_run(VALUE r_conversion)
   return rb_funcall(rb_str_new2(js_hold_own_cstring(hold, msg)), rb_intern("to_i"), 0);
 }
 
-VALUE to_rb_value(JSContext *ctx, JSValue j_val)
+static VALUE to_rb_value_with(JSContext *ctx, JSValue j_val, bool substitute_unresolvable)
 {
   // Only object graphs need the bookkeeping, and only they can recurse, so
   // primitives convert straight through rather than paying for the state and
@@ -882,7 +887,19 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
   conv.frames = conv.frames_inline;
   conv.frame_count = 0;
   conv.frame_capacity = CONV_FRAMES_INLINE;
+  conv.substitute_unresolvable = substitute_unresolvable;
   return rb_ensure(conv_run, (VALUE)&conv, conv_release, (VALUE)&conv);
+}
+
+VALUE to_rb_value(JSContext *ctx, JSValue j_val)
+{
+  return to_rb_value_with(ctx, j_val, false);
+}
+
+// The conversion a console row is built with. See ConvState.
+static VALUE to_rb_value_for_log(JSContext *ctx, JSValue j_val)
+{
+  return to_rb_value_with(ctx, j_val, true);
 }
 
 static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
@@ -1021,7 +1038,12 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
     // and takes the exception off the context on the way.
     int is_array = JS_IsArray(ctx, j_val);
     if (is_array < 0)
-      return raise_js_exception(ctx); // raises
+    {
+      if (!conv->substitute_unresolvable)
+        return raise_js_exception(ctx); // raises
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      return rb_str_new2(QUICKJSRB_UNRENDERABLE);
+    }
     if (is_array)
     {
       r_result = js_array_to_rb(ctx, j_val, conv);
@@ -1583,22 +1605,14 @@ static VALUE r_build_log_row(VALUE r_build)
 
       r_raw = rb_str_new2(js_hold_format(hold, "%s: %s\n%s", errorClassName, errorClassMessage, stackTrace));
     }
-    else if (JS_IsArray(ctx, j_logged) < 0)
-    {
-      // Substituted here rather than left to the conversion, which now reports
-      // an unresolvable proxy instead of calling it an Array. A log line must
-      // not decide whether the statement after it runs, and this one would
-      // decide it twice over: the raise comes back to the guest as a catchable
-      // Error, which parks the Ruby exception in alive_objects until something
-      // throws it back, so a guest that catches its own console.log in a loop
-      // pins one per iteration. Same substitution the Promise above gets, and
-      // for the same reason.
-      JS_FreeValue(ctx, JS_GetException(ctx));
-      r_raw = rb_str_new2(QUICKJSRB_UNRENDERABLE);
-    }
     else
     {
-      r_raw = to_rb_value(ctx, j_logged);
+      // Substitutes an unresolvable proxy wherever in the graph it sits, the
+      // way the Promise above is substituted: the raise would otherwise come
+      // back to the guest as a catchable Error, whose Ruby exception is parked
+      // in alive_objects until something throws it back, so a guest that
+      // catches its own console.log in a loop pins one per iteration.
+      r_raw = to_rb_value_for_log(ctx, j_logged);
     }
     VALUE r_c = rb_str_new2(js_hold_cstring(hold, j_logged, QUICKJSRB_UNRENDERABLE));
 
