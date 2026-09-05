@@ -1586,6 +1586,10 @@ struct quickjsrb_log_call
   // Set when the budget lapsed inside one of the logged values; read back on
   // the QuickJS side of the protect, where it can be thrown as the interrupt.
   bool interrupted;
+  // Set when the heap ran out inside one of them, read back at the same
+  // place. The hold has already condemned the VM by then; what this carries is
+  // the news that the evaluation must stop now rather than at the next call.
+  bool oom;
 };
 
 struct log_row_build
@@ -1662,6 +1666,7 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
   // Copied before the listener runs, since a listener that raises unwinds
   // past everything after it.
   call->interrupted = build.hold.interrupted;
+  call->oom = build.hold.oom;
   r_call_log_listener(rb_ary_new3(2, data->log_listener, r_log_new(call->severity, r_row)));
   return Qnil;
 }
@@ -1671,9 +1676,25 @@ static VALUE r_build_and_dispatch_log(VALUE r_call)
 // JS exception instead of a cross-boundary longjmp.
 static JSValue js_quickjsrb_log_inner(JSContext *ctx, int argc, JSValueConst *argv, const char *severity)
 {
-  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED, false};
+  struct quickjsrb_log_call call = {ctx, argc, argv, severity, JS_UNDEFINED, false, false};
   int error;
   rb_protect(r_build_and_dispatch_log, (VALUE)&call, &error);
+  if (call.oom)
+  {
+    // Ahead of the lapse, as in the renderer: a heap that ran out is a fact
+    // about the VM rather than about this evaluation, and the VM is already
+    // condemned. Without this the evaluation ran on — QuickJS was never told
+    // its heap had run out, since the throw that said so was substituted away
+    // for the log row — and the refusal arrived only at the next call.
+    if (error)
+      rb_set_errinfo(Qnil);
+    // Uncatchable for the reason the lapse is: a catchable Error here is one
+    // the guest can swallow, and it would pin a Ruby exception in
+    // alive_objects per catch on a heap that has nothing left to give.
+    JS_ThrowInternalError(ctx, "out of memory");
+    JS_SetUncatchableException(ctx, TRUE);
+    return JS_EXCEPTION;
+  }
   if (call.interrupted)
   {
     // The lapse outranks a raise from the listener, as it does in the uncaught

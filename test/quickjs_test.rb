@@ -1131,6 +1131,63 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
+    # The log path has no renderer to report through, so the latch it sets was
+    # written and never read: the evaluation carried on over a heap that had
+    # already run out, and the refusal arrived only at the next call. The flag
+    # is carried out to the QuickJS side of the protect and thrown there, the
+    # same shape a lapsed budget takes.
+    it "stops the evaluation when the heap ran out inside a logged value" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      logged = []
+      vm.on_log {|log| logged << log.to_s }
+      reached = []
+      vm.define_function(:mark) {|m| reached << m }
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          const big = 'x'.repeat(480 * 1024);
+          console.log({toString() { return big + big }});
+          mark('after the log');
+          'returned';
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'out of memory'
+      _(reached).must_equal []
+      _(logged.first).must_equal '(unrenderable value)'
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
+    # Uncatchable, for the reason the lapse is: an error the guest can swallow
+    # is one it can go round again, and each catch would pin a Ruby exception
+    # in alive_objects on a heap with nothing left to give.
+    it "does not let the guest catch the out-of-memory thrown from the log path" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      vm.on_log {|log| }
+      reached = []
+      vm.define_function(:mark) {|m| reached << m }
+
+      error = _ do
+        vm.eval_code(<<~JS)
+          const big = 'x'.repeat(480 * 1024);
+          try {
+            console.log({toString() { return big + big }});
+          } catch (e) {
+            mark('swallowed');
+          }
+          'returned';
+        JS
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'out of memory'
+      _(reached).must_equal []
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
     it "still condemns the VM for an out-of-memory a getter hit during conversion" do
       vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
 
