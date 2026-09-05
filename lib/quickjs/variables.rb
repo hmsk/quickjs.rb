@@ -219,7 +219,7 @@ module Quickjs
         # `arguments` as assignment targets, which the declaration accepts, so a
         # strict assignment made those two names definable once and broken
         # afterwards.
-        eval_code("void (#{key} = #{literal});")
+        _eval_generated("void (#{key} = #{literal});")
       end
 
       # Only here, where a patched String#to_sym can decide nothing except what
@@ -259,67 +259,88 @@ module Quickjs
     # branches that act on an existing record ask the VM rather than believing
     # it, so a record that ran ahead of its declaration corrects itself on the
     # next define instead of standing for the life of the VM.
+    # Every evaluation of source this file generated goes through here, so that
+    # the translation below cannot be given to one caller and forgotten on
+    # another. It was, once: a fresh name refused with ArgumentError while a
+    # redefine of an existing one raised a raw Quickjs::SyntaxError, in the same
+    # band, for the same value.
+    #
+    # The Ruby walk is not the only stack this runs out of. On a Ruby thread,
+    # whose stack is a fraction of the main one, QuickJS clamps its own limit to
+    # the same headroom and the parser gives out first, where the walk still had
+    # room. A caller told to rescue ArgumentError got a Quickjs::SyntaxError
+    # instead, and on a worker thread that is fatal.
+    #
+    # Matching the message is safe in this one place, because the source being
+    # parsed is the one this file just built and has no call in it, so a parse
+    # error about it comes from the engine and describes our own literal.
+    def _eval_generated(source)
+      eval_code(source)
+    rescue Quickjs::SyntaxError => e
+      raise unless e.message.include?("stack overflow")
+
+      raise ::ArgumentError, "value nests too deeply to convert on this thread's stack"
+    end
     def _declare(declared, kind, key, literal)
-      declared[key] = kind
-      # What was confirmed before, so a declaration that did not run can be told
-      # from one that did. A failed declaration cannot have removed a binding an
-      # earlier one made, and clearing the record as though it had made the next
-      # define refuse a name whose binding was live the whole time.
+      # Both records as they stood, so an attempt that did not declare anything
+      # can put them back. A failed declaration cannot have removed a binding an
+      # earlier one made, and clearing the records as though it had made the
+      # next define refuse a name whose binding was live the whole time.
+      was_declared = declared[key]
       was_confirmed = _confirmed[key]
-      declared_ok = false
+      # The entry goes in before the eval: nothing can be relied on to run
+      # between the VM having the binding and the line that would say so.
+      declared[key] = kind
+      # What happened, rather than what was raised. The record standing is the
+      # default on purpose: it is written before the eval because nothing can be
+      # relied on to run between the VM having the binding and the line that
+      # would say so, and an exception that merely arrives during the call, like
+      # a trap handler's raise, must not undo that.
+      outcome = :stands
       begin
         ::Thread.handle_interrupt(::Exception => :never) do
-          eval_code("#{JS_KEYWORDS.fetch(kind)} #{key} = #{literal};")
-          declared_ok = true
+          _eval_generated("#{JS_KEYWORDS.fetch(kind)} #{key} = #{literal};")
+          outcome = :declared
         end
       rescue Quickjs::InterruptedError
-        # QuickJS created the binding and the interrupt landed before it was
-        # initialized, so a let or const name stays in the temporal dead zone for
-        # the life of the VM: reading it, assigning to it and redeclaring it all
-        # raise. Nothing here can undo that, so the next define is told why
-        # rather than being left to report a redeclaration.
-        #
-        # A var is left alone, since redeclaring one is legal JS and works.
-        declared[key] = kind == :var ? :var : :interrupted
+        outcome = :interrupted
         raise
-      rescue Quickjs::SyntaxError => e
-        # The Ruby walk is not the only stack this runs out of. On a Ruby thread,
-        # whose stack is a fraction of the main one, QuickJS clamps its own limit
-        # to the same headroom and the parser gives out first, in a band where
-        # the walk still had room. A caller told to rescue ArgumentError got a
-        # Quickjs::SyntaxError instead, and on a worker thread that is fatal.
-        #
-        # Matching the message is safe here in a way it would not be elsewhere:
-        # the source being parsed is the one this method just built, so a parse
-        # error about it comes from the engine and describes our own literal.
-        declared.delete(key)
-        raise unless e.message.include?("stack overflow")
-
-        raise ::ArgumentError, "value nests too deeply to convert on this thread's stack"
-      rescue Quickjs::RuntimeError
-        # The name is the caller's to use again. The source built here is a
-        # declaration of a literal, with no call in it, so the only ways the eval
-        # itself can fail are a parse error and out-of-memory, neither of which
-        # leaves a binding, and a var declaration refused by a non-extensible
-        # globalThis, which does not get that far either.
-        # A declaration whose initializer threw would leave a binding behind, but
-        # nothing here can generate one.
-        declared.delete(key)
+      rescue ::ArgumentError, ::ThreadError, ::NoMemoryError, Quickjs::RuntimeError
+        # Raised by the call, and each of them means the declaration did not
+        # take: a parse error, the stack overflow the evaluator translates, the
+        # VM refusing a second thread, or running out of memory. Listing them is
+        # what separates them from an exception that only arrived while the call
+        # was running, which says nothing about whether the declaration ran.
+        outcome = :failed
         raise
       ensure
-        # Keyed by kind, not just by name. The record is written before the eval,
-        # so a define of a different form that then fails would otherwise leave
-        # the previous form's confirmation standing for a name it never declared.
-        if declared_ok
+        case outcome
+        when :declared
+          # The declaration ran, so a global lexical binding exists and
+          # JavaScript never takes one away. Recorded by form as well as name, so
+          # a later define of a different form cannot inherit this one's claim.
           _confirmed[key] = kind
-        elsif was_confirmed
-          _confirmed[key] = was_confirmed
+        when :interrupted
+          # QuickJS created the binding and the interrupt landed before it was
+          # initialized, so a let or const name stays in the temporal dead zone
+          # for the life of the VM: reading it, assigning to it and redeclaring
+          # it all raise. Nothing here can undo that, so the next define is told
+          # why rather than being left to report a redeclaration. A var is left
+          # alone, since redeclaring one is legal JS and works.
+          declared[key] = kind == :var ? :var : :interrupted
+          was_confirmed.nil? ? _confirmed.delete(key) : _confirmed[key] = was_confirmed
+        when :failed
+          # Nothing was declared, so both records go back to what they were. A
+          # failed declaration cannot have removed a binding an earlier one made.
+          was_declared.nil? ? declared.delete(key) : declared[key] = was_declared
+          was_confirmed.nil? ? _confirmed.delete(key) : _confirmed[key] = was_confirmed
         else
-          _confirmed.delete(key)
+          # Whether it ran is unknown, so the record stands and the confirmation
+          # does not. The next define asks the VM rather than believing either.
+          was_confirmed.nil? ? _confirmed.delete(key) : _confirmed[key] = was_confirmed
         end
       end
-      key.to_sym
-    end
+      key.to_sym    end
 
     def _confirmed
       @_confirmed_variables ||= {}

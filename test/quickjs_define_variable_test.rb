@@ -524,20 +524,27 @@ describe "a value that expands past what the VM could hold" do
   it "does not carry one form's confirmation over to another" do
     vm = Quickjs::VM.new
     vm.define_var(:x, 1)
+    # ThreadError is raised by the VM before any JS runs, so the declaration
+    # this interrupts never took. One shot, so the define after it is ordinary.
+    fired = false
     vm.singleton_class.prepend(Module.new do
-      def eval_code(source, **options)
-        raise ThreadError, "injected" if source.start_with?("let x =")
+      define_method(:eval_code) do |source, **options|
+        if !fired && source.start_with?("let x =")
+          fired = true
+          raise ThreadError, "injected"
+        end
 
-        super
+        super(source, **options)
       end
     end)
     _ { vm.define_let(:x, 2) }.must_raise ThreadError
 
-    _ { vm.define_let(:x, 3) }.must_raise ArgumentError
+    # The var is still what the VM holds, and still what the records say.
+    err = _ { vm.define_let(:x, 3) }.must_raise ArgumentError
 
+    _(err.message).must_match(/already defined as a var/)
     _(vm.eval_code(%q{(function () { return this })().x})).must_equal 1
   end
-
   # A Ruby thread gets a fraction of the main stack, and QuickJS clamps its own
   # limit to the same headroom, so there is a band where the parser gives out
   # while the Ruby walk still had room. The caller is told to rescue
@@ -592,6 +599,61 @@ describe "a value that expands past what the VM could hold" do
     _(vm.eval_code("Number.isNaN(f)")).must_equal true
     _(vm.eval_code("typeof e.x")).must_equal "undefined"
     _(vm.eval_code("Number.isNaN(e.y)")).must_equal true
+  end
+
+  # The same band, on a name that already exists. Redefining does not go through
+  # the declaration, so the translation was there for a fresh name and missing
+  # for an existing one: the same value, the same thread, two different classes.
+  it "raises it for a redefine too, not only a first define" do
+    outcomes = [400, 550, 700, 900, 1500].flat_map do |depth|
+      value = (1..depth).reduce([1]) { |inner, _| [inner] }
+      %i[let var].map do |kind|
+        ::Thread.new do
+          vm = Quickjs::VM.new
+          vm.public_send(:"define_#{kind}", :deep, 1)
+          begin
+            vm.public_send(:"define_#{kind}", :deep, value)
+            :accepted
+          rescue ArgumentError
+            :refused
+          rescue StandardError => e
+            e.class
+          end
+        end.value
+      end
+    end
+
+    _(outcomes.uniq - [:accepted, :refused]).must_equal []
+    skip "nothing was deep enough to be refused here" unless outcomes.include?(:refused)
+  end
+
+  # The record of what was declared has to survive an attempt that declared
+  # nothing, or one refused define leaves the name reporting a raw
+  # Quickjs::SyntaxError instead of the ArgumentError the caller was told about.
+  it "keeps the record when a declaration is refused for being too deep" do
+    outcome = ::Thread.new do
+      vm = Quickjs::VM.new
+      vm.define_var(:x, 1)
+      deep = (1..650).reduce([1]) { |inner, _| [inner] }
+      begin
+        vm.define_let(:x, deep)
+      rescue ArgumentError
+      rescue StandardError
+        next :not_in_the_band
+      end
+
+      begin
+        vm.define_let(:x, 2)
+        :accepted
+      rescue ArgumentError
+        :refused
+      rescue StandardError => e
+        e.class
+      end
+    end.value
+
+    skip "650 levels was not in the band on this machine" if outcome == :not_in_the_band
+    _(outcome).must_equal :refused
   end
 
   # The guard asks the VM about its globals, and a VM that has stopped working
