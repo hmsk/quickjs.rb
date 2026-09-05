@@ -399,7 +399,10 @@ describe Quickjs do
           vm&.dispose!
         end
 
-        # The reason the substitution stops at the function branch.
+        # The reason the substitution stops at the function branch. Over an
+        # object target the same shape is still lost, but it is lost on main
+        # too: the unchecked rb_object_id read swallows the out-of-memory and
+        # JS_IsArray's own throw replaces it. That is #119, not this branch.
         it "still condemns the VM when the trap runs the heap out" do
           vm = Quickjs::VM.new(memory_limit: 8 * 1024 * 1024)
           vm.on_log { |l| }
