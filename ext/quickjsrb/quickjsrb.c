@@ -1583,6 +1583,19 @@ static VALUE r_build_log_row(VALUE r_build)
 
       r_raw = rb_str_new2(js_hold_format(hold, "%s: %s\n%s", errorClassName, errorClassMessage, stackTrace));
     }
+    else if (JS_IsArray(ctx, j_logged) < 0)
+    {
+      // Substituted here rather than left to the conversion, which now reports
+      // an unresolvable proxy instead of calling it an Array. A log line must
+      // not decide whether the statement after it runs, and this one would
+      // decide it twice over: the raise comes back to the guest as a catchable
+      // Error, which parks the Ruby exception in alive_objects until something
+      // throws it back, so a guest that catches its own console.log in a loop
+      // pins one per iteration. Same substitution the Promise above gets, and
+      // for the same reason.
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      r_raw = rb_str_new2(QUICKJSRB_UNRENDERABLE);
+    }
     else
     {
       r_raw = to_rb_value(ctx, j_logged);
