@@ -161,8 +161,10 @@ describe "crypto.subtle key management" do
       vm&.dispose!
     end
 
-    # A class held only by a constant table is movable, so caching the lookup
-    # in a C static would leave an address the collector has since reused.
+    # Guards against re-introducing a cache rather than pinning the lookup as
+    # it stands: a class held only by a constant table is movable, so a C
+    # static would keep an address the collector has since handed on. Passes
+    # either way today, since nothing is cached.
     it "keeps working across a compaction" do
       vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
       vm.eval_code("globalThis.k = await crypto.subtle.generateKey({name: 'HMAC', hash: 'SHA-256'}, true, ['sign', 'verify'])")

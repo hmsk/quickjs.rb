@@ -89,14 +89,22 @@ static void js_reject_with_ruby_error(JSContext *ctx, JSValueConst *resolving_fu
 // nothing beside the OpenSSL work every caller goes on to do.
 static VALUE r_crypto_key_class(void)
 {
+  // Gated too, though Init_quickjsrb defines it before any of this can run:
+  // the callers hold a promise and its two resolving functions across this
+  // call, so a NameError from here would take them with it, which is the whole
+  // thing this function is arranged to avoid.
+  if (!rb_const_defined_at(rb_cObject, rb_intern("Quickjs")))
+    return Qnil;
+
   VALUE r_quickjs = rb_const_get(rb_cObject, rb_intern("Quickjs"));
   if (!rb_const_defined_at(r_quickjs, rb_intern("CryptoKey")))
     return Qnil;
 
   VALUE r_class = rb_const_get(r_quickjs, rb_intern("CryptoKey"));
-  // Defined is not the same as a class. Anything else bound to that name makes
-  // rb_obj_is_kind_of raise TypeError, which is the unprotected raise this
-  // function exists not to make.
+  // Defined is not the same as a class. rb_obj_is_kind_of takes a class or a
+  // module and raises TypeError on anything else, so a String bound to the
+  // name would make the unprotected raise above; a Module would not raise but
+  // is not what a key is an instance of either. One predicate covers both.
   return RB_TYPE_P(r_class, T_CLASS) ? r_class : Qnil;
 }
 
