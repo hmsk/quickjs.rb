@@ -203,7 +203,10 @@ module Quickjs
             # because JavaScript will never accept this declaration at all,
             # which leaves it nothing, and then the assignment writes the
             # global instead.
-            _refuse_restricted_global(key, kind)
+            # A record we confirmed means our own binding is there and this is an
+            # ordinary redeclaration of it. Only an unconfirmed one can be sitting
+            # over a name JavaScript will never hand over.
+            _refuse_restricted_global(key, kind) unless _confirmed[key]
           end
         end
 
@@ -271,6 +274,7 @@ module Quickjs
         #
         # A var is left alone, since redeclaring one is legal JS and works.
         declared[key] = kind == :var ? :var : :interrupted
+        _confirmed.delete(key)
         raise
       rescue Quickjs::RuntimeError
         # The name is the caller's to use again. The source built here is a
@@ -281,9 +285,19 @@ module Quickjs
         # A declaration whose initializer threw would leave a binding behind, but
         # nothing here can generate one.
         declared.delete(key)
+        _confirmed.delete(key)
         raise
       end
+      # The declaration ran, so a global lexical binding exists, and JavaScript
+      # never takes one away again. Later refusals of a bare declaration of this
+      # name are redeclarations of our own binding rather than a name the VM
+      # cannot give us.
+      _confirmed[key] = true
       key.to_sym
+    end
+
+    def _confirmed
+      @_confirmed_variables ||= {}
     end
     # Whether the name resolves to a lexical binding: no property of the global
     # object could account for it, and it reads as something. Not decisive in
@@ -355,7 +369,10 @@ module Quickjs
           JS
         rescue Quickjs::InterruptedError
           raise
-        rescue Quickjs::RuntimeError
+        rescue Quickjs::RuntimeError => err
+          # As above: a failing VM is not a fact about this name.
+          raise if err.js_name.nil?
+
           true
         end
       return if restricted == false
@@ -424,6 +441,13 @@ module Quickjs
     rescue Quickjs::InterruptedError
       raise
     rescue Quickjs::RuntimeError => e
+      # A JS exception carries the name of the class it was thrown as, and one
+      # the engine raised on its own does not. Only the first kind is the guest
+      # having taken the probe apart; the second is the VM failing, and telling
+      # the caller that their globals are the problem while the VM is dead is
+      # the opposite of useful.
+      raise if e.js_name.nil?
+
       raise ::ArgumentError,
         "cannot define var #{key}: asking this VM about its globals failed with #{e.class}. " \
         "Replacing Object, or any of the methods this asks it for, does this"
@@ -532,19 +556,39 @@ module Quickjs
       INTEGER_TO_S.bind_call(value)
     end
 
+    # `undefined`, `NaN` and `Infinity` are not literals in JavaScript, they are
+    # properties of the global object, and QuickJS lets a guest redefine them
+    # with defineProperty even though the spec says it should not. Writing them
+    # by name handed the guest the value: a const of Value::UNDEFINED came back
+    # as whatever the guest had put there, at any depth, and came back to Ruby
+    # that way too. That is the one thing const and let are supposed to be safe
+    # from, since neither touches globalThis.
+    #
+    # The declaration forms are refused by QuickJS, which is what made this look
+    # settled: `let NaN = 5` is a SyntaxError. defineProperty is not.
+    #
+    # Operators and numeric literals resolve through no scope chain, so nothing
+    # the guest can reach decides what these mean.
+    JS_SPELLED_FLOATS = {
+      "Infinity" => "(1/0)",
+      "-Infinity" => "(-1/0)",
+      "NaN" => "(0/0)",
+    }.freeze
+
     # nan?, infinite? and positive? were each dispatched on the caller's Float
     # to pick between three fixed strings, which is a branch the value decided.
-    # They were also unnecessary: Float#to_s already spells those three exactly
-    # as JavaScript does.
+    # They were also unnecessary: Float#to_s already picks those three out.
     def self._js_float_literal(value)
-      FLOAT_TO_S.bind_call(value)
+      spelled = FLOAT_TO_S.bind_call(value)
+      JS_SPELLED_FLOATS.fetch(spelled, spelled)
     end
 
     # `Quickjs::Value::UNDEFINED` and `NAN` are plain Symbols, so they have to
     # be recognized before the generic Symbol case. Every other Symbol becomes
     # a string, matching how the C converter treats Symbols returned from a
     # `define_function` block.
-    JS_SPELLED_SYMBOLS = { Value::UNDEFINED => "undefined", Value::NAN => "NaN" }
+    # Spelled with operators for the same reason as the floats above.
+    JS_SPELLED_SYMBOLS = { Value::UNDEFINED => "(void 0)", Value::NAN => "(0/0)" }
                           .compare_by_identity.freeze
 
     def self._js_symbol_literal(value, budget = nil)

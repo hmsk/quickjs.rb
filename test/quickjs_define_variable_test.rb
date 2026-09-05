@@ -210,7 +210,13 @@ describe "VM#define_const / #define_let / #define_var" do
 
       _(@vm.eval_code("typeof globalThis.pwned")).must_equal "undefined"
     end
-    it "allows $ and _ as identifier characters" do
+      it "refuses a name with anything after the identifier" do
+      # \z rather than \Z: the pattern is the whole security story for names,
+      # and \Z would let a trailing newline through.
+      _ { @vm.define_const("x\n", 1) }.must_raise ArgumentError
+      _ { @vm.define_const("x\ny", 1) }.must_raise ArgumentError
+    end
+  it "allows $ and _ as identifier characters" do
       @vm.define_const(:$_x1, 1)
 
       _(@vm.eval_code("$_x1")).must_equal 1
@@ -492,6 +498,77 @@ describe "a value that expands past what the VM could hold" do
     _(vm.eval_code("1 + 1")).must_equal 2
   end
 
+  # undefined, NaN and Infinity are not literals in JavaScript, they are
+  # properties of the global object, and QuickJS lets a guest redefine them
+  # with defineProperty even though the spec says it should not. Writing them
+  # by name handed the guest the value, at any depth, for const and let as much
+  # as var. The declaration forms are refused, which is what made this look
+  # settled for a long time: `let NaN = 5` is a SyntaxError, defineProperty is
+  # not.
+  it "spells the four global-named values so a guest cannot redefine them" do
+    vm = Quickjs::VM.new
+    vm.eval_code(<<~JS)
+      Object.defineProperty(globalThis, "undefined", { value: { stolen: true } });
+      Object.defineProperty(globalThis, "NaN", { value: 999 });
+      Object.defineProperty(globalThis, "Infinity", { value: -1 });
+    JS
+
+    vm.define_const(:a, Quickjs::Value::UNDEFINED)
+    vm.define_const(:b, Quickjs::Value::NAN)
+    vm.define_const(:c, Float::INFINITY)
+    vm.define_const(:d, -Float::INFINITY)
+    vm.define_const(:e, { "x" => Quickjs::Value::UNDEFINED })
+
+    _(vm.eval_code("typeof a")).must_equal "undefined"
+    _(vm.eval_code("Number.isNaN(b)")).must_equal true
+    _(vm.eval_code("c")).must_equal Float::INFINITY
+    _(vm.eval_code("d")).must_equal(-Float::INFINITY)
+    _(vm.eval_code("typeof e.x")).must_equal "undefined"
+  end
+
+  # The guard asks the VM about its globals, and a VM that has stopped working
+  # will fail that question for reasons that have nothing to do with globals.
+  # Reporting a dead VM as an ArgumentError about the caller's name is the
+  # mistake the const branch already has a test against.
+  it "does not report a poisoned VM as a problem with the global" do
+    vm = Quickjs::VM.new(memory_limit: 2 * 1024 * 1024, timeout_msec: 30_000)
+    begin
+      vm.eval_code("globalThis.hold = []; for (;;) { hold.push(new Array(64).fill(0)); }")
+    rescue Quickjs::RuntimeError
+    end
+
+    err = _ { vm.define_var(:x, 1) }.must_raise Quickjs::RuntimeError
+
+    _(err.message).must_match(/poisoned/)
+  end
+
+  # Refusing a name the VM can never give us must not refuse the ones it
+  # already gave us. A binding we declared is there for good, so a later
+  # refusal of the bare declaration is a redeclaration of our own.
+  it "still redefines a let the guest has shadowed with a fixed global" do
+    vm = Quickjs::VM.new
+    vm.define_let(:cfg, 1)
+    vm.eval_code(<<~JS)
+      Object.defineProperty(globalThis, "cfg", {
+        value: "guest", configurable: false, writable: true, enumerable: true,
+      });
+    JS
+
+    vm.define_let(:cfg, 2)
+
+    _(vm.eval_code("cfg")).must_equal 2
+    _(vm.eval_code(%q{(function () { return this })().cfg})).must_equal "guest"
+  end
+
+  it "still redefines one when the VM cannot be asked about it" do
+    vm = Quickjs::VM.new
+    vm.define_let(:u, Quickjs::Value::UNDEFINED)
+    vm.eval_code("Object = null;")
+
+    vm.define_let(:u, 2)
+
+    _(vm.eval_code("u")).must_equal 2
+  end
   # A non-configurable property of the global object makes a lexical
   # declaration of that name impossible for good, and a guest top-level `var`
   # creates exactly that shape. Letting the refusal pass left nothing for the
