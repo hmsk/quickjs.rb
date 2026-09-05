@@ -3580,6 +3580,12 @@ static VALUE vm_m_defineGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
+  // The one entry point that opened no scope. Two things followed: it ran on a
+  // condemned VM instead of refusing, and the readers it reaches through its
+  // own JS_Eval measured against whatever call last opened a scope, so a
+  // refusal an earlier call had already recovered from could be reported here
+  // as this one running out.
+  enter_oom_scope(data);
   check_no_gvl_release_in_flight(data);
 
   struct define_function_call call = {

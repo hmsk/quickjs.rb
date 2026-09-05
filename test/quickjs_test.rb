@@ -1194,6 +1194,20 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
+    # define_function evaluates JS and renders what that evaluation throws, so
+    # it belongs with the entry points that refuse a condemned VM rather than
+    # with the ones that only read.
+    it "refuses define_function on a VM the heap has condemned" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      _ { vm.eval_code('new Array(2_000_000).fill(0); void 0') }.must_raise Quickjs::RuntimeError
+      _(vm.memory_poisoned?).must_equal true
+
+      error = _ { vm.define_function(:hello) { 1 } }.must_raise Quickjs::RuntimeError
+      _(error.message).must_match(/poisoned/)
+    ensure
+      vm.dispose!
+    end
+
     # Scoped to the call rather than to the VM: a guest that runs out, catches
     # it and returns is left alone, which is what it was before the allocator
     # was ours. The scope is what makes that possible to say at all.
