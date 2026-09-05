@@ -191,6 +191,18 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
       VMData *data = JS_GetContextOpaque(ctx);
       VALUE r_key = INT2NUM(errorOriginalRubyObjectId);
       VALUE r_error = rb_hash_aref(data->alive_objects, r_key);
+      // alive_objects anchors three unrelated things: a bridged exception,
+      // waiting to be thrown back, and the Ruby objects behind a File or a
+      // CryptoKey proxy, which stay reachable for as long as the guest holds
+      // the proxy. Only the first is this function's to take. The id is an
+      // ordinary property the guest can write, so without the check a script
+      // that copies a live proxy's id onto anything throwable severs that
+      // proxy: the entry is deleted, and every property of the File it stood
+      // for reads back as undefined while the object still passes
+      // `instanceof File`. Leaving a foreign entry anchored is the same
+      // answer as never having matched.
+      if (!rb_obj_is_kind_of(r_error, rb_eException))
+        return Qnil;
       rb_hash_delete(data->alive_objects, r_key);
       return r_error;
     }

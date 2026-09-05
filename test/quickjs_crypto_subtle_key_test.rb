@@ -121,4 +121,25 @@ describe "crypto.subtle key management" do
       _ { ::Quickjs.eval_code(code, @options) }.must_raise Quickjs::RuntimeError
     end
   end
+
+  # A CryptoKey publishes its rb_object_id to the guest, and a thrown error
+  # carrying that id used to reach the table the exception bridge reads, which
+  # deletes what it finds. The key survived as an object and failed every
+  # operation with "invalid CryptoKey".
+  describe "when the guest throws the key's own rb_object_id" do
+    it "leaves the key usable" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      vm.eval_code("globalThis.k = await crypto.subtle.generateKey({name: 'HMAC', hash: 'SHA-256'}, true, ['sign', 'verify'])")
+      sign = "(await crypto.subtle.sign('HMAC', globalThis.k, new Uint8Array([1, 2, 3]))).byteLength"
+      _(vm.eval_code(sign)).must_equal 32
+
+      error = _ { vm.eval_code("throw Object.assign(new Error('guest'), {rb_object_id: globalThis.k.rb_object_id})") }
+        .must_raise Quickjs::RuntimeError
+      _(error.message).must_equal 'guest'
+
+      _(vm.eval_code(sign)).must_equal 32
+    ensure
+      vm.dispose!
+    end
+  end
 end

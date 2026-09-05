@@ -485,6 +485,35 @@ describe "RubyFileProxy" do
       _(result).must_include '#<File:'
     end
   end
+
+  # The proxy publishes its rb_object_id to the guest, and a thrown error
+  # carrying that id used to reach the same table the exception bridge reads,
+  # which deletes what it finds. The File stayed an instance of File and
+  # answered undefined for everything.
+  describe "when the guest throws the proxy's own rb_object_id" do
+    before do
+      @vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      @vm.define_function(:get_file) { @file }
+      @vm.eval_code('globalThis.h = get_file();')
+    end
+
+    after { @vm.dispose! }
+
+    it "leaves the file readable" do
+      _ { @vm.eval_code('throw Object.assign(new Error("guest"), {rb_object_id: globalThis.h.rb_object_id})') }
+        .must_raise Quickjs::RuntimeError
+
+      _(@vm.eval_code('globalThis.h.name')).must_equal File.basename(@file.path)
+      _(@vm.eval_code('globalThis.h.size')).must_equal 'hello world'.bytesize
+    end
+
+    it "reports the forged throw as the guest's own error" do
+      error = _ { @vm.eval_code('throw Object.assign(new Error("guest"), {rb_object_id: globalThis.h.rb_object_id})') }
+        .must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'guest'
+    end
+  end
 end
 
 describe "JS File to Ruby" do
