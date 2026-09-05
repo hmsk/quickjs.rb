@@ -112,7 +112,8 @@ module Quickjs
         end
 
         raise ::ArgumentError,
-          "#{key} is already defined as a #{existing}; it cannot be redefined as a #{kind}"      elsif kind == :const
+          "#{key} is already defined as a #{existing}; it cannot be redefined as a #{kind}"
+      elsif kind == :const
         # Same question, and the same reason not to ask it by provoking a parse
         # error: a refusal is not a place to emit a console.error the caller
         # never wrote. If the name reads as something no `globalThis` property
@@ -269,6 +270,27 @@ module Quickjs
       end
       key.to_sym
     end
+    # Whether the name resolves to a lexical binding: no property of the global
+    # object could account for it, and it reads as something. Not decisive in
+    # both directions, and does not have to be. A false answer only means the
+    # caller pays for the declaration that asks properly.
+    def _live_lexical?(key)
+      eval_code(<<~JS) == true
+        (() => {
+          // The same real global the guard below reads, for the same reason. It
+          // read the `globalThis` property until now, which is writable, so a
+          // decoy made this answer "live lexical" about a property of the real
+          // global. The declaration was then skipped and the assignment wrote
+          // that property: a define_let on globalThis, which is the one thing
+          // this form promises does not happen. It also threw outright once
+          // `globalThis` was a number, which define_var(:globalThis, 1) makes
+          // it, and let a guest accessor answer for a const that was not there.
+          const root = (function () { return this })();
+          if (typeof root !== 'object' || root === null) return false;
+          return !(#{::JSON.generate(::String.new(key))} in root) && typeof #{key} !== 'undefined';
+        })()
+      JS
+    end
     # `var` is the only form that lands on `globalThis`, so it is the only one a
     # property already sitting there can intercept. An accessor takes the value
     # in its setter and hands JS back whatever its getter likes; a non-writable
@@ -283,15 +305,6 @@ module Quickjs
     # VM that has evaluated untrusted JavaScript owns its own environment, and
     # there is no way to hand a value into it unobserved. Define before running
     # code you do not control.
-    # Whether the name resolves to a lexical binding: no `globalThis` property
-    # could account for it, and it reads as something. The property test comes
-    # first so that `&&` short-circuits before `typeof` can read a name that is
-    # only a global, which would run a guest accessor's getter. Not decisive
-    # in both directions, and does not have to be. A false answer only means the
-    # caller pays for the declaration that asks properly.
-    def _live_lexical?(key)
-      eval_code("!(#{::JSON.generate(::String.new(key))} in globalThis) && typeof #{key} !== 'undefined'") == true
-    end
     def _refuse_unusable_global(key)
       state = eval_code(<<~JS)
         (() => {
@@ -439,9 +452,9 @@ module Quickjs
       ::JSON.generate(::String.new(value))
     end
 
-    # A bignum costs its digits to render, and it takes more than four bits to
-    # carry a decimal digit, so anything past four times the budget in bits
-    # cannot come in under it. Deliberately loose: this refuses only what is
+    # A bignum costs its digits to render, and a decimal digit costs about 3.32
+    # bits, so four bits per digit is more than any number needs: anything past
+    # four times the budget in bits has more digits than the budget allows. Deliberately loose: this refuses only what is
     # certainly too large, and the finished literal is measured as before.
     def self._js_integer_literal(value, budget)
       _over_budget!(budget) if budget && BIT_LENGTH.bind_call(value) / 4 > budget

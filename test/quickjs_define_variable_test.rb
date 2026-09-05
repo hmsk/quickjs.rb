@@ -1231,12 +1231,62 @@ describe "when the VM can no longer answer about its own globals" do
   # replaced either has taken the check away from itself. Both used to end in
   # a define that reported success it did not have, or in an error naming
   # nothing.
-  it "refuses once globalThis has been replaced" do
+  # The probe reads the real global object rather than the `globalThis`
+  # property, so replacing that property no longer blinds it: it sees the
+  # accessor and says so. The message is what distinguishes the two, since a
+  # bare ArgumentError would also be what a blinded probe raised.
+  it "still sees the accessor once globalThis has been replaced" do
     vm = Quickjs::VM.new
     vm.eval_code("Object.defineProperty(globalThis, 'acc', { configurable: true, set(v) {}, get() { return 7 } });")
     vm.define_var(:globalThis, 1)
 
-    _ { vm.define_var(:acc, 5) }.must_raise ArgumentError
+    err = _ { vm.define_var(:acc, 5) }.must_raise ArgumentError
+
+    _(err.message).must_match(/accessor/)
+  end
+
+  # Every redefine consults the liveness check, and it read the `globalThis`
+  # property while the guard above had moved to the real global. A decoy split
+  # them: the check reported a property of the real global as a lexical
+  # binding, the declaration that would have made one was skipped, and the
+  # assignment wrote the property. A let on globalThis, which is the one thing
+  # this form promises does not happen.
+  it "keeps a let off a globalThis that has been pointed at a decoy" do
+    vm = Quickjs::VM.new(timeout_msec: 60_000)
+    vm.eval_code("globalThis.owned = 'guest'; globalThis = {};")
+    vm.define_let(:warm, 1)
+    busy = ::Thread.new do
+      vm.eval_code("let s = 0; for (let i = 0; i < 60000000; i++) s += i; s")
+    rescue StandardError
+      nil
+    end
+    sleep 0.05
+    begin
+      vm.define_let(:owned, 1)
+    rescue ThreadError
+    end
+    busy.join
+    real = "(function () { return this })()"
+    skip "the define was not refused in the window" unless vm.eval_code("typeof owned") == "string"
+
+    vm.define_let(:owned, 42)
+
+    _(vm.eval_code("owned")).must_equal 42
+    _(vm.eval_code("#{real}.owned")).must_equal "guest"
+  end
+
+  # define_var(:globalThis, 1) is documented as succeeding, and it made every
+  # later redefine throw `invalid 'in' operand` out of an internal probe.
+  it "keeps working once globalThis is not an object at all" do
+    vm = Quickjs::VM.new
+    vm.define_var(:globalThis, 1)
+    vm.define_let(:y, 1)
+    vm.define_const(:k, 1)
+
+    vm.define_let(:y, 2)
+
+    _(vm.eval_code("y")).must_equal 2
+    _ { vm.define_const(:k, 2) }.must_raise ArgumentError
   end
 
   it "refuses once Object has been replaced, and says why" do
