@@ -979,7 +979,15 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
           if (JS_IsArray(ctx, j_val) < 0)
           {
             JS_FreeValue(ctx, JS_GetException(ctx));
+            // The trap that revoked can have raised on the way, and a throw
+            // carrying a Ruby exception is a bridge reporting a host failure:
+            // it has to come back out, and find_ruby_error is the only thing
+            // that takes it out of alive_objects, so discarding it would pin
+            // it for the life of the VM at a rate the guest picks.
+            VALUE r_ruby_error = find_ruby_error(ctx, j_pending);
             JS_FreeValue(ctx, j_pending);
+            if (!NIL_P(r_ruby_error))
+              rb_exc_raise(r_ruby_error);
             conv_frame_pop(conv);
             return rb_str_new2(QUICKJSRB_UNRENDERABLE);
           }
@@ -1008,7 +1016,15 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
           if (JS_IsArray(ctx, j_val) < 0)
           {
             JS_FreeValue(ctx, JS_GetException(ctx));
+            // The trap that revoked can have raised on the way, and a throw
+            // carrying a Ruby exception is a bridge reporting a host failure:
+            // it has to come back out, and find_ruby_error is the only thing
+            // that takes it out of alive_objects, so discarding it would pin
+            // it for the life of the VM at a rate the guest picks.
+            VALUE r_ruby_error = find_ruby_error(ctx, j_pending);
             JS_FreeValue(ctx, j_pending);
+            if (!NIL_P(r_ruby_error))
+              rb_exc_raise(r_ruby_error);
             conv_frame_pop(conv);
             return rb_str_new2(QUICKJSRB_UNRENDERABLE);
           }
@@ -1093,6 +1109,11 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
       // and one of them may revoke the proxy it was asked about. The r_seen
       // marking is undone so a second occurrence substitutes too rather than
       // reading as the cycle nil is reserved for.
+      //
+      // Not the last word either: js_is_plain_object and the walkers below run
+      // traps of their own, and a proxy that waits until one of those still
+      // converts to an empty container, because those reads are unchecked.
+      // That is #119 rather than the tri-state this branch is about.
       if (conv->substitute_unresolvable)
       {
         JS_FreeValue(ctx, JS_GetException(ctx));

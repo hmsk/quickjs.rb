@@ -394,6 +394,31 @@ describe Quickjs do
           vm&.dispose!
         end
 
+        # The throw held aside while the proxy is asked about can be a bridge
+        # reporting a host failure. Discarding it would swallow the error and
+        # leave the Ruby exception parked in alive_objects, which only
+        # find_ruby_error takes it out of.
+        it "still reports a host error raised by the revoking trap itself" do
+          vm = Quickjs::VM.new
+          vm.on_log { |l| }
+          vm.define_function('boom') { raise IOError, 'host' }
+          vm.eval_code(<<~JS)
+            globalThis.mk = () => {
+              let rev;
+              const t = function(){};
+              const p = new Proxy(t, { get(x, k) { if (rev) { rev(); rev = null; boom() } return x[k] } });
+              const r = Proxy.revocable(p, {});
+              rev = r.revoke;
+              return r.proxy;
+            };
+          JS
+
+          error = _ { vm.eval_code("console.log(mk()); 'after'") }.must_raise IOError
+          _(error.message).must_equal 'host'
+        ensure
+          vm&.dispose!
+        end
+
         # The substitution is for the proxy refusing, not for every throw the
         # same read can carry.
         it "still lets a host error out of a function's toString" do
