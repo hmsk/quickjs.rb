@@ -354,7 +354,7 @@ vm.define_function(["a", "b", "c", "double"]) { |x| x * 2 }
 vm.eval_code("a.b.c.double(21)") #=> 42
 ```
 
-`define_function` returns the registered name as a `Symbol` (or an `Array` of `Symbol`s for array paths).
+`define_function` returns the registered name as a `Symbol` (or an `Array` of `Symbol`s for array paths). Resolving an array path runs JS — the first segment is evaluated, so a `const` binding works as well as a global, and any segment can be a getter — so an error met on the way is reported as itself: a getter that throws raises the matching `Quickjs::*Error`, one of your own bridges raising inside it raises your exception, and a lapsed `timeout_msec` raises `Quickjs::InterruptedError`. A segment that resolves to a non-object raises `ArgumentError`. A target that refuses the property — a frozen object, or a setter that throws — raises the JS error rather than reporting success, and nothing is registered.
 
 A Ruby exception raised inside the block is catchable in JS as an `Error`, and propagates back to Ruby as the original exception type if uncaught in JS.
 
