@@ -644,18 +644,43 @@ describe "a value that expands past what the VM could hold" do
 
       begin
         vm.define_let(:x, 2)
-        :accepted
-      rescue ArgumentError
-        :refused
+        [:accepted, nil]
+      rescue ArgumentError => e
+        [:refused, e.message]
       rescue StandardError => e
-        e.class
+        [e.class, e.message]
       end
     end.value
+    outcome, outcome_message = outcome
 
     skip "650 levels was not in the band on this machine" if outcome == :not_in_the_band
     _(outcome).must_equal :refused
+    _(outcome_message).must_match(/already defined as a var/)
   end
 
+  # The guard tells the guest having taken it apart from the VM failing under
+  # it by the error class, because a JS error maps to the Ruby class matching
+  # its kind and the engine's own failures do not. Asking whether the error
+  # carried a JS name instead let the first out-of-memory through: that one is
+  # a named InternalError, and only the refusals after it are unnamed.
+  it "does not report an out-of-memory inside the probe as a bad global" do
+    vm = Quickjs::VM.new(memory_limit: 2 * 1024 * 1024)
+    # Caught in JS, so the VM is not poisoned and the next allocation to fail is
+    # the probe's own.
+    vm.eval_code("globalThis.h = []; try { for (;;) h.push(new Array(64).fill(0)); } catch (e) {}")
+
+    _ { vm.define_var(:x, 1) }.must_raise Quickjs::RuntimeError
+  end
+
+  # A guest that has taken the probe apart still gets the readable refusal.
+  it "still names the globals when the guest broke the probe" do
+    vm = Quickjs::VM.new
+    vm.eval_code("Object.getOwnPropertyDescriptor = () => { throw new RangeError('nope') };")
+
+    err = _ { vm.define_var(:x, 1) }.must_raise ArgumentError
+
+    _(err.message).must_match(/globals/)
+  end
   # The guard asks the VM about its globals, and a VM that has stopped working
   # will fail that question for reasons that have nothing to do with globals.
   # Reporting a dead VM as an ArgumentError about the caller's name is the

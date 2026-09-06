@@ -197,6 +197,12 @@ module Quickjs
         elsif !_live_lexical?(key)
           begin
             eval_code("#{JS_KEYWORDS.fetch(kind)} #{key};")
+            # It just made the binding, so say so. Only _declare recorded this.
+            # No test reaches the difference: for it to matter the binding would
+            # have to be one this line created and also one a global of that name
+            # prevents, and those cannot both be true. Recorded anyway, because
+            # the record is supposed to mean what happened.
+            _confirmed[key] = kind
           rescue Quickjs::SyntaxError
             # Refused because the binding is already there, which is the
             # ordinary case and leaves the assignment something to find. Or
@@ -259,11 +265,16 @@ module Quickjs
     # branches that act on an existing record ask the VM rather than believing
     # it, so a record that ran ahead of its declaration corrects itself on the
     # next define instead of standing for the life of the VM.
-    # Every evaluation of source this file generated goes through here, so that
+    # Every evaluation of a generated value literal goes through here, so that
     # the translation below cannot be given to one caller and forgotten on
     # another. It was, once: a fresh name refused with ArgumentError while a
     # redefine of an existing one raised a raw Quickjs::SyntaxError, in the same
     # band, for the same value.
+    #
+    # The probes and the bare declarations do not come through here, and should
+    # not: they are a few lines each, they cannot plausibly overflow a stack the
+    # literal did not, and a stack overflow in one of them would not mean the
+    # value nests too deeply.
     #
     # The Ruby walk is not the only stack this runs out of. On a Ruby thread,
     # whose stack is a fraction of the main one, QuickJS clamps its own limit to
@@ -416,8 +427,8 @@ module Quickjs
         rescue Quickjs::InterruptedError
           raise
         rescue Quickjs::RuntimeError => err
-          # As above: a failing VM is not a fact about this name.
-          raise if err.js_name.nil?
+          # As above: the engine failing is not a fact about this name.
+          raise if err.instance_of?(Quickjs::RuntimeError)
 
           true
         end
@@ -487,12 +498,18 @@ module Quickjs
     rescue Quickjs::InterruptedError
       raise
     rescue Quickjs::RuntimeError => e
-      # A JS exception carries the name of the class it was thrown as, and one
-      # the engine raised on its own does not. Only the first kind is the guest
-      # having taken the probe apart; the second is the VM failing, and telling
-      # the caller that their globals are the problem while the VM is dead is
-      # the opposite of useful.
-      raise if e.js_name.nil?
+      # Only an error the guest can have thrown becomes an ArgumentError about
+      # their globals. A JS error maps to the Ruby class matching its own kind,
+      # so anything that arrives as the base class is either the engine failing
+      # on its own — out of memory, stack overflow — or something thrown with a
+      # name nothing maps to.
+      #
+      # An earlier version asked whether the error carried a JS class name at
+      # all. That was wrong: the first out-of-memory arrives as a named
+      # InternalError and only the refusals after it are unnamed, so the one
+      # that lands inside this probe was reported to the caller as a problem
+      # with their globals, on a VM that had just run out of memory.
+      raise if e.instance_of?(Quickjs::RuntimeError)
 
       raise ::ArgumentError,
         "cannot define var #{key}: asking this VM about its globals failed with #{e.class}. " \
