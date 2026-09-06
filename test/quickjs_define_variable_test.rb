@@ -658,6 +658,41 @@ describe "a value that expands past what the VM could hold" do
     _(outcome_message).must_match(/already defined as a var/)
   end
 
+  # The redefine path declares a binding of its own, and only the declaration
+  # method used to record that. The two are not the same moment: a guest can fix
+  # a global of that name afterwards, and then the next redefine, unable to tell
+  # the binding is ours, refuses a name this path already gave the caller.
+  it "records a binding the redefine path declared, not only the declaration" do
+    vm = Quickjs::VM.new
+    # A record standing for a declaration that never ran, so the redefine path
+    # is the one that declares.
+    vm.instance_variable_set(:@_defined_variables, { "cfg" => :let })
+    vm.define_let(:cfg, 1)
+    vm.eval_code(<<~JS)
+      Object.defineProperty(globalThis, "cfg", {
+        value: "guest", configurable: false, writable: true, enumerable: true,
+      });
+    JS
+
+    vm.define_let(:cfg, 2)
+
+    _(vm.eval_code("cfg")).must_equal 2
+    _(vm.eval_code(%q{(function () { return this })().cfg})).must_equal "guest"
+  end
+
+  # A guest throwing anything at all still gets the readable refusal. Only seven
+  # names map to a Ruby subclass, so asking whether the error arrived as one
+  # missed `new Error`, which is the most ordinary throw there is.
+  it "names the globals whatever the guest threw" do
+    %w[Error TypeError RangeError].each do |js_class|
+      vm = Quickjs::VM.new
+      vm.eval_code("Object.getOwnPropertyDescriptor = () => { throw new #{js_class}('no') };")
+
+      err = _ { vm.define_var(:x, 1) }.must_raise ArgumentError
+
+      _(err.message).must_match(/globals/)
+    end
+  end
   # The guard tells the guest having taken it apart from the VM failing under
   # it by the error class, because a JS error maps to the Ruby class matching
   # its kind and the engine's own failures do not. Asking whether the error
@@ -1319,19 +1354,11 @@ describe "values the serializer must not take at face value" do
   # went on refusing it for the life of the VM.
   it "lets a form change through when the other form is not really there" do
     vm = Quickjs::VM.new(timeout_msec: 60_000)
-    vm.define_let(:warm, 1)
-    busy = ::Thread.new do
-      vm.eval_code("let s = 0; for (let i = 0; i < 60000000; i++) s += i; s")
-    rescue StandardError
-      nil
-    end
-    sleep 0.05
-    begin
-      vm.define_let(:n, 1)
-    rescue ThreadError
-    end
-    busy.join
-    skip "the define was not refused in the window" unless vm.eval_code("typeof n") == "undefined"
+    # The record standing ahead of a declaration that never ran, written
+    # directly. Racing a busy VM for it stopped working once ThreadError was
+    # classified as "nothing was declared": the rollback is right, so the race
+    # left no record and this ran the ordinary fresh-define path instead.
+    vm.instance_variable_set(:@_defined_variables, { "n" => :let })
 
     vm.define_var(:n, 7)
 
@@ -1387,22 +1414,11 @@ describe "values the serializer must not take at face value" do
   it "keeps a let off globalThis even when the guest owns that name" do
     vm = Quickjs::VM.new(timeout_msec: 60_000)
     vm.eval_code("globalThis.owned = 'guest';")
-    vm.define_let(:warm, 1)
-    # The record has to be ahead of a declaration that never ran, since that is
-    # the only state in which the assignment meets a name with no binding. Same
-    # way the test above produces it.
-    busy = ::Thread.new do
-      vm.eval_code("let s = 0; for (let i = 0; i < 60000000; i++) s += i; s")
-    rescue StandardError
-      nil
-    end
-    sleep 0.05
-    begin
-      vm.define_let(:owned, 1)
-    rescue ThreadError
-    end
-    busy.join
-    skip "the define was not refused in the window" unless vm.eval_code("typeof owned") == "string"
+    # The record standing ahead of a declaration that never ran, written
+    # directly. Racing a busy VM for it stopped working once ThreadError was
+    # classified as "nothing was declared": the rollback is right, so the race
+    # left no record and this ran the ordinary fresh-define path instead.
+    vm.instance_variable_set(:@_defined_variables, { "owned" => :let })
 
     vm.define_let(:owned, 42)
 
@@ -1447,25 +1463,14 @@ describe "values the serializer must not take at face value" do
   # VM refusing a second define, or quietly turning a let into a global, are
   # both worse than what the ordering was introduced to fix.
   it "corrects a record that ran ahead of its declaration" do
-    reached = 0
-    # const and let only. A var probes globalThis before it declares, and that
-    # probe is the eval that raises, so no record is ever recorded ahead.
+    # const and let only. A var probes globalThis before it declares, so its
+    # record is never written ahead of anything.
     %i[const let].each do |kind|
-      vm = Quickjs::VM.new(timeout_msec: 60_000)
-      vm.define_let(:warm, 1)
-      busy = ::Thread.new do
-        vm.eval_code("let s = 0; for (let i = 0; i < 60000000; i++) s += i; s")
-      rescue StandardError
-        nil
-      end
-      sleep 0.05
-      begin
-        vm.public_send(:"define_#{kind}", :cfg, 1)
-      rescue ThreadError
-      end
-      busy.join
-      reached += 1 if vm.eval_code("typeof cfg") == "undefined"
-      next unless vm.eval_code("typeof cfg") == "undefined"
+      vm = Quickjs::VM.new
+      # Written directly. Racing a busy VM for this state stopped working once
+      # ThreadError was classified as "nothing was declared": the rollback is
+      # right, so the race left no record and this ran the ordinary path.
+      vm.instance_variable_set(:@_defined_variables, { "cfg" => kind })
 
       vm.public_send(:"define_#{kind}", :cfg, 2)
 
@@ -1474,12 +1479,7 @@ describe "values the serializer must not take at face value" do
       # been invented as a global by sloppy mode.
       _(vm.eval_code("typeof globalThis.cfg")).must_equal "undefined"
     end
-
-    # Both siblings of this test say so when the window was missed; without
-    # this it would report a pass having asserted nothing.
-    skip "neither define was refused in the window" if reached.zero?
-  end
-  # Thread.handle_interrupt defers Timeout and Thread#raise. It does not defer
+  end  # Thread.handle_interrupt defers Timeout and Thread#raise. It does not defer
   # a trap handler: that runs at the checkpoint regardless of the mask, and a
   # raise inside it is an ordinary raise from that point. So the record goes in
   # before the eval rather than after, and this is the case that says so.
@@ -1668,25 +1668,16 @@ describe "when the VM can no longer answer about its own globals" do
   it "keeps a let off a globalThis that has been pointed at a decoy" do
     vm = Quickjs::VM.new(timeout_msec: 60_000)
     vm.eval_code("globalThis.owned = 'guest'; globalThis = {};")
-    vm.define_let(:warm, 1)
-    busy = ::Thread.new do
-      vm.eval_code("let s = 0; for (let i = 0; i < 60000000; i++) s += i; s")
-    rescue StandardError
-      nil
-    end
-    sleep 0.05
-    begin
-      vm.define_let(:owned, 1)
-    rescue ThreadError
-    end
-    busy.join
-    real = "(function () { return this })()"
-    skip "the define was not refused in the window" unless vm.eval_code("typeof owned") == "string"
+    # The record standing ahead of a declaration that never ran, written
+    # directly. Racing a busy VM for it stopped working once ThreadError was
+    # classified as "nothing was declared": the rollback is right, so the race
+    # left no record and this ran the ordinary fresh-define path instead.
+    vm.instance_variable_set(:@_defined_variables, { "owned" => :let })
 
     vm.define_let(:owned, 42)
 
     _(vm.eval_code("owned")).must_equal 42
-    _(vm.eval_code("#{real}.owned")).must_equal "guest"
+    _(vm.eval_code(%q{(function () { return this })().owned})).must_equal "guest"
   end
 
   # define_var(:globalThis, 1) is documented as succeeding, and it made every

@@ -197,11 +197,11 @@ module Quickjs
         elsif !_live_lexical?(key)
           begin
             eval_code("#{JS_KEYWORDS.fetch(kind)} #{key};")
-            # It just made the binding, so say so. Only _declare recorded this.
-            # No test reaches the difference: for it to matter the binding would
-            # have to be one this line created and also one a global of that name
-            # prevents, and those cannot both be true. Recorded anyway, because
-            # the record is supposed to mean what happened.
+            # It just made the binding, so say so. Only _declare recorded this,
+            # and the two are not the same moment: a guest can fix a global of
+            # this name afterwards, and then a later redefine, unable to tell
+            # that the binding is ours, refuses a name this line already gave
+            # the caller.
             _confirmed[key] = kind
           rescue Quickjs::SyntaxError
             # Refused because the binding is already there, which is the
@@ -428,7 +428,7 @@ module Quickjs
           raise
         rescue Quickjs::RuntimeError => err
           # As above: the engine failing is not a fact about this name.
-          raise if err.instance_of?(Quickjs::RuntimeError)
+          raise if err.js_name.nil? || err.js_name == "InternalError"
 
           true
         end
@@ -499,17 +499,20 @@ module Quickjs
       raise
     rescue Quickjs::RuntimeError => e
       # Only an error the guest can have thrown becomes an ArgumentError about
-      # their globals. A JS error maps to the Ruby class matching its own kind,
-      # so anything that arrives as the base class is either the engine failing
-      # on its own — out of memory, stack overflow — or something thrown with a
-      # name nothing maps to.
+      # their globals. The engine names its own failures InternalError, which is
+      # out of memory and stack overflow, and names nothing at all once the VM
+      # has latched as poisoned or been disposed.
       #
-      # An earlier version asked whether the error carried a JS class name at
-      # all. That was wrong: the first out-of-memory arrives as a named
-      # InternalError and only the refusals after it are unnamed, so the one
-      # that lands inside this probe was reported to the caller as a problem
-      # with their globals, on a VM that had just run out of memory.
-      raise if e.instance_of?(Quickjs::RuntimeError)
+      # Two earlier versions of this got the split wrong. Asking whether the
+      # error carried a name missed the first out-of-memory, which carries one.
+      # Asking whether it arrived as a subclass missed everything the guest
+      # throws that is not one of the seven names the C layer maps, `new Error`
+      # among them, which is the most ordinary throw there is.
+      #
+      # A guest can name its own error InternalError and be re-raised rather
+      # than explained. That is the safe direction: the caller sees what was
+      # actually thrown.
+      raise if e.js_name.nil? || e.js_name == "InternalError"
 
       raise ::ArgumentError,
         "cannot define var #{key}: asking this VM about its globals failed with #{e.class}. " \
