@@ -39,26 +39,107 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv);
 static VALUE raise_js_exception(JSContext *ctx);
 static VALUE vm_m_memoryUsage(VALUE r_self);
 static VALUE vm_m_runGC(VALUE r_self);
+static VALUE vm_m_poisoned(VALUE r_self);
 static VALUE vm_m_memoryPoisoned(VALUE r_self);
 static VALUE vm_m_dispose(VALUE r_self);
 static VALUE vm_m_disposed(VALUE r_self);
 static VALUE vm_m_drainJobs(VALUE r_self);
 
+VALUE quickjsrb_secure_random = Qnil;
+VALUE quickjsrb_handle_limit = Qnil;
+
+void quickjsrb_init_handle_source(void)
+{
+  quickjsrb_secure_random = rb_const_get(rb_cObject, rb_intern("SecureRandom"));
+  rb_gc_register_address(&quickjsrb_secure_random);
+
+  // Built without allocating, and so without a window where the global holds a
+  // value nothing roots yet: 2 ** 48 is a Fixnum here but a Bignum where a long
+  // is 32 bits, and the second call could have collected the first.
+  quickjsrb_handle_limit = LL2NUM(((int64_t)1 << QUICKJSRB_HANDLE_BITS) - 1);
+  rb_gc_register_address(&quickjsrb_handle_limit);
+}
+
 JSValue j_error_from_ruby_error(JSContext *ctx, VALUE r_error)
 {
-  JSValue j_error = JS_NewError(ctx); // may wanna have custom error class to determine in JS' end
-
-  VALUE r_object_id = rb_funcall(r_error, rb_intern("object_id"), 0);
-  int objectId = NUM2INT(r_object_id);
-  JS_SetPropertyStr(ctx, j_error, "rb_object_id", JS_NewInt32(ctx, objectId));
-
-  // Keep the error alive in VMData to prevent GC before find_ruby_error retrieves it
-  VMData *data = JS_GetContextOpaque(ctx);
-  rb_hash_aset(data->alive_objects, r_object_id, r_error);
-
+  // Everything that can raise happens before anything is registered. Asking
+  // the exception for its message runs Ruby the host wrote, and a String with
+  // a null byte makes StringValueCStr raise; either longjmps out of here, and
+  // an entry made first would be parked in both tables for the life of the VM
+  // with nothing left pointing at it.
   VALUE r_exception_message = rb_funcall(r_error, rb_intern("message"), 0);
   const char *errorMessage = StringValueCStr(r_exception_message);
-  JS_SetPropertyStr(ctx, j_error, "message", JS_NewString(ctx, errorMessage));
+
+  // The draw is here with them, not below: it calls SecureRandom and writes two
+  // hashes, any of which can raise, and a raise after the allocations would
+  // longjmp out of a JSCFunction leaving them, and the promise capability of
+  // whichever caller is mid-flight, unreleased.
+  VMData *data = JS_GetContextOpaque(ctx);
+  // Taken before the draw, so the rollback below does not dispatch from inside
+  // a JSCFunction on its way out.
+  VALUE r_error_object_id = rb_obj_id(r_error);
+  bool registered_here = false;
+  VALUE r_object_id = alive_objects_register(data, r_error, &registered_here);
+  if (NIL_P(r_object_id))
+    // No handle means no way to hand this exception back out, so the guest gets
+    // an error of its own rather than one that looks bridged and is not.
+    return JS_ThrowInternalError(ctx, "quickjs: could not publish a handle for a host exception");
+
+  JSValue j_error = JS_NewError(ctx); // may wanna have custom error class to determine in JS' end
+  JSValue j_message = JS_NewString(ctx, errorMessage);
+  // Both are allocations, and either answers JS_EXCEPTION on a heap that has
+  // run out. Storing the sentinel would put it on the error as an ordinary
+  // value and mask the throw that produced it, so neither is published and the
+  // caller is told instead.
+  if (JS_IsException(j_error) || JS_IsException(j_message))
+  {
+    if (registered_here)
+      alive_objects_unregister(data, r_object_id, r_error_object_id);
+    JS_FreeValue(ctx, j_error);
+    JS_FreeValue(ctx, j_message);
+    return JS_EXCEPTION;
+  }
+
+  // Defined, not set: JS_SetPropertyStr walks the prototype chain, so an
+  // accessor a guest installs on Error.prototype absorbs the write and no own
+  // property is ever created, while the reader insists on an own data one.
+  // Every host exception would then be both unreportable and permanently
+  // parked, on one line of guest setup. Non-enumerable for the same reason the
+  // File and CryptoKey writers are: the handle is not part of the error.
+  //
+  // The message is defined for the same reason, and is non-enumerable with it,
+  // which is a change: assignment made it enumerable, so a bridged error was
+  // the one Error in the runtime whose message showed up in JSON.stringify and
+  // Object.keys. Errors the guest makes itself do not, because that is what the
+  // Error constructor does, and a bridged one is not special enough to differ.
+  if (JS_DefinePropertyValueStr(ctx, j_error, "rb_object_id",
+                                JS_NewInt64(ctx, NUM2LL(r_object_id)),
+                                JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) < 0)
+  {
+    // Only the row this call made. The registrar reuses one when the same
+    // object is bridged twice, and tearing that down would unanchor the error
+    // an earlier crossing is still holding.
+    if (registered_here)
+    {
+      rb_hash_delete(data->alive_objects, r_object_id);
+      rb_hash_delete(data->alive_handles, rb_obj_id(r_error));
+    }
+    JS_FreeValue(ctx, j_message);
+    JS_FreeValue(ctx, j_error);
+    return JS_EXCEPTION;
+  }
+
+  if (JS_DefinePropertyValueStr(ctx, j_error, "message", j_message,
+                                JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) < 0)
+  {
+    if (registered_here)
+    {
+      rb_hash_delete(data->alive_objects, r_object_id);
+      rb_hash_delete(data->alive_handles, rb_obj_id(r_error));
+    }
+    JS_FreeValue(ctx, j_error);
+    return JS_EXCEPTION;
+  }
 
   return j_error;
 }
@@ -67,6 +148,7 @@ typedef struct
 {
   JSContext *ctx;
   JSValue j_obj;
+  bool failed;
 } RbHashToJsArg;
 
 static int rb_hash_entry_to_js(VALUE r_key, VALUE r_val, VALUE extra)
@@ -86,7 +168,17 @@ static int rb_hash_entry_to_js(VALUE r_key, VALUE r_val, VALUE extra)
     VALUE r_key_str = rb_funcall(r_key, rb_intern("to_s"), 0);
     key_cstr = StringValueCStr(r_key_str);
   }
-  JS_SetPropertyStr(arg->ctx, arg->j_obj, key_cstr, to_js_value(arg->ctx, r_val));
+  JSValue j_val = to_js_value(arg->ctx, r_val);
+  // A member that could not be built is not stored as the sentinel: doing so
+  // makes any later read of that slot behave as though an exception were
+  // pending. The walk stops and the caller is told.
+  if (JS_IsException(j_val))
+  {
+    arg->failed = true;
+    return ST_STOP;
+  }
+
+  JS_SetPropertyStr(arg->ctx, arg->j_obj, key_cstr, j_val);
   return ST_CONTINUE;
 }
 
@@ -138,15 +230,29 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
     JSValue j_arr = JS_NewArray(ctx);
     for (int i = 0; i < len; i++)
     {
-      JS_SetPropertyUint32(ctx, j_arr, (uint32_t)i, to_js_value(ctx, RARRAY_AREF(r_value, i)));
+      JSValue j_element = to_js_value(ctx, RARRAY_AREF(r_value, i));
+      // See rb_hash_entry_to_js: an element that could not be built is not
+      // stored as the sentinel.
+      if (JS_IsException(j_element))
+      {
+        JS_FreeValue(ctx, j_arr);
+        return JS_EXCEPTION;
+      }
+
+      JS_SetPropertyUint32(ctx, j_arr, (uint32_t)i, j_element);
     }
     return j_arr;
   }
   case T_HASH:
   {
     JSValue j_obj = JS_NewObject(ctx);
-    RbHashToJsArg arg = {ctx, j_obj};
+    RbHashToJsArg arg = {ctx, j_obj, false};
     rb_hash_foreach(r_value, rb_hash_entry_to_js, (VALUE)&arg);
+    if (arg.failed)
+    {
+      JS_FreeValue(ctx, j_obj);
+      return JS_EXCEPTION;
+    }
     return j_obj;
   }
   default:
@@ -159,7 +265,7 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
     }
     if (rb_obj_is_kind_of(r_value, rb_eException))
     {
-      return j_error_from_ruby_error(ctx, r_value);
+      return j_error_from_ruby_error(ctx, r_value); // JS_EXCEPTION propagates to the caller
     }
     VALUE r_inspect_str = rb_funcall(r_value, rb_intern("inspect"), 0);
     char *str = StringValueCStr(r_inspect_str);
@@ -169,7 +275,44 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   }
 }
 
+static VALUE find_ruby_error_at(JSContext *ctx, JSValue j_error);
+
+static bool js_is_proxy(JSContext *ctx, JSValue j_val)
+{
+  VMData *data = JS_GetContextOpaque(ctx);
+  return JS_IsObject(j_val) && data->proxy_class_id != 0 && JS_GetClassID(j_val) == data->proxy_class_id;
+}
+
 VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
+{
+  // Whether anything was already pending before we read anything. Without it,
+  // a throw some earlier unchecked read left set looks exactly like one our own
+  // read just caused, and an unrelated conversion is handed the host exception
+  // it carried.
+  bool was_pending = JS_HasException(ctx);
+
+  VALUE r_error = find_ruby_error_at(ctx, j_error);
+  if (!NIL_P(r_error) || was_pending || !JS_HasException(ctx))
+    return r_error;
+
+  // The read was answered by a Proxy's descriptor trap, and the trap threw.
+  // That throw is taken rather than left for an unrelated evaluation, and asked
+  // once whether it carries a host exception, because a bridge reached from the
+  // trap parks one and only this takes it back out.
+  //
+  // Once, and not if what it threw is itself a Proxy: asking that would run
+  // another trap, which is a chain the guest chooses the length of. Refusing at
+  // this level costs a bridged error wrapped in a Proxy thrown by a trap, and
+  // keeps one wrapped in a Proxy thrown directly, which is the shape that
+  // reaches here in practice.
+  JSValue j_trap_threw = JS_GetException(ctx);
+  if (!js_is_proxy(ctx, j_trap_threw))
+    r_error = find_ruby_error_at(ctx, j_trap_threw);
+  JS_FreeValue(ctx, j_trap_threw);
+  return r_error;
+}
+
+static VALUE find_ruby_error_at(JSContext *ctx, JSValue j_error)
 {
   // Most callers know they hold an Error before they ask, but the one that
   // inspects a failed conversion's throw cannot: `throw null` and `throw 1` are
@@ -180,18 +323,68 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
   if (!JS_IsObject(j_error))
     return Qnil;
 
-  JSValue j_errorOriginalRubyObjectId = JS_GetPropertyStr(ctx, j_error, "rb_object_id");
-  int errorOriginalRubyObjectId = 0;
-  if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT)
+  // Read as an own data property, never through a getter: all three writers
+  // define it that way, so nothing legitimate is missed, and a getter on a
+  // thrown object would otherwise reach a bridge from inside the lookup that
+  // exists to take a bridged exception back out.
+  //
+  // Not quite "runs no guest code", which is what this said before: a Proxy's
+  // getOwnPropertyDescriptor trap answers this read too, and a trap that
+  // throws makes JS_GetOwnProperty answer -1 with its throw left pending.
+  // That is a different answer from "no such property" and is kept apart from
+  // it, because folding the two left the trap's throw set and its parked
+  // exception unreachable.
+  JSAtom handle_atom = JS_NewAtom(ctx, "rb_object_id");
+  JSPropertyDescriptor desc;
+  int found = JS_GetOwnProperty(ctx, &desc, j_error, handle_atom);
+  JS_FreeAtom(ctx, handle_atom);
+  // A trap that threw leaves its throw pending, which find_ruby_error takes.
+  if (found <= 0)
+    return Qnil;
+  if ((desc.flags & JS_PROP_TMASK) != JS_PROP_NORMAL)
   {
-    JS_ToInt32(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
+    JS_FreeValue(ctx, desc.value);
+    JS_FreeValue(ctx, desc.getter);
+    JS_FreeValue(ctx, desc.setter);
+    return Qnil;
+  }
+  JS_FreeValue(ctx, desc.getter);
+  JS_FreeValue(ctx, desc.setter);
+  JSValue j_errorOriginalRubyObjectId = desc.value;
+  int64_t errorOriginalRubyObjectId = 0;
+  // FLOAT64 as well as INT: the handle is drawn from a range wider than a
+  // tagged int, so QuickJS carries most of them as doubles.
+  if (JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_INT || JS_VALUE_GET_NORM_TAG(j_errorOriginalRubyObjectId) == JS_TAG_FLOAT64)
+  {
+    JS_ToInt64(ctx, &errorOriginalRubyObjectId, j_errorOriginalRubyObjectId);
     JS_FreeValue(ctx, j_errorOriginalRubyObjectId);
     if (errorOriginalRubyObjectId > 0)
     {
       VMData *data = JS_GetContextOpaque(ctx);
-      VALUE r_key = INT2NUM(errorOriginalRubyObjectId);
+      VALUE r_key = LL2NUM(errorOriginalRubyObjectId);
       VALUE r_error = rb_hash_aref(data->alive_objects, r_key);
+      // alive_objects anchors three unrelated things: a bridged exception,
+      // waiting to be thrown back, and the Ruby objects behind a File or a
+      // CryptoKey proxy, which stay reachable for as long as the guest holds
+      // the proxy. Only the first is this function's to take. The id is an
+      // ordinary property the guest can write, so without the check a script
+      // that copies a live proxy's id onto anything throwable severs that
+      // proxy: the entry is deleted, and every property of the File it stood
+      // for reads back as undefined while the object still passes
+      // `instanceof File`. Leaving a foreign entry anchored is the same
+      // answer as never having matched.
+      if (!rb_obj_is_kind_of(r_error, rb_eException))
+        return Qnil;
+      // Both rows, and the reverse one's key taken before either delete:
+      // rb_obj_id rather than the object_id method, which a subclass may
+      // override and which may allocate, so asking after the first delete
+      // could unanchor the exception and then lose it on the way to the
+      // second. The reverse row is only there so an object bridged twice keeps
+      // one handle, and once the entry is gone there is nothing for it to
+      // point at.
+      VALUE r_error_object_id = rb_obj_id(r_error);
       rb_hash_delete(data->alive_objects, r_key);
+      rb_hash_delete(data->alive_handles, r_error_object_id);
       return r_error;
     }
   }
@@ -200,6 +393,38 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
     JS_FreeValue(ctx, j_errorOriginalRubyObjectId);
   }
   return Qnil;
+}
+
+// Takes a throw nobody is going to report, without losing what it carries. A
+// read that runs the guest's own code can reach a Ruby bridge, and the bridge
+// parks the host's exception in alive_objects on the way out; find_ruby_error
+// is the only thing that takes one back out, so a reader that merely frees the
+// JS_EXCEPTION pins one per call, at a rate the guest picks. The exception
+// itself is still lost, which is the caller's business to say.
+void quickjsrb_drain_pending(JSContext *ctx)
+{
+  // One pass here. The reader it calls can run a Proxy's descriptor trap, and
+  // takes what that throws itself, so a drain can run guest code and this is
+  // not the pure cleanup it looks like.
+  //
+  // A budget that lapsed inside one of those getters goes with the rest, and
+  // that is not right: the sibling drain in js_hold_cstring_or_null latches it.
+  // Latching here does not help on its own, though. Re-throwing the interrupt
+  // leaves it pending for a caller that carries on regardless, which is how the
+  // guest's own error is lost too. Both want the refusal path in #130, and
+  // both are the same on main.
+  //
+  // Unparking here and not in j_rethrow_the_guests_own is deliberate, and the
+  // difference is what happens to the throw. That one hands it back to the
+  // guest, so it can still travel out and be reported as the host exception it
+  // was, and taking the entry would break that. This one drops it, so nothing
+  // will carry it out and an anchor left behind is only a leak. What it costs
+  // is a guest that kept its own reference: rethrowing that later reports the
+  // message but a generic class, since the handle it carries no longer
+  // resolves.
+  JSValue j_pending = JS_GetException(ctx);
+  find_ruby_error(ctx, j_pending);
+  JS_FreeValue(ctx, j_pending);
 }
 
 VALUE r_try_json_parse(VALUE r_str)
@@ -583,6 +808,11 @@ static const char *js_hold_own_cstring(JsHold *hold, const char *str)
 static bool eval_budget_lapsed(VMData *data)
 {
   return data->eval_timer_armed && eval_elapsed_ms(data->eval_time) >= data->eval_time->limit_ms;
+}
+
+bool eval_budget_lapsed_now(JSContext *ctx)
+{
+  return eval_budget_lapsed(JS_GetContextOpaque(ctx));
 }
 
 // JS_ToCString converts through the value's own toString, so it answers NULL
@@ -976,7 +1206,11 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
     // Check for Ruby object proxy (e.g., File proxy with rb_object_id on target)
     {
       JSValue j_rb_id = JS_GetPropertyStr(ctx, j_val, "rb_object_id");
-      if (JS_VALUE_GET_NORM_TAG(j_rb_id) == JS_TAG_INT || JS_VALUE_GET_NORM_TAG(j_rb_id) == JS_TAG_FLOAT64)
+      // The read is a getter's to answer, so it can throw, and what it throws
+      // can be a bridge reporting a host failure.
+      if (JS_IsException(j_rb_id))
+        quickjsrb_drain_pending(ctx);
+      else if (JS_VALUE_GET_NORM_TAG(j_rb_id) == JS_TAG_INT || JS_VALUE_GET_NORM_TAG(j_rb_id) == JS_TAG_FLOAT64)
       {
         int64_t object_id;
         JS_ToInt64(ctx, &object_id, j_rb_id);
@@ -984,7 +1218,7 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
         if (object_id > 0)
         {
           VMData *data = JS_GetContextOpaque(ctx);
-          VALUE r_obj = rb_hash_aref(data->alive_objects, LONG2NUM(object_id));
+          VALUE r_obj = rb_hash_aref(data->alive_objects, LL2NUM(object_id));
           if (!NIL_P(r_obj) && !rb_obj_is_kind_of(r_obj, rb_eException))
             return r_obj;
         }
@@ -1149,6 +1383,9 @@ static char *quickjsrb_module_normalize(JSContext *ctx, const char *base_name, c
     VALUE r_error = rb_errinfo();
     rb_set_errinfo(Qnil);
     JSValue j_error = j_error_from_ruby_error(ctx, r_error);
+    // JS_Throw would replace the throw that made this fail with the sentinel.
+    if (JS_IsException(j_error))
+      return NULL;
     JS_Throw(ctx, j_error);
     return NULL;
   }
@@ -1440,12 +1677,35 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
     {
       VALUE r_error = rb_errinfo();
       j_result = j_error_from_ruby_error(ctx, r_error);
+      // Rejecting with the sentinel would hand the guest a value it cannot
+      // name, so the promise is left unsettled and the throw that produced it,
+      // already pending, is what the caller gets. Freed on the way out with
+      // everything else this block holds: returning from here directly would
+      // leak the capability and keep its resolving functions alive for the
+      // life of the runtime.
+      if (JS_IsException(j_result))
+      {
+        JS_FreeValue(ctx, promise);
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        return JS_EXCEPTION;
+      }
       ret_val = JS_Call(ctx, resolving_funcs[1], JS_UNDEFINED,
                         1, (JSValueConst *)&j_result);
     }
     else
     {
       j_result = to_js_value(ctx, r_result);
+      // Resolving with the sentinel would put it inside the promise; the throw
+      // that produced it is pending for the caller instead.
+      if (JS_IsException(j_result))
+      {
+        JS_FreeValue(ctx, promise);
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        return JS_EXCEPTION;
+      }
+
       ret_val = JS_Call(ctx, resolving_funcs[0], JS_UNDEFINED,
                         1, (JSValueConst *)&j_result);
     }
@@ -1462,6 +1722,8 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
     {
       VALUE r_error = rb_errinfo();
       JSValue j_error = j_error_from_ruby_error(ctx, r_error);
+      if (JS_IsException(j_error))
+        return JS_EXCEPTION;
       return JS_Throw(ctx, j_error);
     }
     else
@@ -1653,6 +1915,8 @@ static JSValue js_quickjsrb_log_inner(JSContext *ctx, int argc, JSValueConst *ar
     VALUE r_error = rb_errinfo();
     rb_set_errinfo(Qnil);
     JSValue j_error = j_error_from_ruby_error(ctx, r_error);
+    if (JS_IsException(j_error))
+      return JS_EXCEPTION;
     return JS_Throw(ctx, j_error);
   }
   return JS_UNDEFINED;
@@ -1929,6 +2193,21 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
 
   data->eval_time->limit_ms = (int64_t)NUM2UINT(r_timeout_msec);
   JS_SetContextOpaque(data->context, data);
+  // Learned here, before the first line of guest code: the constructor is read
+  // off the global, and a script that reassigns or deletes Proxy would
+  // otherwise choose what every reader below treats as one.
+  // Once per VM. initialize is private but reachable through send, and by then
+  // the guest may have replaced the constructor this reads.
+  if (data->proxy_class_id == 0)
+  {
+    static const char probe[] = "new Proxy({}, {})";
+    JSValue j_probe = JS_Eval(data->context, probe, sizeof(probe) - 1, "<probe>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(j_probe))
+      JS_FreeValue(data->context, JS_GetException(data->context));
+    else
+      data->proxy_class_id = JS_GetClassID(j_probe);
+    JS_FreeValue(data->context, j_probe);
+  }
   JSRuntime *runtime = JS_GetRuntime(data->context);
 
   JS_SetMemoryLimit(runtime, size_option(r_memory_limit, "memory_limit"));
@@ -2074,8 +2353,24 @@ static VALUE to_rb_return_value(JSContext *ctx, JSValue j_val)
   return rb_ensure(to_rb_return_value_body, (VALUE)&owned, to_rb_return_value_release, (VALUE)&owned);
 }
 
-static void check_oom_poisoned(VMData *data)
+static void check_vm_poisoned(VMData *data)
 {
+  if (!NIL_P(data->r_registrar_error))
+  {
+    // Handed back as itself: a Timeout::Error the host asked for is theirs, and
+    // it was only held this long because raising it where it landed would have
+    // unwound through QuickJS.
+    VALUE r_error = data->r_registrar_error;
+    data->r_registrar_error = Qnil;
+    rb_exc_raise(r_error);
+  }
+
+  if (data->handle_source_broken)
+  {
+    VALUE r_msg = rb_str_new2("VM is poisoned: SecureRandom.random_number stopped answering with distinct usable integers, so an object could not be given a handle a guest cannot guess. A new VM will refuse in the same way, so fix the source rather than recycling: it is usually a test double still in place.");
+    rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_msg, Qnil));
+  }
+
   if (data->oom_poisoned)
   {
     VALUE r_msg = rb_str_new2("VM is poisoned: a previous evaluation hit out-of-memory; further evaluation may segfault. Recreate the Quickjs::VM.");
@@ -2634,7 +2929,7 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  check_vm_poisoned(data);
   check_js_entry_owner(data);
 
   VALUE r_code, r_opts;
@@ -2851,7 +3146,7 @@ static VALUE vm_m_compile(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  check_vm_poisoned(data);
   check_js_entry_owner(data);
 
   VALUE r_code, r_opts;
@@ -2965,7 +3260,7 @@ static VALUE vm_m_compileModule(VALUE r_self, VALUE r_code, VALUE r_name)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  check_vm_poisoned(data);
   check_js_entry_owner(data);
   Check_Type(r_code, T_STRING);
   Check_Type(r_name, T_STRING);
@@ -3054,7 +3349,7 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  check_vm_poisoned(data);
   check_js_entry_owner(data);
 
   // Strict String rather than StringValue's coercion, matching
@@ -3160,7 +3455,7 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  check_vm_poisoned(data);
   check_js_entry_owner(data);
 
   if (!RB_TYPE_P(r_bytecode, T_STRING))
@@ -3245,7 +3540,7 @@ static VALUE vm_m_loadPolyfillBytecode(VALUE r_self, VALUE r_bytecode)
   }
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  check_vm_poisoned(data);
   check_js_entry_owner(data);
 
   // "Unbudgeted" needs enforcing, not just skipping arm_eval_timer: the
@@ -3587,7 +3882,13 @@ static VALUE call_global_function_run(VALUE p)
   // Number, and then it is bounded rather than unbounded.
   arm_eval_timer(data);
   for (int i = 0; i < args->nargs; i++)
+  {
     args->j_args[i] = to_js_value(data->context, argv[i + 1]);
+    // An argument that could not be built is not handed to the call as the
+    // sentinel. The ensure that owns j_args releases what was built already.
+    if (JS_IsException(args->j_args[i]))
+      raise_js_exception(data->context); // raises
+  }
 
   JSValue j_this = JS_UNDEFINED;
   JSValue j_func;
@@ -3717,7 +4018,7 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  check_vm_poisoned(data);
   check_js_entry_owner(data);
 
   // evals_in_flight stays elevated for the whole call, not just the
@@ -3885,7 +4186,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  check_vm_poisoned(data);
   check_js_entry_owner(data);
 
   // Module top-level code is user JS like any eval — budget it. Without
@@ -3907,6 +4208,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
 {
   rb_require("json");
   rb_require("securerandom");
+  quickjsrb_init_handle_source();
 
   VALUE r_module_quickjs = rb_define_module("Quickjs");
   r_define_constants(r_module_quickjs);
@@ -3932,6 +4234,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_method(r_class_vm, "memory_usage", vm_m_memoryUsage, 0);
   rb_define_method(r_class_vm, "gc!", vm_m_runGC, 0);
   rb_define_method(r_class_vm, "memory_poisoned?", vm_m_memoryPoisoned, 0);
+  rb_define_method(r_class_vm, "poisoned?", vm_m_poisoned, 0);
   rb_define_method(r_class_vm, "dispose!", vm_m_dispose, 0);
   rb_define_method(r_class_vm, "disposed?", vm_m_disposed, 0);
   rb_define_method(r_class_vm, "drain_jobs!", vm_m_drainJobs, 0);
@@ -3995,7 +4298,7 @@ static VALUE vm_m_drainJobs(VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
 
   check_disposed(data);
-  check_oom_poisoned(data);
+  check_vm_poisoned(data);
   check_js_entry_owner(data);
 
   if (!JS_IsJobPending(JS_GetRuntime(data->context)))
@@ -4012,6 +4315,24 @@ static VALUE vm_m_memoryPoisoned(VALUE r_self)
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
   return data->oom_poisoned ? Qtrue : Qfalse;
 }
+
+// Answers for either latch, where memory_poisoned? answers only for its own.
+// A VM whose handle source broke refuses every entry point while
+// memory_poisoned? says false, which leaves a host following the README's
+// recycle pattern holding one that looks healthy and does nothing. The two are
+// worth telling apart: recreating the VM clears an out-of-memory, and does not
+// clear a SecureRandom that is still returning nil.
+static VALUE vm_m_poisoned(VALUE r_self)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+  // Only the latches, not the held exception. That one is handed back once and
+  // gone, and the VM is usable after it, so answering true for it would tell a
+  // host following the README's recycle path to throw away a healthy VM and go
+  // looking for a SecureRandom stub that does not exist.
+  return (data->oom_poisoned || data->handle_source_broken) ? Qtrue : Qfalse;
+}
+
 
 // JS_FreeContext + JS_FreeRuntime walk the entire heap to run finalisers.
 // On a VM with polyfills loaded this can be tens of milliseconds — run it
@@ -4067,6 +4388,7 @@ static VALUE vm_m_dispose(VALUE r_self)
   // collected. Matters for pool-rebuild workloads that dispose eagerly.
   data->defined_functions = rb_hash_new();
   data->alive_objects = rb_hash_new();
+  data->alive_handles = rb_hash_new();
   data->log_listener = Qnil;
   data->module_loader = Qnil;
 

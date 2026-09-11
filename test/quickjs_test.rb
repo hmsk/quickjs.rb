@@ -252,6 +252,271 @@ describe Quickjs do
     end
   end
 
+  describe "BridgedErrorHandles" do
+    before do
+      @handle_tempfile = Tempfile.new(['handle', '.txt'])
+      @handle_tempfile.write('hello')
+      @handle_tempfile.flush
+      @handle_file = File.open(@handle_tempfile.path, 'r')
+    end
+
+    after do
+      @handle_file.close
+      @handle_tempfile.close
+      @handle_tempfile.unlink
+    end
+
+    # find_ruby_error reads the handle as an own data property, so it runs no
+    # guest code. A getter would let a thrown object reach a Ruby bridge from
+    # inside the very lookup that exists to take a bridged exception back out.
+    it "does not resolve a handle defined as a getter" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise ArgumentError, 'host' }
+      vm.eval_code("globalThis.id = null; try { boom() } catch (e) { globalThis.id = e.rb_object_id }")
+      _(vm.eval_code('typeof globalThis.id')).must_equal 'number'
+
+      # A real Error, because a thrown plain object is turned away for not being
+      # one before the handle is ever read, and would pass this on any build.
+      error = _ {
+        vm.eval_code("throw Object.defineProperty(new Error('g'), 'rb_object_id', {get() { return globalThis.id }})")
+      }.must_raise Quickjs::RuntimeError
+
+      # The guest's own throw, not the host's ArgumentError replayed through it.
+      _(error).wont_be_kind_of ArgumentError
+    ensure
+      vm&.dispose!
+    end
+    # Drawing a handle calls out to SecureRandom, which a host's own suite can
+    # stub flat. Nothing polls a QuickJS interrupt inside a C loop, so an
+    # unbounded retry there is not something timeout_msec can end: before this
+    # was bounded, the second object bridged into the VM span forever and only
+    # an outer Timeout.timeout broke it.
+    #
+    # The refusal is latched rather than raised, and reported from the next
+    # entry point, because raising from inside a JSCFunction leaves the
+    # runtime's frame chain pointing at C stack that is gone and the next Error
+    # the guest builds walks it. The VM stays usable enough to be told off.
+    it "condemns the VM rather than spinning when the source stops being random" do
+      vm = Quickjs::VM.new(timeout_msec: 300)
+      vm.define_function(:boom) { |n| raise IOError, "e#{n}" }
+
+      SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
+      SecureRandom.define_singleton_method(:random_number) { |_limit| 4 }
+
+      vm.eval_code('try { boom(1) } catch (e) {} 1')
+      # The bridge refuses inside JS rather than unwinding through it.
+      _(vm.eval_code('try { boom(2) } catch (e) { "refused" }')).must_equal 'refused'
+
+      error = _ { vm.eval_code('1') }.must_raise Quickjs::RuntimeError
+      _(error.message).must_match(/distinct usable integers/)
+    ensure
+      SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
+      SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      vm&.dispose!
+    end
+
+    # The bound only catches a source that keeps returning the same value. One
+    # that returns something that is not an Integer raises inside the loop,
+    # before the bound is consulted, and that raise is the one that segfaults.
+    # An Integer is not enough: NUM2LL raises RangeError on one too wide for
+    # the handle space, and a negative one is stored under a key every reader
+    # treats as "no entry", which anchors the object and loses the identity of
+    # the exception it was bridging.
+    it "condemns the VM when the source returns a number it cannot use" do
+      [2**100, -5].each do |drawn|
+        vm = Quickjs::VM.new
+        vm.define_function(:boom) { raise IOError, 'host' }
+
+        SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
+        SecureRandom.define_singleton_method(:random_number) { |_limit| drawn }
+
+        _(vm.eval_code('try { boom() } catch (e) { "refused" }')).must_equal 'refused'
+        _(vm.poisoned?).must_equal true
+
+        error = _ { vm.eval_code('1') }.must_raise Quickjs::RuntimeError
+        _(error.message).must_match(/distinct usable integers/)
+      ensure
+        SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
+        SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+        vm&.dispose!
+      end
+    end
+
+    it "condemns the VM when the source returns something that is not a number" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise IOError, 'host' }
+
+      SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
+      SecureRandom.define_singleton_method(:random_number) { |_limit| nil }
+
+      _(vm.eval_code('try { boom() } catch (e) { "refused" }')).must_equal 'refused'
+
+      error = _ { vm.eval_code('1') }.must_raise Quickjs::RuntimeError
+      _(error.message).must_match(/distinct usable integers/)
+    ensure
+      SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
+      SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      vm&.dispose!
+    end
+
+    # A strict test double raises on an unexpected invocation as readily as a
+    # loose one returns a constant, and the draw is a Ruby dispatch this branch
+    # introduced: a raise out of it would be a new way into #134, where the
+    # frame chain is left stale and the next Error the guest builds walks it.
+    #
+    # It is held rather than swallowed, because rb_protect cannot tell a stubbed
+    # source apart from an Interrupt or a host's own Timeout::Error, and handed
+    # back from the next entry point as itself.
+    it "hands back what was raised at the registrar, from somewhere safe" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise IOError, 'host' }
+      vm.eval_code('globalThis.deep = (n) => n === 0 ? boom() : deep(n - 1); 1')
+
+      SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
+      SecureRandom.define_singleton_method(:random_number) { |_limit| raise Timeout::Error, 'host timeout' }
+
+      # The evaluation in flight finishes rather than unwinding through QuickJS.
+      _(vm.eval_code('try { deep(5) } catch (e) { "caught" }')).must_equal 'caught'
+      # And it is not left as the host's $! either.
+      _($!).must_be_nil
+
+      # Not poisoned by it: the VM is usable, and a host following the README's
+      # recycle path would otherwise discard a healthy one.
+      _(vm.poisoned?).must_equal false
+
+      error = _ { vm.eval_code('1') }.must_raise Timeout::Error
+      _(error.message).must_equal 'host timeout'
+
+      # A passing raise is not a broken handle source, so the VM recovers.
+      SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
+      SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      _(vm.eval_code('1 + 1')).must_equal 2
+      _(vm.poisoned?).must_equal false
+
+      # A fresh VM still builds Errors, which is the part that used to segfault.
+      other = Quickjs::VM.new
+      _(other.eval_code("try { throw new Error('x') } catch (e) { e.message }")).must_equal 'x'
+      other.dispose!
+    ensure
+      if SecureRandom.singleton_class.method_defined?(:random_number_before_stub)
+        SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
+        SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      end
+      vm&.dispose!
+    end
+
+    # memory_poisoned? answers for out-of-memory only, so a host following the
+    # README's recycle pattern would otherwise hold a VM that looks healthy and
+    # refuses everything.
+    it "says it is poisoned without claiming the memory was" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise IOError, 'host' }
+      _(vm.poisoned?).must_equal false
+
+      SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
+      SecureRandom.define_singleton_method(:random_number) { |_limit| nil }
+      vm.eval_code('try { boom() } catch (e) {} 1') rescue nil
+
+      _(vm.poisoned?).must_equal true
+      _(vm.memory_poisoned?).must_equal false
+    ensure
+      SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
+      SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      vm&.dispose!
+    end
+
+    # The raise this replaced could take the process with it: the longjmp skips
+    # QuickJS's own frame-chain restore, and build_backtrace then walks stack
+    # that is gone.
+    it "survives a guest building errors after the handle source broke" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { |n| raise IOError, "e#{n}" }
+      vm.eval_code('globalThis.deep = (n) => n === 0 ? boom(1) : deep(n - 1); 1')
+
+      SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
+      SecureRandom.define_singleton_method(:random_number) { |_limit| 4 }
+      4.times { vm.eval_code('try { deep(30) } catch (e) {} 1') rescue nil }
+      SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
+      SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+
+      # Poisoned now, so a fresh VM is what carries on. The point of the test is
+      # that the process reached this line at all.
+      other = Quickjs::VM.new
+      10.times { _(other.eval_code("function g(n){ if (n === 0) throw new Error('x'); return g(n - 1) } try { g(20) } catch (e) { e.message }")).must_equal 'x' }
+      other.dispose!
+    ensure
+      vm&.dispose!
+    end
+
+    # Asking the exception for its message runs Ruby the host wrote, and that
+    # can raise. Registering before it does parks the entry with nothing left
+    # pointing at it.
+    it "parks nothing when reading the message raises" do
+      vm = Quickjs::VM.new
+      nasty = Class.new(StandardError) { def message = "a\0b" }
+      vm.define_function(:boom) { raise nasty }
+
+      20.times { vm.eval_code('try { boom() } catch (e) {}') rescue nil }
+
+      GC.start(full_mark: true, immediate_sweep: true)
+      before = ObjectSpace.each_object(nasty).count
+      vm.dispose!
+      GC.start(full_mark: true, immediate_sweep: true)
+
+      _(before - ObjectSpace.each_object(nasty).count).must_equal 0
+    ensure
+      vm&.dispose! unless vm&.disposed?
+    end
+
+    it "still gives back a bridged exception thrown as it was handed over" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise ArgumentError, 'host' }
+
+      error = _ { vm.eval_code("try { boom() } catch (e) { throw e }") }.must_raise ArgumentError
+
+      _(error.message).must_equal 'host'
+    ensure
+      vm&.dispose!
+    end
+    # The handle is written with defineProperty, not assignment, so an accessor
+    # a guest installs on Error.prototype cannot absorb the write and leave the
+    # error without an own one.
+    it "reports the host exception through a poisoned Error.prototype" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise ArgumentError, 'host' }
+      vm.eval_code("Object.defineProperty(Error.prototype, 'rb_object_id', {set(v) {}, get() {}}); 1")
+
+      error = _ { vm.eval_code('boom()') }.must_raise ArgumentError
+
+      _(error.message).must_equal 'host'
+    ensure
+      vm&.dispose!
+    end
+    it "shows the guest the same shape a native Error has" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise ArgumentError, 'host secret' }
+
+      bridged = vm.eval_code("(() => { try { boom() } catch (e) { return JSON.stringify(e) } })()")
+      native = vm.eval_code("(() => { try { throw new Error('plain') } catch (e) { return JSON.stringify(e) } })()")
+
+      _(bridged).must_equal native
+      # The message is still there to read, only not to enumerate.
+      _(vm.eval_code("(() => { try { boom() } catch (e) { return e.message } })()")).must_equal 'host secret'
+    ensure
+      vm&.dispose!
+    end
+    it "keeps the handle off what the guest enumerates" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise ArgumentError, 'host' }
+
+      keys = vm.eval_code("let k = []; try { boom() } catch (e) { k = Object.keys(e) } k.join(',')")
+
+      _(keys).wont_include 'rb_object_id'
+    ensure
+      vm&.dispose!
+    end
+  end
+
   describe "Exceptions" do
     it "throws Quickjs::SyntaxError if SyntaxError happens" do
       err = _ { ::Quickjs.eval_code("}{") }.must_raise Quickjs::SyntaxError
