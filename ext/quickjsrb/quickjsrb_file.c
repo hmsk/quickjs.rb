@@ -148,6 +148,7 @@ static JSValue j_rethrow_the_guests_own(JSContext *ctx)
 
 static JSValue js_ruby_file_slice(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv)
 {
+  VMData *data = JS_GetContextOpaque(ctx);
   VALUE r_file = r_find_alive_rb_file(ctx, argv[0]);
   if (NIL_P(r_file))
     return JS_UNDEFINED;
@@ -188,10 +189,6 @@ static JSValue js_ruby_file_slice(JSContext *ctx, JSValueConst _this, int argc, 
       end = file_size;
   }
 
-  const char *content_type = "";
-  if (argc > 3 && JS_IsString(argv[3]))
-    content_type = JS_ToCString(ctx, argv[3]);
-
   long len = end > start ? end - start : 0;
 
   rb_funcall(r_file, rb_intern("rewind"), 0);
@@ -200,30 +197,91 @@ static JSValue js_ruby_file_slice(JSContext *ctx, JSValueConst _this, int argc, 
   VALUE r_bytes = rb_funcall(r_file, rb_intern("read"), 1, LONG2NUM(len));
   rb_funcall(r_bytes, rb_intern("force_encoding"), 1, rb_str_new_cstr("BINARY"));
 
+  // Built after every call that can raise, and while the C string is still
+  // owned, so nothing here is holding a JS value when a Ruby raise unwinds and
+  // nothing is left to free on the paths that bail out below.
+  JSValue j_type_str;
+  if (argc > 3 && JS_IsString(argv[3]))
+  {
+    const char *content_type = JS_ToCString(ctx, argv[3]);
+    if (content_type == NULL)
+      // It threw on the way, and returning a Blob with that left pending would
+      // attribute it to whatever asks next.
+      return j_rethrow_the_guests_own(ctx);
+    j_type_str = JS_NewString(ctx, content_type);
+    JS_FreeCString(ctx, content_type);
+  }
+  else
+  {
+    j_type_str = JS_NewString(ctx, "");
+  }
+  if (JS_IsException(j_type_str))
+    return j_type_str;
+
+  // Built through JS_NewTypedArray and the constructor captured at init, not
+  // by calling globalThis.Uint8Array and globalThis.Blob: those are names the
+  // guest can delete or replace with a shim, and a slice of a host File is not
+  // something it gets to answer for. Every step is checked, so a sentinel is
+  // never stored into j_parts and handed on as an ordinary element.
   JSValue j_buf = JS_NewArrayBufferCopy(ctx, (const uint8_t *)RSTRING_PTR(r_bytes), RSTRING_LEN(r_bytes));
-  JSValue j_global = JS_GetGlobalObject(ctx);
-  JSValue j_uint8_ctor = JS_GetPropertyStr(ctx, j_global, "Uint8Array");
-  JSValue j_uint8 = JS_CallConstructor(ctx, j_uint8_ctor, 1, &j_buf);
+  if (JS_IsException(j_buf))
+  {
+    JS_FreeValue(ctx, j_type_str);
+    return j_buf;
+  }
+
+  JSValue j_ta_args[3] = {j_buf, JS_NewInt32(ctx, 0), JS_NewInt64(ctx, RSTRING_LEN(r_bytes))};
+  JSValue j_uint8 = JS_NewTypedArray(ctx, 3, (JSValueConst *)j_ta_args, JS_TYPED_ARRAY_UINT8);
+  JS_FreeValue(ctx, j_buf);
+  if (JS_IsException(j_uint8))
+  {
+    JS_FreeValue(ctx, j_type_str);
+    return j_uint8;
+  }
+
+  if (JS_IsUndefined(data->j_blob_ctor))
+  {
+    JS_FreeValue(ctx, j_uint8);
+    JS_FreeValue(ctx, j_type_str);
+    return JS_ThrowInternalError(ctx, "Blob is not available to build a slice");
+  }
 
   JSValue j_parts = JS_NewArray(ctx);
-  JS_SetPropertyUint32(ctx, j_parts, 0, j_uint8);
+  if (JS_IsException(j_parts))
+  {
+    JS_FreeValue(ctx, j_uint8);
+    JS_FreeValue(ctx, j_type_str);
+    return j_parts;
+  }
+  if (JS_DefinePropertyValueUint32(ctx, j_parts, 0, j_uint8, JS_PROP_C_W_E) < 0)
+  {
+    // The define freed the bytes on its way out, so carrying on would build the
+    // Blob from an empty array and hand the guest a zero-length slice of a file
+    // that is not empty, with a throw left pending behind it.
+    JS_FreeValue(ctx, j_parts);
+    JS_FreeValue(ctx, j_type_str);
+    return JS_EXCEPTION;
+  }
 
   JSValue j_opts = JS_NewObject(ctx);
-  JS_SetPropertyStr(ctx, j_opts, "type", JS_NewString(ctx, content_type));
+  if (JS_IsException(j_opts))
+  {
+    JS_FreeValue(ctx, j_parts);
+    JS_FreeValue(ctx, j_type_str);
+    return j_opts;
+  }
+  if (JS_DefinePropertyValueStr(ctx, j_opts, "type", j_type_str, JS_PROP_C_W_E) < 0)
+  {
+    JS_FreeValue(ctx, j_parts);
+    JS_FreeValue(ctx, j_opts);
+    return JS_EXCEPTION;
+  }
 
-  JSValue j_blob_ctor = JS_GetPropertyStr(ctx, j_global, "Blob");
   JSValueConst blob_args[2] = {j_parts, j_opts};
-  JSValue j_blob = JS_CallConstructor(ctx, j_blob_ctor, 2, blob_args);
+  JSValue j_blob = JS_CallConstructor(ctx, data->j_blob_ctor, 2, blob_args);
 
-  if (argc > 3 && JS_IsString(argv[3]))
-    JS_FreeCString(ctx, content_type);
-
-  JS_FreeValue(ctx, j_buf);
-  JS_FreeValue(ctx, j_uint8_ctor);
   JS_FreeValue(ctx, j_parts);
   JS_FreeValue(ctx, j_opts);
-  JS_FreeValue(ctx, j_blob_ctor);
-  JS_FreeValue(ctx, j_global);
 
   return j_blob;
 }
@@ -231,12 +289,12 @@ static JSValue js_ruby_file_slice(JSContext *ctx, JSValueConst _this, int argc, 
 void quickjsrb_init_file_proxy(VMData *data)
 {
   const char *factory_src =
-      "(function(getName, getSize, getType, getLastModified, getText, getArrayBuffer, getSlice) {\n"
+      "(function(FileProto, getName, getSize, getType, getLastModified, getText, getArrayBuffer, getSlice) {\n"
       "  return function(handle) {\n"
-      "    var target = Object.create(File.prototype);\n"
+      "    var target = Object.create(FileProto);\n"
       "    Object.defineProperty(target, 'rb_object_id', { value: handle, enumerable: false });\n"
       "    return new Proxy(target, {\n"
-      "      getPrototypeOf: function() { return File.prototype; },\n"
+      "      getPrototypeOf: function() { return FileProto; },\n"
       "      get: function(target, prop, receiver) {\n"
       "        if (prop === 'name') return getName(handle);\n"
       "        if (prop === 'size') return getSize(handle);\n"
@@ -254,19 +312,54 @@ void quickjsrb_init_file_proxy(VMData *data)
       "})";
   JSValue j_factory_fn = JS_Eval(data->context, factory_src, strlen(factory_src), "<file-proxy>", JS_EVAL_TYPE_GLOBAL);
 
-  JSValue j_helpers[7];
-  j_helpers[0] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_name, "__rb_file_name", 1);
-  j_helpers[1] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_size, "__rb_file_size", 1);
-  j_helpers[2] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_type, "__rb_file_type", 1);
-  j_helpers[3] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_last_modified, "__rb_file_last_modified", 1);
-  j_helpers[4] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_text, "__rb_file_text", 1);
-  j_helpers[5] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_array_buffer, "__rb_file_array_buffer", 1);
-  j_helpers[6] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_slice, "__rb_file_slice", 4);
+  // The prototype is taken here too, not read from globalThis.File when a proxy
+  // is built: the closure below runs per crossing, which is after guest code,
+  // and a replaced File otherwise decides what a host File is an instance of.
+  // The handle keeps working either way, so what this closes is the shape of
+  // the value rather than the bridge.
+  JSValue j_global_for_proto = JS_GetGlobalObject(data->context);
+  JSValue j_file_class = JS_GetPropertyStr(data->context, j_global_for_proto, "File");
+  JS_FreeValue(data->context, j_global_for_proto);
+  JSValue j_file_proto = JS_GetPropertyStr(data->context, j_file_class, "prototype");
+  JS_FreeValue(data->context, j_file_class);
 
-  data->j_file_proxy_creator = JS_Call(data->context, j_factory_fn, JS_UNDEFINED, 7, j_helpers);
+  JSValue j_helpers[8];
+  j_helpers[0] = j_file_proto;
+  j_helpers[1] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_name, "__rb_file_name", 1);
+  j_helpers[2] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_size, "__rb_file_size", 1);
+  j_helpers[3] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_type, "__rb_file_type", 1);
+  j_helpers[4] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_last_modified, "__rb_file_last_modified", 1);
+  j_helpers[5] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_text, "__rb_file_text", 1);
+  j_helpers[6] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_array_buffer, "__rb_file_array_buffer", 1);
+  j_helpers[7] = quickjsrb_new_ruby_bridge(data->context, js_ruby_file_slice, "__rb_file_slice", 4);
+
+  // Freed before it is replaced, for the reason the Blob capture below gives:
+  // initialize is private but reachable through send, and a second pass would
+  // otherwise leak this closure and the seven bridges it holds.
+  if (!JS_IsUndefined(data->j_file_proxy_creator))
+    JS_FreeValue(data->context, data->j_file_proxy_creator);
+  data->j_file_proxy_creator = JS_Call(data->context, j_factory_fn, JS_UNDEFINED, 8, j_helpers);
+
+  // Taken here, before a line of guest code has run, because slice builds its
+  // result with it and globalThis.Blob is the guest's to replace by then.
+  //
+  // Once per VM, like the Proxy probe: initialize is private but reachable
+  // through send, and a second pass would overwrite this reference without
+  // freeing the first, which outlives JS_FreeRuntime along with everything it
+  // holds.
+  if (!JS_IsUndefined(data->j_blob_ctor))
+    JS_FreeValue(data->context, data->j_blob_ctor);
+  JSValue j_global = JS_GetGlobalObject(data->context);
+  data->j_blob_ctor = JS_GetPropertyStr(data->context, j_global, "Blob");
+  JS_FreeValue(data->context, j_global);
+  if (JS_IsException(data->j_blob_ctor))
+  {
+    JS_FreeValue(data->context, JS_GetException(data->context));
+    data->j_blob_ctor = JS_UNDEFINED;
+  }
 
   JS_FreeValue(data->context, j_factory_fn);
-  for (int i = 0; i < 7; i++)
+  for (int i = 0; i < 8; i++)
     JS_FreeValue(data->context, j_helpers[i]);
 }
 

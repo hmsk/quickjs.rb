@@ -84,6 +84,9 @@ typedef struct VMData
   // ReferenceError when the loader doesn't know the name.
   VALUE preloaded_module_names;
   JSValue j_file_proxy_creator;
+  // Captured with it, at init, so slice does not build its result by calling
+  // a constructor the guest has had a chance to replace.
+  JSValue j_blob_ctor;
   // Once the runtime has hit JS-level "out of memory", the QuickJS heap is in
   // a fragile state where further evaluation can trigger a use-after-free in
   // the parser-error-during-OOM cascade (segfault inside js_shape_hash_unlink).
@@ -210,6 +213,8 @@ static void vm_free(void *ptr)
   {
     if (!JS_IsUndefined(data->j_file_proxy_creator))
       JS_FreeValue(data->context, data->j_file_proxy_creator);
+    if (!JS_IsUndefined(data->j_blob_ctor))
+      JS_FreeValue(data->context, data->j_blob_ctor);
 
     vm_teardown_context(data->context, data->std_handlers_installed);
   }
@@ -293,6 +298,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->module_source_cache = rb_hash_new();
   data->preloaded_module_names = rb_hash_new();
   data->j_file_proxy_creator = JS_UNDEFINED;
+  data->j_blob_ctor = JS_UNDEFINED;
   data->proxy_class_id = 0;
   data->oom_poisoned = false;
   data->handle_source_broken = false;

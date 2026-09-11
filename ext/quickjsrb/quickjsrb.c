@@ -194,15 +194,13 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
     return JS_NewFloat64(ctx, NUM2DBL(r_value));
   case T_BIGNUM:
   {
+    // strtod on the decimal we just produced, rather than calling globalThis's
+    // Number: that name is the guest's to delete or replace with a shim that
+    // throws, and a Bignum crossing over is not something it gets to answer
+    // for. The value is the same one Number(str) would have produced, since
+    // this is the conversion Number(str) performs.
     VALUE r_str = rb_funcall(r_value, rb_intern("to_s"), 0);
-    JSValue j_str = JS_NewStringLen(ctx, RSTRING_PTR(r_str), RSTRING_LEN(r_str));
-    JSValue j_global = JS_GetGlobalObject(ctx);
-    JSValue j_numberClass = JS_GetPropertyStr(ctx, j_global, "Number");
-    JSValue j_num = JS_Call(ctx, j_numberClass, JS_UNDEFINED, 1, (JSValueConst *)&j_str);
-    JS_FreeValue(ctx, j_str);
-    JS_FreeValue(ctx, j_numberClass);
-    JS_FreeValue(ctx, j_global);
-    return j_num;
+    return JS_NewFloat64(ctx, rb_str_to_dbl(r_str, FALSE));
   }
   case T_STRING:
     return JS_NewStringLen(ctx, RSTRING_PTR(r_value), RSTRING_LEN(r_value));
@@ -3905,14 +3903,15 @@ static VALUE call_global_function_run(VALUE p)
   // Converted first, under a clock of its own. Mostly this is Ruby work —
   // inspect on the caller's objects, allocation, a GVL yield to another thread
   // — and none of it is the guest's to pay for, which is why the arm above the
-  // resolution below starts the budget over. But two conversions run JS: a
-  // File argument calls the proxy creator and a Bignum calls Number(), and
-  // each polls the interrupt handler on the way, so without an arm here they
-  // ran on whatever clock the previous entry left — a lapsed one interrupts
-  // the conversion at random and hands the function a JS_EXCEPTION for an
-  // argument. Two arms, but not the two budgets the previous commit had: no
-  // guest-written JS runs between them unless the guest has replaced Proxy or
-  // Number, and then it is bounded rather than unbounded.
+  // resolution below starts the budget over. But a conversion can still run JS:
+  // a File argument calls the proxy creator, which polls the interrupt handler
+  // on the way, so without an arm here it ran on whatever clock the previous
+  // entry left — a lapsed one interrupts the conversion at random and hands the
+  // function a JS_EXCEPTION for an argument. Two arms, but not the two budgets
+  // the previous commit had: no guest-written JS runs between them unless the
+  // guest has replaced Proxy, and then it is bounded rather than unbounded.
+  // (A Bignum used to call Number() here too; it converts without asking the
+  // guest for anything now.)
   arm_eval_timer(data);
   for (int i = 0; i < args->nargs; i++)
   {
@@ -4407,6 +4406,11 @@ static VALUE vm_m_dispose(VALUE r_self)
   {
     JS_FreeValue(data->context, data->j_file_proxy_creator);
     data->j_file_proxy_creator = JS_UNDEFINED;
+  }
+  if (!JS_IsUndefined(data->j_blob_ctor))
+  {
+    JS_FreeValue(data->context, data->j_blob_ctor);
+    data->j_blob_ctor = JS_UNDEFINED;
   }
 
   // Mark disposed before releasing the GVL so a concurrent dfree finds

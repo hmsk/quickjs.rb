@@ -286,6 +286,18 @@ describe Quickjs do
     ensure
       vm&.dispose!
     end
+    it "does not ask the guest's Number to convert a Bignum" do
+      vm = Quickjs::VM.new
+      vm.define_function(:big) { 2**70 }
+      vm.define_function(:wrapped) { { 'n' => 2**70, 'other' => 'kept' } }
+      vm.eval_code("globalThis.Number = function () { throw new Error('nope') }; 1")
+
+      _(vm.eval_code("big()")).must_equal (2**70).to_f
+      _(vm.eval_code("JSON.stringify(wrapped())")).must_equal %({"n":#{(2**70).to_f},"other":"kept"})
+    ensure
+      vm&.dispose!
+    end
+
     # Drawing a handle calls out to SecureRandom, which a host's own suite can
     # stub flat. Nothing polls a QuickJS interrupt inside a C loop, so an
     # unbounded retry there is not something timeout_msec can end: before this
