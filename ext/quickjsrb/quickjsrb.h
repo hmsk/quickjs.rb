@@ -338,6 +338,39 @@ static VALUE vm_alloc(VALUE r_self)
 #define QUICKJSRB_HANDLE_BITS 48
 #define QUICKJSRB_HANDLE_DRAW_LIMIT 16
 
+// Reads rb_object_id as an own data property, never through the prototype
+// chain and never through a getter, and answers whether there was one. All
+// three writers define it that way, so nothing legitimate is missed, and an
+// accessor a guest puts on Object.prototype otherwise answers for every object
+// that crosses back: one line of setup and a returned Hash becomes whichever
+// host File or CryptoKey the guest already holds a handle for.
+static inline bool j_read_own_handle(JSContext *ctx, JSValueConst j_val, JSValue *j_handle_out)
+{
+  JSAtom atom = JS_NewAtom(ctx, "rb_object_id");
+  JSPropertyDescriptor desc;
+  int found = JS_GetOwnProperty(ctx, &desc, j_val, atom);
+  JS_FreeAtom(ctx, atom);
+  if (found < 0)
+  {
+    // A Proxy trap answered and threw. The callers drain it.
+    *j_handle_out = JS_EXCEPTION;
+    return false;
+  }
+  if (found == 0)
+    return false;
+  if ((desc.flags & JS_PROP_TMASK) != JS_PROP_NORMAL)
+  {
+    JS_FreeValue(ctx, desc.value);
+    JS_FreeValue(ctx, desc.getter);
+    JS_FreeValue(ctx, desc.setter);
+    return false;
+  }
+  JS_FreeValue(ctx, desc.getter);
+  JS_FreeValue(ctx, desc.setter);
+  *j_handle_out = desc.value;
+  return true;
+}
+
 // Defined in quickjsrb.c. Declared here because the crypto reader needs it to
 // give back an exception a guest's getter parked on its way through.
 VALUE find_ruby_error(JSContext *ctx, JSValue j_error);

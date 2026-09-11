@@ -131,7 +131,13 @@ static JSValue j_rethrow_the_guests_own(JSContext *ctx)
   // throws it instead, which is what it was before this touched it.
   if (eval_budget_lapsed_now(ctx))
   {
-    JS_FreeValue(ctx, JS_GetException(ctx));
+    // Drained, not freed. This branch is the one that does not hand the throw
+    // back, so the reasoning quickjsrb_drain_pending gives for unparking
+    // applies here and not to the return below: nothing will carry the guest's
+    // throw out now, and a bridge it reached on the way has already parked the
+    // host exception, so freeing the JS error is the one path that leaves that
+    // entry with nothing able to take it.
+    quickjsrb_drain_pending(ctx);
     JS_ThrowInternalError(ctx, "interrupted");
     JS_SetUncatchableException(ctx, TRUE);
     return JS_EXCEPTION;

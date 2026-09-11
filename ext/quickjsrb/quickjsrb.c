@@ -289,11 +289,32 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
   // a throw some earlier unchecked read left set looks exactly like one our own
   // read just caused, and an unrelated conversion is handed the host exception
   // it carried.
-  bool was_pending = JS_HasException(ctx);
+  // Held, not just noted: a trap that throws during the read replaces what was
+  // pending, and JS_Throw frees the old one, so asking "was something pending"
+  // afterwards cannot tell a throw we caused from one that was already there.
+  // Comparing the values can.
+  JSValue j_was_pending = JS_HasException(ctx) ? JS_GetException(ctx) : JS_UNINITIALIZED;
+  bool was_pending = !JS_IsUninitialized(j_was_pending);
+  if (was_pending)
+    JS_Throw(ctx, JS_DupValue(ctx, j_was_pending));
 
   VALUE r_error = find_ruby_error_at(ctx, j_error);
-  if (!NIL_P(r_error) || was_pending || !JS_HasException(ctx))
+  if (!NIL_P(r_error) || !JS_HasException(ctx))
+  {
+    JS_FreeValue(ctx, j_was_pending);
     return r_error;
+  }
+
+  JSValue j_now = JS_GetException(ctx);
+  if (was_pending && JS_VALUE_GET_PTR(j_now) == JS_VALUE_GET_PTR(j_was_pending))
+  {
+    // The same throw is still sitting there, so it is not ours to take.
+    JS_Throw(ctx, j_now);
+    JS_FreeValue(ctx, j_was_pending);
+    return r_error;
+  }
+  JS_FreeValue(ctx, j_was_pending);
+  JS_Throw(ctx, j_now);
 
   // The read was answered by a Proxy's descriptor trap, and the trap threw.
   // That throw is taken rather than left for an unrelated evaluation, and asked
@@ -1205,12 +1226,17 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
 
     // Check for Ruby object proxy (e.g., File proxy with rb_object_id on target)
     {
-      JSValue j_rb_id = JS_GetPropertyStr(ctx, j_val, "rb_object_id");
-      // The read is a getter's to answer, so it can throw, and what it throws
+      // Own data only, like the other two readers: through the prototype chain
+      // an accessor on Object.prototype answers for every object crossing back,
+      // and one line of guest setup turns a returned Hash into whichever host
+      // File or CryptoKey the guest already holds a handle for.
+      JSValue j_rb_id = JS_UNDEFINED;
+      bool has_handle = j_read_own_handle(ctx, j_val, &j_rb_id);
+      // A Proxy trap can still answer that read and throw, and what it throws
       // can be a bridge reporting a host failure.
-      if (JS_IsException(j_rb_id))
+      if (!has_handle && JS_IsException(j_rb_id))
         quickjsrb_drain_pending(ctx);
-      else if (JS_VALUE_GET_NORM_TAG(j_rb_id) == JS_TAG_INT || JS_VALUE_GET_NORM_TAG(j_rb_id) == JS_TAG_FLOAT64)
+      else if (has_handle && (JS_VALUE_GET_NORM_TAG(j_rb_id) == JS_TAG_INT || JS_VALUE_GET_NORM_TAG(j_rb_id) == JS_TAG_FLOAT64))
       {
         int64_t object_id;
         JS_ToInt64(ctx, &object_id, j_rb_id);
@@ -1676,6 +1702,12 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
     if (sadnessHappened)
     {
       VALUE r_error = rb_errinfo();
+      // Cleared, like every other recovery site here. Left set, it survives
+      // eval_code returning normally: a guest that merely catches the throw
+      // leaves the host's $! holding it, later raises chain to it through
+      // cause (#126), and a script that does nothing else exits 1 with a
+      // printed backtrace it never raised.
+      rb_set_errinfo(Qnil);
       j_result = j_error_from_ruby_error(ctx, r_error);
       // Rejecting with the sentinel would hand the guest a value it cannot
       // name, so the promise is left unsettled and the throw that produced it,
@@ -1721,6 +1753,7 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
     if (sadnessHappened)
     {
       VALUE r_error = rb_errinfo();
+      rb_set_errinfo(Qnil);
       JSValue j_error = j_error_from_ruby_error(ctx, r_error);
       if (JS_IsException(j_error))
         return JS_EXCEPTION;

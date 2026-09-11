@@ -405,6 +405,24 @@ describe Quickjs do
       vm&.dispose!
     end
 
+    # An accessor on Object.prototype answers a handle read that walks the
+    # prototype chain, and then every object crossing back to Ruby becomes
+    # whichever host object the guest already holds a handle for.
+    it "does not let an inherited handle decide what a value converts to" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @handle_file }
+      vm.eval_code('globalThis.H = get_file().rb_object_id; 1')
+
+      converted = vm.eval_code(<<~JS)
+        Object.defineProperty(Object.prototype, 'rb_object_id', { get() { return globalThis.H }, configurable: true });
+        ({ a: 1, b: { c: 2 } })
+      JS
+
+      _(converted).must_equal({ 'a' => 1, 'b' => { 'c' => 2 } })
+    ensure
+      vm&.dispose!
+    end
+
     # memory_poisoned? answers for out-of-memory only, so a host following the
     # README's recycle pattern would otherwise hold a VM that looks healthy and
     # refuses everything.
@@ -422,6 +440,21 @@ describe Quickjs do
     ensure
       SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
       SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      vm&.dispose!
+    end
+
+    # The bridge reads rb_errinfo and used not to clear it, so $! survived
+    # eval_code returning normally: later raises chained to it through cause,
+    # and a script that did nothing else exited 1 with a backtrace it never
+    # raised.
+    it "leaves the host's $! alone once the guest has caught the throw" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise IOError, 'host' }
+
+      vm.eval_code('try { boom() } catch (e) {} 1')
+
+      _($!).must_be_nil
+    ensure
       vm&.dispose!
     end
 
@@ -468,16 +501,76 @@ describe Quickjs do
       vm&.dispose! unless vm&.disposed?
     end
 
-    it "still gives back a bridged exception thrown as it was handed over" do
+
+    # A Proxy answers a descriptor read with its own trap, so guest code can
+    # run while an error is being recovered. What it throws is taken, including
+    # a host exception it parked on the way, and a trap that throws another
+    # Proxy is refused rather than followed, so the guest does not choose how
+    # far this goes.
+    it "takes what a thrown Proxy's descriptor trap raises, at any nesting" do
       vm = Quickjs::VM.new
-      vm.define_function(:boom) { raise ArgumentError, 'host' }
+      vm.define_function(:boom) { raise IOError.new('host'), cause: nil }
+      vm.eval_code(<<~JS)
+        globalThis.chain = (n) => n === 0
+          ? new Proxy({}, { getOwnPropertyDescriptor() { boom() } })
+          : new Proxy({}, { getOwnPropertyDescriptor() { throw chain(n - 1) } });
+      JS
 
-      error = _ { vm.eval_code("try { boom() } catch (e) { throw e }") }.must_raise ArgumentError
+      [0, 1, 32, 40].each do |depth|
+        20.times { vm.eval_code("globalThis.c = chain(#{depth}); throw { toString() { throw globalThis.c } }") rescue nil }
+      end
 
-      _(error.message).must_equal 'host'
+      GC.start(full_mark: true, immediate_sweep: true)
+      before = ObjectSpace.each_object(IOError).count
+      vm.dispose!
+      GC.start(full_mark: true, immediate_sweep: true)
+
+      _(before - ObjectSpace.each_object(IOError).count).must_equal 0
     ensure
-      vm&.dispose!
+      vm&.dispose! unless vm&.disposed?
     end
+
+    # What counts as a Proxy is settled at init from one this extension builds.
+    # Read off the guest's global instead and a script decides the answer, for
+    # this VM and, when the answer is remembered process-wide, for later ones.
+    it "is not told what a Proxy is by the guest" do
+      poisoned = Quickjs::VM.new
+      poisoned.define_function(:boom) { raise ArgumentError, 'host secret' }
+      poisoned.eval_code('globalThis.Proxy = function () { return new Error("decoy") }; 1')
+      _ { poisoned.eval_code('boom()') }.must_raise ArgumentError
+
+      later = Quickjs::VM.new
+      later.define_function(:boom) { raise ArgumentError, 'host secret' }
+      _ { later.eval_code('boom()') }.must_raise ArgumentError
+    ensure
+      poisoned&.dispose!
+      later&.dispose!
+    end
+
+    it "still knows a Proxy after the guest deletes the constructor" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise IOError.new('x'), cause: nil }
+      vm.eval_code('globalThis.P = Proxy; delete globalThis.Proxy;' \
+                   'globalThis.inner = new P({}, { getOwnPropertyDescriptor() { boom() } });' \
+                   'globalThis.c = new P({}, { getOwnPropertyDescriptor() { throw globalThis.inner } }); 1')
+
+      # The outer trap runs; what it throws is a Proxy, so the inner one is
+      # refused rather than followed, and the bridge is never reached.
+      calls_before = 0
+      vm.define_function(:count) { calls_before += 1 }
+      20.times { vm.eval_code('count(); throw { toString() { throw globalThis.c } }') rescue nil }
+      _(calls_before).must_equal 20
+
+      GC.start(full_mark: true, immediate_sweep: true)
+      before = ObjectSpace.each_object(IOError).count
+      vm.dispose!
+      GC.start(full_mark: true, immediate_sweep: true)
+
+      _(before - ObjectSpace.each_object(IOError).count).must_equal 0
+    ensure
+      vm&.dispose! unless vm&.disposed?
+    end
+
     # The handle is written with defineProperty, not assignment, so an accessor
     # a guest installs on Error.prototype cannot absorb the write and leave the
     # error without an own one.
@@ -492,6 +585,21 @@ describe Quickjs do
     ensure
       vm&.dispose!
     end
+
+    # Both properties are defined rather than assigned, so an accessor the guest
+    # installs on Error.prototype cannot absorb either write.
+    it "reports the message through a poisoned Error.prototype" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise ArgumentError, 'host secret' }
+      vm.eval_code("Object.defineProperty(Error.prototype, 'message', {set(v) {}, get() { return 'ghost' }, configurable: true}); 1")
+
+      seen = vm.eval_code("let m = 'none'; try { boom() } catch (e) { m = e.message } m")
+
+      _(seen).must_equal 'host secret'
+    ensure
+      vm&.dispose!
+    end
+
     it "shows the guest the same shape a native Error has" do
       vm = Quickjs::VM.new
       vm.define_function(:boom) { raise ArgumentError, 'host secret' }
@@ -505,6 +613,7 @@ describe Quickjs do
     ensure
       vm&.dispose!
     end
+
     it "keeps the handle off what the guest enumerates" do
       vm = Quickjs::VM.new
       vm.define_function(:boom) { raise ArgumentError, 'host' }
@@ -512,6 +621,35 @@ describe Quickjs do
       keys = vm.eval_code("let k = []; try { boom() } catch (e) { k = Object.keys(e) } k.join(',')")
 
       _(keys).wont_include 'rb_object_id'
+    ensure
+      vm&.dispose!
+    end
+
+    # A throw an earlier unchecked read left pending is not one this read
+    # caused, and must not be handed back as the bridged error for whatever is
+    # being converted now.
+    it "does not claim a throw that was already pending" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise ArgumentError, 'host-secret' }
+
+      converted = vm.eval_code(<<~JS)
+        const p = new Proxy([], { get(t, k) { if (k === 'length') boom(); return Reflect.get(t, k) } });
+        ({ a: p, e: new Error('plain') })
+      JS
+
+      _(converted['e']).must_equal({})
+      _(converted['e']).wont_be_kind_of Exception
+    ensure
+      vm&.dispose!
+    end
+
+    it "still gives back a bridged exception thrown as it was handed over" do
+      vm = Quickjs::VM.new
+      vm.define_function(:boom) { raise ArgumentError, 'host' }
+
+      error = _ { vm.eval_code("try { boom() } catch (e) { throw e }") }.must_raise ArgumentError
+
+      _(error.message).must_equal 'host'
     ensure
       vm&.dispose!
     end

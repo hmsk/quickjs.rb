@@ -236,10 +236,16 @@ static VALUE r_find_alive_crypto_key(JSContext *ctx, JSValueConst j_key)
   // parked in alive_objects has to come back out: find_ruby_error is the only
   // thing that takes one out, so leaving it would pin one per call, at a rate
   // the guest picks.
-  JSValue j_handle = JS_GetPropertyStr(ctx, j_key, "rb_object_id");
-  if (JS_IsException(j_handle))
+  // Own data only, like the other two readers. Through the prototype chain an
+  // accessor on Object.prototype answers this, and then `{}` signs with a key
+  // it never carried a handle for, including one generated extractable: false.
+  JSValue j_handle = JS_UNDEFINED;
+  if (!j_read_own_handle(ctx, j_key, &j_handle))
   {
-    quickjsrb_drain_pending(ctx);
+    // A Proxy trap can answer the descriptor read and throw, and what it throws
+    // can be a bridge that parked a host exception on its way out.
+    if (JS_IsException(j_handle))
+      quickjsrb_drain_pending(ctx);
     return Qnil;
   }
 
