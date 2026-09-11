@@ -3,10 +3,25 @@
 
 static VALUE r_find_alive_rb_file(JSContext *ctx, JSValue j_handle)
 {
-  int64_t handle;
-  JS_ToInt64(ctx, &handle, j_handle);
+  // Initialised and checked like its siblings. Unreachable today, since the
+  // handle is the factory closure's own number and the bridges are never on
+  // the global, but it feeds a table lookup and would read a garbage key.
+  int64_t handle = 0;
+  if (JS_ToInt64(ctx, &handle, j_handle) < 0)
+  {
+    quickjsrb_drain_pending(ctx);
+    return Qnil;
+  }
   VMData *data = JS_GetContextOpaque(ctx);
-  return rb_hash_aref(data->alive_objects, LONG2NUM(handle));
+  VALUE r_file = rb_hash_aref(data->alive_objects, LL2NUM(handle));
+  // Only what this subsystem parked, the way both sibling readers check now.
+  // The table is shared with bridged exceptions and CryptoKeys, and the bridges
+  // below call File methods on whatever they are handed. Unreachable today,
+  // since the handle is the factory closure's own number, but the check is what
+  // makes that an invariant rather than an argument about reachability.
+  if (!rb_obj_is_kind_of(r_file, rb_cFile))
+    return Qnil;
+  return r_file;
 }
 
 static JSValue js_ruby_file_name(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv)
@@ -99,6 +114,32 @@ static JSValue js_ruby_file_array_buffer(JSContext *ctx, JSValueConst _this, int
   return promise;
 }
 
+// Hands the guest back the throw it made, rather than an error of our own,
+// which would tell it less than it already knew.
+//
+// Deliberately without unparking: the throw is going back into JS, and it is
+// the handle that lets it come out the other side as the host exception it
+// started as. Taking the entry here would leave the JS error carrying a handle
+// that resolves to nothing, and a caller that expected ArgumentError would get
+// a generic Quickjs::RuntimeError instead. A throw the guest then catches and
+// keeps stays parked, which is what any caught bridged error does: #114.
+static JSValue j_rethrow_the_guests_own(JSContext *ctx)
+{
+  // JS_Throw clears the uncatchable flag, so a deadline that fired inside the
+  // guest's valueOf would come back catchable and a script that caught it and
+  // returned would finish past its budget. Thrown the way js_poll_interrupts
+  // throws it instead, which is what it was before this touched it.
+  if (eval_budget_lapsed_now(ctx))
+  {
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    JS_ThrowInternalError(ctx, "interrupted");
+    JS_SetUncatchableException(ctx, TRUE);
+    return JS_EXCEPTION;
+  }
+
+  return JS_Throw(ctx, JS_GetException(ctx));
+}
+
 static JSValue js_ruby_file_slice(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv)
 {
   VALUE r_file = r_find_alive_rb_file(ctx, argv[0]);
@@ -111,8 +152,12 @@ static JSValue js_ruby_file_slice(JSContext *ctx, JSValueConst _this, int argc, 
   long start = 0;
   if (argc > 1 && !JS_IsUndefined(argv[1]))
   {
-    int64_t s;
-    JS_ToInt64(ctx, &s, argv[1]);
+    // The conversion runs the guest's valueOf, which can reach a bridge: an
+    // unchecked failure both parks the host exception and leaves s
+    // uninitialized to be used as an offset.
+    int64_t s = 0;
+    if (JS_ToInt64(ctx, &s, argv[1]) < 0)
+      return j_rethrow_the_guests_own(ctx);
     start = (long)s;
     if (start < 0)
       start = file_size + start;
@@ -125,8 +170,9 @@ static JSValue js_ruby_file_slice(JSContext *ctx, JSValueConst _this, int argc, 
   long end = file_size;
   if (argc > 2 && !JS_IsUndefined(argv[2]))
   {
-    int64_t e;
-    JS_ToInt64(ctx, &e, argv[2]);
+    int64_t e = 0;
+    if (JS_ToInt64(ctx, &e, argv[2]) < 0)
+      return j_rethrow_the_guests_own(ctx);
     end = (long)e;
     if (end < 0)
       end = file_size + end;
@@ -221,9 +267,10 @@ void quickjsrb_init_file_proxy(VMData *data)
 JSValue quickjsrb_file_to_js(JSContext *ctx, VALUE r_file)
 {
   VMData *data = JS_GetContextOpaque(ctx);
-  VALUE r_object_id = rb_funcall(r_file, rb_intern("object_id"), 0);
-  rb_hash_aset(data->alive_objects, r_object_id, r_file);
-  JSValue j_handle = JS_NewInt64(ctx, NUM2LONG(r_object_id));
+  VALUE r_object_id = alive_objects_register(data, r_file, NULL);
+  if (NIL_P(r_object_id))
+    return JS_ThrowInternalError(ctx, "quickjs: could not publish a handle for a host File");
+  JSValue j_handle = JS_NewInt64(ctx, NUM2LL(r_object_id));
   JSValue j_proxy = JS_Call(ctx, data->j_file_proxy_creator, JS_UNDEFINED, 1, &j_handle);
   JS_FreeValue(ctx, j_handle);
   return j_proxy;
