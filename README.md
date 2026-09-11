@@ -402,12 +402,15 @@ vm.memory_usage
 #      atom_count: Integer, str_count: Integer, obj_count: Integer,
 #      prop_count: Integer, shape_count: Integer,
 #      js_func_count: Integer, js_func_code_size: Integer,
-#      c_func_count: Integer, array_count: Integer }
+#      c_func_count: Integer, array_count: Integer,
+#      alloc_refusals: Integer }
 
 vm.gc!             # trigger a QuickJS GC cycle; returns nil
 
 vm.memory_poisoned? #=> false (true once the VM has hit out-of-memory)
 ```
+
+`alloc_refusals` in `memory_usage` counts the allocations this VM asked for and did not get. QuickJS carries on correctly through some of them, so a nonzero count is not by itself a VM in trouble; it is the one number that says the ceiling was reached at all, which `malloc_size` cannot once the failed allocation has been rolled back.
 
 When the JS heap exhausts its memory limit, QuickJS enters a fragile state where further evaluation can segfault the process. `memory_poisoned?` flips to `true` after such an event, and subsequent `eval_code` / `call` calls raise `Quickjs::RuntimeError` immediately instead of risking a crash. Rescue it and recreate the VM.
 

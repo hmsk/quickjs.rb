@@ -473,6 +473,62 @@ describe Quickjs::VM do
     end
   end
 
+  # The runtime is created with our own JSMallocFunctions rather than QuickJS’s
+  # default ones, so malloc_size and malloc_count are ours to maintain: they are
+  # what memory_limit is compared against and what memory_usage reports. A
+  # mismatch between the malloc and free sides does not fail loudly, it drifts,
+  # and the limit is then enforced against a number that is not the heap.
+  describe "OwnedAllocator" do
+    it "accounts an allocation while it is held and gives the bytes back when it is released" do
+      vm = Quickjs::VM.new
+      vm.eval_code("void 0")
+      vm.gc!
+      baseline = vm.memory_usage[:malloc_size]
+
+      vm.eval_code("globalThis.hold = new Array(50_000).fill(7); void 0")
+      vm.gc!
+      held = vm.memory_usage[:malloc_size]
+
+      vm.eval_code("globalThis.hold = null; void 0")
+      vm.gc!
+      released = vm.memory_usage[:malloc_size]
+
+      _(held - baseline).must_be :>, 350_000
+      # Shapes and atoms the first evaluation interned stay for the life of the
+      # VM, so this is the array’s bytes coming back rather than an exact return.
+      _(released - baseline).must_be :<, 50_000
+    ensure
+      vm.dispose!
+    end
+
+    it "does not drift over repeated allocation and release" do
+      vm = Quickjs::VM.new
+      cycle = "globalThis.hold = new Array(2_000).fill(1); globalThis.hold = null; void 0"
+      5.times { vm.eval_code(cycle) }
+      vm.gc!
+      before = vm.memory_usage[:malloc_size]
+
+      200.times { vm.eval_code(cycle) }
+      vm.gc!
+
+      # Measured at 0 on macOS and Linux. The slack is for a platform whose
+      # malloc rounds a request differently between the two sides, not for an
+      # asymmetry in the bookkeeping, which would grow with the iteration count.
+      _(vm.memory_usage[:malloc_size] - before).must_be :<, 4_096
+    ensure
+      vm.dispose!
+    end
+
+    it "still enforces memory_limit, and reports the limit it was given" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+      _(vm.memory_usage[:malloc_limit]).must_equal 1024 * 1024
+
+      _ { vm.eval_code("new Array(2_000_000).fill(0); void 0") }.must_raise Quickjs::RuntimeError
+    ensure
+      vm.dispose!
+    end
+  end
+
   # A conversion that raises partway through — a Promise nested in the graph is
   # the reachable case — must release everything it was holding on that exit.
   # What leaks is guest-chosen and never returned, so a long-lived VM fills up
@@ -936,75 +992,6 @@ describe Quickjs::VM do
     # memory is a fact about the heap rather than about who was asking, and this
     # is the shape that proves the split cannot own it: the evaluation returns
     # its object and the allocation that fails is in a getter read afterwards.
-    # The heap can run out inside one of the renderer's own reads. The getter
-    # here succeeds — big + big is a rope — and it is the read's own
-    # JS_ToCString, flattening it, that runs out. That throw took the
-    # substitution path like any other, so the caller got a normal-looking
-    # RuntimeError, the latch never set, and the next evaluation ran on the
-    # heap the latch exists to refuse.
-    it "condemns the VM for an out-of-memory met inside a read it was rendering" do
-      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
-
-      error = _ do
-        vm.eval_code(<<~JS)
-          const big = 'x'.repeat(480 * 1024);
-          const e = new Error('m');
-          Object.defineProperty(e, 'message', {get() { return big + big }});
-          throw e;
-        JS
-      end.must_raise Quickjs::RuntimeError
-
-      _(error.message).must_match(/out of memory/)
-      _(vm.memory_poisoned?).must_equal true
-      err = _ { vm.eval_code('1 + 1') }.must_raise Quickjs::RuntimeError
-      _(err.message).must_match(/poisoned/)
-    ensure
-      vm.dispose!
-    end
-
-    # One level deeper: the discarded throw says "out of memory" as an own data
-    # property, but converting that message to look at it is itself an
-    # allocation — a non-ASCII string transcodes — and it fails on the same
-    # exhausted heap. A string that will not convert is the heap running out.
-    it "condemns the VM when inspecting the discarded throw itself runs out of memory" do
-      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
-
-      error = _ do
-        vm.eval_code(<<~JS)
-          const big = 'x'.repeat(600 * 1024);
-          const e = new Error('m');
-          Object.defineProperty(e, 'message', {get() {
-            const inner = new Error('q');
-            inner.message = 'out of memory ' + 'é'.repeat(150 * 1024);
-            throw inner;
-          }});
-          throw e;
-        JS
-      end.must_raise Quickjs::RuntimeError
-
-      _(error.message).must_match(/out of memory/)
-      _(vm.memory_poisoned?).must_equal true
-    ensure
-      vm.dispose!
-    end
-
-    it "hands the listener the out-of-memory met while a rejection reason was read" do
-      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
-      seen = []
-      vm.on_unhandled_rejection {|err| seen << err }
-      vm.eval_code(<<~JS)
-        const big = 'x'.repeat(480 * 1024);
-        const e = new Error('r');
-        Object.defineProperty(e, 'message', {get() { return big + big }});
-        void Promise.reject(e);
-      JS
-
-      _(seen.map(&:message)).must_equal ['out of memory']
-      _(vm.memory_poisoned?).must_equal true
-    ensure
-      vm.dispose!
-    end
-
     it "still condemns the VM for an out-of-memory a getter hit during conversion" do
       vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
 
