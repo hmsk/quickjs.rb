@@ -131,7 +131,13 @@ static JSValue j_rethrow_the_guests_own(JSContext *ctx)
   // throws it instead, which is what it was before this touched it.
   if (eval_budget_lapsed_now(ctx))
   {
-    JS_FreeValue(ctx, JS_GetException(ctx));
+    // Drained, not freed. This branch is the one that does not hand the throw
+    // back, so the reasoning quickjsrb_drain_pending gives for unparking
+    // applies here and not to the return below: nothing will carry the guest's
+    // throw out now, and a bridge it reached on the way has already parked the
+    // host exception, so freeing the JS error is the one path that leaves that
+    // entry with nothing able to take it.
+    quickjsrb_drain_pending(ctx);
     JS_ThrowInternalError(ctx, "interrupted");
     JS_SetUncatchableException(ctx, TRUE);
     return JS_EXCEPTION;
@@ -267,12 +273,21 @@ void quickjsrb_init_file_proxy(VMData *data)
 JSValue quickjsrb_file_to_js(JSContext *ctx, VALUE r_file)
 {
   VMData *data = JS_GetContextOpaque(ctx);
-  VALUE r_object_id = alive_objects_register(data, r_file, NULL);
+  // Taken in the same raise-safe stretch as the draw, so the rollback below
+  // does not dispatch from inside a JSCFunction on its way out.
+  VALUE r_file_object_id = rb_obj_id(r_file);
+  bool registered_here = false;
+  VALUE r_object_id = alive_objects_register(data, r_file, &registered_here);
   if (NIL_P(r_object_id))
     return JS_ThrowInternalError(ctx, "quickjs: could not publish a handle for a host File");
   JSValue j_handle = JS_NewInt64(ctx, NUM2LL(r_object_id));
   JSValue j_proxy = JS_Call(ctx, data->j_file_proxy_creator, JS_UNDEFINED, 1, &j_handle);
   JS_FreeValue(ctx, j_handle);
+  if (JS_IsException(j_proxy) && registered_here)
+    // The third writer, taught the rollback the other two already had: the
+    // creator can fail, and a row left behind anchors this File and its
+    // descriptor for the life of the VM with nothing in JS able to reach it.
+    alive_objects_unregister(data, r_object_id, r_file_object_id);
   return j_proxy;
 }
 

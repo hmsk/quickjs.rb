@@ -534,6 +534,80 @@ describe "RubyFileProxy" do
       vm&.dispose!
     end
   end
+  # The proxy publishes its rb_object_id to the guest, and a thrown error
+  # carrying that id used to reach the same table the exception bridge reads,
+  # which deletes what it finds. The File stayed an instance of File and
+  # answered undefined for everything.
+  describe "when the guest throws the proxy's own rb_object_id" do
+    before do
+      @vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      @vm.define_function(:get_file) { @file }
+      @vm.eval_code('globalThis.h = get_file();')
+    end
+
+    after { @vm.dispose! }
+
+    it "leaves the file readable" do
+      # Broadly, so that what fails when the guard goes is the readability
+      # below rather than the class of the throw, which the test after this
+      # one is for.
+      _ { @vm.eval_code('throw Object.assign(new Error("guest"), {rb_object_id: globalThis.h.rb_object_id})') }
+        .must_raise Exception
+
+      _(@vm.eval_code('globalThis.h.name')).must_equal File.basename(@file.path)
+      _(@vm.eval_code('globalThis.h.size')).must_equal 'hello world'.bytesize
+    end
+
+    it "reports the forged throw as the guest's own error" do
+      error = _ { @vm.eval_code('throw Object.assign(new Error("guest"), {rb_object_id: globalThis.h.rb_object_id})') }
+        .must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'guest'
+    end
+  end
+  # slice converts its bounds with JS_ToInt64, which runs the guest's valueOf.
+  # An unchecked failure parked whatever a bridge raised there and then used an
+  # uninitialised offset.
+  describe "slice with a bound the guest computes" do
+    it "gives the guest back its own error" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.eval_code('globalThis.h = get_file();')
+
+      message = vm.eval_code("let m = 'none'; try { globalThis.h.slice({valueOf() { throw new Error('no') }}, 5) } catch (e) { m = e.message } m")
+
+      _(message).must_equal 'no'
+    ensure
+      vm&.dispose!
+    end
+
+    # The throw goes back into JS carrying its handle, which is what lets it
+    # come out the other side as the host exception it started as. Unparking it
+    # here would hand the caller a generic Quickjs::RuntimeError instead.
+    it "still reports the host exception the bound raised" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:boom) { raise ArgumentError, 'host' }
+      vm.define_function(:get_file) { @file }
+      vm.eval_code('globalThis.h = get_file();')
+
+      error = _ { vm.eval_code("globalThis.h.slice({valueOf() { boom() }}, 5)") }.must_raise ArgumentError
+
+      _(error.message).must_equal 'host'
+    ensure
+      vm&.dispose!
+    end
+
+    it "still slices when the bounds are ordinary" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.eval_code('globalThis.h = get_file();')
+
+      _(vm.eval_code('await globalThis.h.slice(0, 5).text()')).must_equal 'hello'
+      _(vm.eval_code('await globalThis.h.slice(-5).text()')).must_equal 'world'
+    ensure
+      vm&.dispose!
+    end
+  end
 end
 
 describe "JS File to Ruby" do
