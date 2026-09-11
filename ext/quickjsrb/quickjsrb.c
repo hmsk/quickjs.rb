@@ -37,6 +37,9 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val);
 typedef struct ConvState ConvState;
 static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv);
 static VALUE raise_js_exception(JSContext *ctx);
+// Defined beside the renderer that is its main caller; needed here because the
+// conversion meets an exhaustion it cannot raise for one level earlier.
+static bool condemn_if_out_of_memory(VMData *data, JSContext *ctx, JSValueConst j_val);
 static VALUE vm_m_memoryUsage(VALUE r_self);
 static VALUE vm_m_runGC(VALUE r_self);
 static VALUE vm_m_memoryPoisoned(VALUE r_self);
@@ -442,6 +445,22 @@ static VALUE js_plain_object_to_rb(JSContext *ctx, JSValue j_val, ConvState *con
   if (JS_GetOwnPropertyNames(ctx, &ptab, &plen, j_val, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0)
   {
     conv_frame_pop(conv);
+    // The empty hash is what this has always answered for an enumeration it
+    // could not make, and #119 owns the question of whether that should raise.
+    // What it must not do is swallow the heap running out: this is the one
+    // failure here that outlives the value, and the caller would go on
+    // evaluating on the heap that refused.
+    JSValue j_pending = JS_GetException(ctx);
+    if (condemn_if_out_of_memory(JS_GetContextOpaque(ctx), ctx, j_pending))
+    {
+      // Handed back rather than dropped: the string site below reports its
+      // refusal and so does this one now, or the caller is told {} for an
+      // object it had and finds out at the next call. A guest trap that threw
+      // still answers {}, which is #119.
+      JS_Throw(ctx, j_pending);
+      return raise_js_exception(ctx);
+    }
+    JS_FreeValue(ctx, j_pending);
     return rb_hash_new();
   }
   CONV_FRAME(conv, depth)->ptab = ptab;
@@ -1155,8 +1174,12 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
     // transparently, so both tags share the same conversion path.
     size_t len;
     const char *str = JS_ToCStringLen(ctx, &len, j_val);
+    // The value is already a string, so nothing guest-written runs here and
+    // only a failed allocation answers NULL, as for the atom above. Returning
+    // nil handed the caller an empty result for a string it did have and left
+    // the refusal unreported, so the next call ran on the heap that refused.
     if (str == NULL)
-      return Qnil;
+      return raise_js_exception(ctx);
     VALUE r_str = rb_utf8_str_new(str, (long)len);
     JS_FreeCString(ctx, str);
     return r_str;
@@ -3483,7 +3506,22 @@ static VALUE vm_m_preloadModuleBytecode(VALUE r_self, VALUE r_bytecode, VALUE r_
   js_module_set_import_meta(data->context, j_mod, FALSE, FALSE);
 
   JSAtom j_baked = JS_GetModuleName(data->context, JS_VALUE_GET_PTR(j_mod));
+  // An atom is already a string, so only a refusal answers NULL here, and it
+  // takes a non-ASCII name to get that far: JS_ToCStringLen2 hands back the
+  // string's own buffer for a pure-ASCII one, which cannot fail. The empty name
+  // it used to fall back to is compared against the name the caller filed the
+  // blob under two checks below, so an exhaustion was reported as a
+  // disagreement about names, on a VM the latch had already condemned.
+  uint64_t refusals_before = data->alloc_refusals;
   const char *baked = JS_AtomToCString(data->context, j_baked);
+  if (baked == NULL && data->alloc_refusals > refusals_before)
+  {
+    data->oom_poisoned = true;
+    JS_FreeAtom(data->context, j_baked);
+    JS_FreeValue(data->context, j_mod);
+    JS_FreeValue(data->context, JS_GetException(data->context));
+    rb_exc_raise(r_out_of_memory_error());
+  }
   VALUE r_baked = rb_str_new_cstr(baked ? baked : "");
   if (baked)
     JS_FreeCString(data->context, baked);

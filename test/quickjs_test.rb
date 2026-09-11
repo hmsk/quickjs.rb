@@ -1243,6 +1243,23 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
+    # The string branch of the conversion answered nil for a failed
+    # JS_ToCStringLen, which on a string value is an allocation and nothing
+    # else. The caller got nil for a string it did have, the refusal went
+    # unreported, and the next call ran on the heap that refused.
+    it "reports the out-of-memory when a returned string cannot be converted" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      error = _ do
+        vm.eval_code("const big = 'x'.repeat(480 * 1024); big + big")
+      end.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'out of memory'
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
     # The exhaustion that got as far as an Error and no further. JS_ThrowError2
     # allocates the object, JS_NewString("out of memory") is then refused
     # inside in_out_of_memory, and the JS_EXCEPTION sentinel is stored as the
@@ -1350,6 +1367,21 @@ describe Quickjs::VM do
       vm.dispose!
     end
 
+    # An enumeration that could not allocate its own property table answered an
+    # empty hash for an object that had 71,680 of them, and the caller learned
+    # only at the next call. It reports now, like the string conversion beside
+    # it; a guest trap that threw still answers {}, which is #119.
+    it "reports the out-of-memory when an object's properties cannot be enumerated" do
+      vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+
+      error = _ { vm.eval_code('new Float64Array(71680)') }.must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'out of memory'
+      _(vm.memory_poisoned?).must_equal true
+    ensure
+      vm.dispose!
+    end
+
     # Every uncaught throw reaches the rejection tracker before the renderer,
     # since eval is async-wrapped, so a bridged host error passes through the
     # reason test on its way out. The renderer answers those at its
@@ -1373,6 +1405,37 @@ describe Quickjs::VM do
       _(vm.eval_code('1 + 1')).must_equal 2
     ensure
       vm.dispose!
+    end
+
+    # The baked module name is only unreadable for a non-ASCII one, since
+    # JS_ToCStringLen2 hands back the string's own buffer for pure ASCII. The
+    # empty name it fell back to was then compared against the name the caller
+    # filed the blob under, so an exhaustion arrived as a disagreement about
+    # names on a VM the latch had already condemned.
+    it "reports the out-of-memory when a module's baked name cannot be read" do
+      importable = Quickjs.compile_module('export const x = 1', filename: 'あ' * 50_000)
+      bytecode = importable.send(:bytecode)
+      raised = []
+
+      (79_000..97_000).step(3_000) do |filler|
+        vm = Quickjs::VM.new(memory_limit: 1024 * 1024)
+        begin
+          vm.eval_code("globalThis.f = new Float64Array(#{filler}); void 0")
+          vm.send(:_preload_module_bytecode, bytecode, importable.canonical_name)
+        rescue Quickjs::RuntimeError => e
+          raised << [e.message, vm.memory_poisoned?]
+        rescue ArgumentError => e
+          raised << [e.message, vm.memory_poisoned?]
+        ensure
+          vm.dispose!
+        end
+      end
+
+      refute_empty raised, 'no filler left the name unreadable; widen the sweep for this platform'
+      raised.each do |message, poisoned|
+        _(message).must_equal 'out of memory'
+        _(poisoned).must_equal true
+      end
     end
 
     # The bridged-error question is asked inside the message branch, where
