@@ -410,9 +410,15 @@ vm.gc!             # trigger a QuickJS GC cycle; returns nil
 vm.memory_poisoned? #=> false (true once the VM has hit out-of-memory)
 ```
 
+When the JS heap exhausts its memory limit, QuickJS enters a fragile state where further evaluation can segfault the process. `memory_poisoned?` flips to `true` after such an event, and subsequent `eval_code` / `call` calls raise `Quickjs::RuntimeError` immediately instead of risking a crash. Rescue it and recreate the VM.
+
+The flag takes two things together, and neither on its own. The allocator must have actually refused an allocation during the call, which no JavaScript can bring about by saying so, and QuickJS must be the one reporting it: its own out-of-memory error, an error whose message it could not afford to build, or no error object at all. So JavaScript that merely throws an error reading `out of memory` leaves the VM alone, and a real exhaustion is still caught at either end where there is nothing left to read, whether it arrives as a throw or as a promise rejection.
+
 `alloc_refusals` in `memory_usage` counts the allocations this VM asked for and did not get. QuickJS carries on correctly through some of them, so a nonzero count is not by itself a VM in trouble; it is the one number that says the ceiling was reached at all, which `malloc_size` cannot once the failed allocation has been rolled back.
 
-When the JS heap exhausts its memory limit, QuickJS enters a fragile state where further evaluation can segfault the process. `memory_poisoned?` flips to `true` after such an event, and subsequent `eval_code` / `call` calls raise `Quickjs::RuntimeError` immediately instead of risking a crash. Rescue it and recreate the VM.
+Whatever the guest says for itself is reported as itself. JavaScript that catches its own out-of-memory and then throws a `TypeError`, or hands you a rejection carrying its own error, or runs past its `timeout_msec`, gets that error and keeps its VM, exactly as it would have without the earlier exhaustion. The heap is condemned when QuickJS says the heap is the problem, and not when the guest happens to fail next.
+
+One asymmetry to know about: an exhaustion that arrives as a promise rejection is judged when the rejection is seen with no handler attached, so `f().catch(() => {})` around a real exhaustion condemns the VM where the synchronous `try { … } catch {}` around the same allocation does not. Nothing revisits that verdict once a handler attaches. A handler attached before the rejection happens, as in `async function f() { await null; BIG }`, is never seen by it at all and leaves the VM alone.
 
 ```rb
 vm = Quickjs::VM.new(memory_limit: 256 * 1024 * 1024)
