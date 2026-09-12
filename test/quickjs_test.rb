@@ -298,6 +298,41 @@ describe Quickjs do
       vm&.dispose!
     end
 
+    # A Hash or an Array we build for the guest is filled with defines for the
+    # same reason a bridged error's properties are: an accessor the guest put
+    # on a prototype otherwise takes the value and leaves no own property.
+    it "does not hand a returned Hash's values to a guest's setter" do
+      vm = Quickjs::VM.new
+      vm.define_function(:get_hash) { { 'token' => 'secret' } }
+      vm.eval_code(<<~JS)
+        globalThis.stolen = null;
+        Object.defineProperty(Object.prototype, 'token',
+          { set(v) { globalThis.stolen = v }, get() { return 'GHOST' }, configurable: true });
+      JS
+
+      seen = vm.eval_code("const h = get_hash(); [h.token, Object.getOwnPropertyNames(h).join(','), globalThis.stolen].join('|')")
+
+      _(seen).must_equal 'secret|token|'
+    ensure
+      vm&.dispose!
+    end
+
+    it "does not hand a returned Array's elements to a guest's setter" do
+      vm = Quickjs::VM.new
+      vm.define_function(:get_ary) { [10, 20, 30] }
+      vm.eval_code(<<~JS)
+        globalThis.taken = { n: 0 };
+        Object.defineProperty(Array.prototype, 0,
+          { set(v) { globalThis.taken.n++ }, get() { return 'GHOST' }, configurable: true });
+      JS
+
+      seen = vm.eval_code("const a = get_ary(); [a.length, a[0], globalThis.taken.n].join('|')")
+
+      _(seen).must_equal '3|10|0'
+    ensure
+      vm&.dispose!
+    end
+
     # Drawing a handle calls out to SecureRandom, which a host's own suite can
     # stub flat. Nothing polls a QuickJS interrupt inside a C loop, so an
     # unbounded retry there is not something timeout_msec can end: before this
