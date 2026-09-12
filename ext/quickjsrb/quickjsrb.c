@@ -178,7 +178,20 @@ static int rb_hash_entry_to_js(VALUE r_key, VALUE r_val, VALUE extra)
     return ST_STOP;
   }
 
-  JS_SetPropertyStr(arg->ctx, arg->j_obj, key_cstr, j_val);
+  // Defined, not assigned, on an object we just built and are about to hand
+  // over: JS_SetPropertyStr walks the prototype chain, so a setter the guest
+  // installed on Object.prototype under this key receives the host's value and
+  // the object goes back with no own property of that name at all. It also
+  // keeps a "__proto__" key a key, rather than letting it reparent the object.
+  if (JS_DefinePropertyValueStr(arg->ctx, arg->j_obj, key_cstr, j_val, JS_PROP_C_W_E) < 0)
+  {
+    // Reported rather than shrugged off: the object would otherwise go back
+    // looking complete, missing that one key, with the throw the define set
+    // left for whatever asks next. A key the guest can then answer for with a
+    // prototype accessor is exactly what defining it was meant to prevent.
+    arg->failed = true;
+    return ST_STOP;
+  }
   return ST_CONTINUE;
 }
 
@@ -237,7 +250,14 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
         return JS_EXCEPTION;
       }
 
-      JS_SetPropertyUint32(ctx, j_arr, (uint32_t)i, j_element);
+      // Defined for the same reason, which reaches elements too: any index
+      // property on Array.prototype costs the fast array path, and the write
+      // then walks the chain into the guest's setter.
+      if (JS_DefinePropertyValueUint32(ctx, j_arr, (uint32_t)i, j_element, JS_PROP_C_W_E) < 0)
+      {
+        JS_FreeValue(ctx, j_arr);
+        return JS_EXCEPTION;
+      }
     }
     return j_arr;
   }
