@@ -61,6 +61,10 @@ static VALUE js_buffer_to_ruby_str(JSContext *ctx, JSValueConst j_val)
 }
 
 // Build a Ruby Array of strings from a JS array value.
+#define QUICKJSRB_MAX_KEY_USAGES 1024
+
+// Qnil when the list is longer than any usages list can be, which the
+// callers turn into a TypeError before they create a promise to reject.
 static VALUE js_usages_to_ruby_array(JSContext *ctx, JSValueConst j_usages)
 {
   // Every read here is a property of an object the guest handed in, answerable
@@ -83,6 +87,21 @@ static VALUE js_usages_to_ruby_array(JSContext *ctx, JSValueConst j_usages)
   }
   JS_FreeValue(ctx, j_len);
 
+  // The guest writes this length, and the loop below does a property read and
+  // a Ruby allocation per step without polling a QuickJS interrupt, so
+  // timeout_msec cannot end it: measured, a length of 10,000,000 runs 1.9s
+  // past a 100ms budget and leaves the VM out of memory, which a guest gets to
+  // choose by passing a number. There are eight key usages in the spec, so
+  // anything near this bound is not a usages list; refused rather than
+  // truncated, because a truncated one would be accepted as if the guest had
+  // asked for what is left.
+  // A negative length is an empty sequence, not too many entries: WebIDL's
+  // ToLength clamps it to 0, and main answered [] for it. JS_ToInt32 wraps, so
+  // 2**31 arrives here negative and means the same thing.
+  if (count < 0)
+    count = 0;
+  if (count > QUICKJSRB_MAX_KEY_USAGES)
+    return Qnil;
   for (int32_t i = 0; i < count; i++)
   {
     JSValue j_u = JS_GetPropertyUint32(ctx, j_usages, (uint32_t)i);
@@ -128,6 +147,27 @@ static void js_settle_or_reject(JSContext *ctx, JSValueConst *resolving_funcs, J
     JS_FreeValue(ctx, j_key);
   }
   JS_FreeValue(ctx, j_settled);
+}
+
+// A rejected promise carrying a TypeError. These entry points are specified to
+// always return a promise, so a refusal decided before the operation starts
+// still has to arrive as a rejection rather than as a throw at the call: a
+// guest writing importKey(...).catch(h) would otherwise never reach h.
+static JSValue js_rejected_type_error(JSContext *ctx, const char *message)
+{
+  JSValue resolving_funcs[2];
+  JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+  if (JS_IsException(promise))
+    return JS_EXCEPTION;
+
+  JS_ThrowTypeError(ctx, "%s", message);
+  JSValue j_thrown = JS_GetException(ctx);
+  JSValue j_settled = JS_Call(ctx, resolving_funcs[1], JS_UNDEFINED, 1, (JSValueConst *)&j_thrown);
+  JS_FreeValue(ctx, j_thrown);
+  JS_FreeValue(ctx, j_settled);
+  JS_FreeValue(ctx, resolving_funcs[0]);
+  JS_FreeValue(ctx, resolving_funcs[1]);
+  return promise;
 }
 
 // Reject a promise with a plain JS Error built from Ruby exception info.
@@ -834,6 +874,8 @@ static JSValue js_subtle_generate_key(JSContext *ctx, JSValueConst this_val, int
   VALUE r_algo_hash = js_algo_to_ruby_hash(ctx, argv[0]);
   VALUE r_extractable = JS_ToBool(ctx, argv[1]) ? Qtrue : Qfalse;
   VALUE r_usages = js_usages_to_ruby_array(ctx, argv[2]);
+  if (NIL_P(r_usages))
+    return js_rejected_type_error(ctx, "SubtleCrypto: keyUsages has more entries than a key can have");
 
   JSValue promise, resolving_funcs[2];
   promise = JS_NewPromiseCapability(ctx, resolving_funcs);
@@ -926,6 +968,8 @@ static JSValue js_subtle_import_key(JSContext *ctx, JSValueConst this_val, int a
   VALUE r_algo_hash = js_algo_to_ruby_hash(ctx, argv[2]);
   VALUE r_extractable = JS_ToBool(ctx, argv[3]) ? Qtrue : Qfalse;
   VALUE r_usages = js_usages_to_ruby_array(ctx, argv[4]);
+  if (NIL_P(r_usages))
+    return js_rejected_type_error(ctx, "SubtleCrypto: keyUsages has more entries than a key can have");
 
   JSValue promise, resolving_funcs[2];
   promise = JS_NewPromiseCapability(ctx, resolving_funcs);
@@ -1275,6 +1319,8 @@ static JSValue js_subtle_derive_key(JSContext *ctx, JSValueConst this_val, int a
   VALUE r_derived_algo_hash = js_algo_to_ruby_hash(ctx, argv[2]);
   VALUE r_extractable = JS_ToBool(ctx, argv[3]) ? Qtrue : Qfalse;
   VALUE r_usages = js_usages_to_ruby_array(ctx, argv[4]);
+  if (NIL_P(r_usages))
+    return js_rejected_type_error(ctx, "SubtleCrypto: keyUsages has more entries than a key can have");
 
   JSValue promise, resolving_funcs[2];
   promise = JS_NewPromiseCapability(ctx, resolving_funcs);
@@ -1397,6 +1443,8 @@ static JSValue js_subtle_unwrap_key(JSContext *ctx, JSValueConst this_val, int a
   VALUE r_unwrapped_algo_hash = js_algo_to_ruby_hash(ctx, argv[4]);
   VALUE r_extractable = JS_ToBool(ctx, argv[5]) ? Qtrue : Qfalse;
   VALUE r_usages = js_usages_to_ruby_array(ctx, argv[6]);
+  if (NIL_P(r_usages))
+    return js_rejected_type_error(ctx, "SubtleCrypto: keyUsages has more entries than a key can have");
 
   JSValue promise, resolving_funcs[2];
   promise = JS_NewPromiseCapability(ctx, resolving_funcs);
