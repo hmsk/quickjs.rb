@@ -187,6 +187,10 @@ describe "crypto.subtle key management" do
     # Describing a key runs StringValueCStr, which raises on a non-String, out
     # of a JSCFunction. Nothing is registered until the description is finished,
     # so a raise there cannot leave a row anchoring the key.
+    # The length is the guest's to write, and the loop that reads it polls no
+    # QuickJS interrupt, so timeout_msec cannot end it. Measured before this
+    # was bounded: 10,000,000 ran 1.9s past a 100ms budget and left the VM out
+    # of memory, which the guest chose by passing a number.
     # The handle read is own data, so an accessor on Object.prototype cannot
     # answer it: a bare object carrying no handle is not a key, whatever the
     # prototype says.
@@ -204,6 +208,40 @@ describe "crypto.subtle key management" do
       JS
 
       _(outcome).must_equal 'refused'
+    ensure
+      vm&.dispose!
+    end
+
+    # A negative length is an empty sequence under WebIDL's ToLength, not too
+    # many entries. JS_ToInt32 wraps, so 2**31 arrives negative and means the
+    # same thing.
+    it "reads a negative keyUsages length as an empty list" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+
+      [-1, 2**31].each do |length|
+        usages = vm.eval_code(<<~JS)
+          JSON.stringify((await crypto.subtle.importKey('raw', new Uint8Array(16), { name: 'HMAC', hash: { name: 'SHA-256' } }, false, { length: #{length} })).usages)
+        JS
+        _(usages).must_equal '[]'
+      end
+    ensure
+      vm&.dispose!
+    end
+
+    it "refuses a keyUsages list longer than a key can have" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO], timeout_msec: 100)
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      error = _ {
+        vm.eval_code(<<~JS)
+          await crypto.subtle.importKey('raw', new Uint8Array(16), { name: 'HMAC', hash: { name: 'SHA-256' } }, false, { length: 10_000_000 })
+        JS
+      }.must_raise Quickjs::TypeError
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      _(error.message).must_match(/keyUsages/)
+      _(elapsed).must_be :<, 1.0
+      _(vm.poisoned?).must_equal false
     ensure
       vm&.dispose!
     end
