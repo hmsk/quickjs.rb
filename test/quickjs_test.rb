@@ -2598,10 +2598,13 @@ end
           attempt = proc { @vm.define_function(['myLib', 'hello']) { 1 } rescue marker }
 
           3.times(&attempt)
-          GC.start
+          # Both sweeps are full and immediate: a plain GC.start leaves enough
+          # of these behind often enough that the count is noise, and the test
+          # then fails on a build that pins nothing.
+          GC.start(full_mark: true, immediate_sweep: true)
           before = ObjectSpace.each_object(marker).count
           200.times(&attempt)
-          GC.start
+          GC.start(full_mark: true, immediate_sweep: true)
 
           _(ObjectSpace.each_object(marker).count - before).must_equal 0
         end
