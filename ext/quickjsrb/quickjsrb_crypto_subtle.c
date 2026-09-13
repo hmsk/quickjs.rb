@@ -6,10 +6,29 @@
 static const char *js_get_algorithm_name(JSContext *ctx, JSValueConst j_algo)
 {
   if (JS_IsString(j_algo))
-    return JS_ToCString(ctx, j_algo);
+  {
+    // Drained like the reads below: a conversion that cannot allocate answers
+    // NULL with its throw still set, and the caller reports a missing
+    // algorithm name over the top of it.
+    const char *name = JS_ToCString(ctx, j_algo);
+    if (name == NULL)
+      quickjsrb_drain_pending(ctx);
+    return name;
+  }
+  // A getter answers this read, so it can throw, and a throw from a bridge
+  // carries a host exception that only find_ruby_error takes back out of
+  // alive_objects. Same for the conversion below, which runs toString.
   JSValue j_name = JS_GetPropertyStr(ctx, j_algo, "name");
+  if (JS_IsException(j_name))
+  {
+    quickjsrb_drain_pending(ctx);
+    return NULL;
+  }
+
   const char *name = JS_ToCString(ctx, j_name);
   JS_FreeValue(ctx, j_name);
+  if (name == NULL)
+    quickjsrb_drain_pending(ctx);
   return name;
 }
 
@@ -42,23 +61,92 @@ static VALUE js_buffer_to_ruby_str(JSContext *ctx, JSValueConst j_val)
 }
 
 // Build a Ruby Array of strings from a JS array value.
+#define QUICKJSRB_MAX_KEY_USAGES 1024
+
+// Qnil when the list is longer than any usages list can be, which the
+// callers turn into a TypeError before they create a promise to reject.
 static VALUE js_usages_to_ruby_array(JSContext *ctx, JSValueConst j_usages)
 {
+  // Every read here is a property of an object the guest handed in, answerable
+  // by a getter that can reach a bridge, so each drains what it throws for the
+  // reason js_algo_read gives. What the operation then does with a usages list
+  // that could not be read is the refusal path nothing has yet: #130.
   VALUE r_usages = rb_ary_new();
   JSValue j_len = JS_GetPropertyStr(ctx, j_usages, "length");
+  if (JS_IsException(j_len))
+  {
+    quickjsrb_drain_pending(ctx);
+    return r_usages;
+  }
+
   int32_t count = 0;
-  JS_ToInt32(ctx, &count, j_len);
+  if (JS_ToInt32(ctx, &count, j_len) < 0)
+  {
+    quickjsrb_drain_pending(ctx);
+    count = 0;
+  }
   JS_FreeValue(ctx, j_len);
+
+  // The guest writes this length, and the loop below does a property read and
+  // a Ruby allocation per step without polling a QuickJS interrupt, so
+  // timeout_msec cannot end it: measured, a length of 10,000,000 runs 1.9s
+  // past a 100ms budget and leaves the VM out of memory, which a guest gets to
+  // choose by passing a number. There are eight key usages in the spec, so
+  // anything near this bound is not a usages list; refused rather than
+  // truncated, because a truncated one would be accepted as if the guest had
+  // asked for what is left.
+  // A negative length is an empty sequence, not too many entries: WebIDL's
+  // ToLength clamps it to 0, and main answered [] for it. JS_ToInt32 wraps, so
+  // 2**31 arrives here negative and means the same thing.
+  if (count < 0)
+    count = 0;
+  if (count > QUICKJSRB_MAX_KEY_USAGES)
+    return Qnil;
   for (int32_t i = 0; i < count; i++)
   {
     JSValue j_u = JS_GetPropertyUint32(ctx, j_usages, (uint32_t)i);
+    if (JS_IsException(j_u))
+    {
+      quickjsrb_drain_pending(ctx);
+      continue;
+    }
+
     const char *u_str = JS_ToCString(ctx, j_u);
     if (u_str)
       rb_ary_push(r_usages, rb_str_new_cstr(u_str));
+    else
+      quickjsrb_drain_pending(ctx);
     JS_FreeCString(ctx, u_str);
     JS_FreeValue(ctx, j_u);
   }
   return r_usages;
+}
+
+// Settles with the value, or rejects with whatever stopped it being built.
+// Never resolves with the sentinel: typeof reads "unknown" for it and the guest
+// has no way to name, catch or discard what it was handed. Always settles, so
+// no caller is left returning a promise nothing will ever resolve.
+static void js_settle_or_reject(JSContext *ctx, JSValueConst *resolving_funcs, JSValue j_key)
+{
+  JSValue j_settled;
+  if (JS_IsException(j_key))
+  {
+    // JS_GetException answers JS_UNINITIALIZED when nothing is set, and that
+    // is an internal sentinel, not a value to hand a guest. The slot can be
+    // empty here: a describe failure sets its throw, and a later step that
+    // takes a throw of its own unconditionally clears it on the way past.
+    if (!JS_HasException(ctx))
+      JS_ThrowInternalError(ctx, "quickjs: the operation failed without saying why");
+    JSValue j_thrown = JS_GetException(ctx);
+    j_settled = JS_Call(ctx, resolving_funcs[1], JS_UNDEFINED, 1, (JSValueConst *)&j_thrown);
+    JS_FreeValue(ctx, j_thrown);
+  }
+  else
+  {
+    j_settled = JS_Call(ctx, resolving_funcs[0], JS_UNDEFINED, 1, (JSValueConst *)&j_key);
+    JS_FreeValue(ctx, j_key);
+  }
+  JS_FreeValue(ctx, j_settled);
 }
 
 // Reject a promise with a plain JS Error built from Ruby exception info.
@@ -68,23 +156,172 @@ static void js_reject_with_ruby_error(JSContext *ctx, JSValueConst *resolving_fu
   rb_set_errinfo(Qnil);
   VALUE r_message = rb_funcall(r_error, rb_intern("message"), 0);
   JSValue j_err = JS_NewError(ctx);
-  JS_SetPropertyStr(ctx, j_err, "message", JS_NewString(ctx, StringValueCStr(r_message)));
+  if (JS_IsException(j_err))
+  {
+    // Settling with the sentinel would hand the guest a value it cannot name,
+    // which is what js_quickjsrb_call_global refuses to do for the same reason.
+    // The runtime's own throw is the honest answer, and it is already pending.
+    // Nothing left to describe the failure with, so the promise is rejected
+    // with the runtime's own throw rather than left for a guest that is still
+    // awaiting it, and rather than carried out of here to be attributed to
+    // whatever asks for an exception next.
+    JS_FreeValue(ctx, j_err);
+    js_settle_or_reject(ctx, resolving_funcs, JS_EXCEPTION);
+    return;
+  }
+  // Defined, not assigned, for the reason j_error_from_ruby_error gives: an
+  // accessor on Error.prototype absorbs the write, and the guest reads whatever
+  // that getter says instead of why its call was rejected. Built first and
+  // checked, so the sentinel is never what the error says its message is.
+  JSValue j_message = JS_NewString(ctx, StringValueCStr(r_message));
+  if (JS_IsException(j_message))
+  {
+    JS_FreeValue(ctx, j_message);
+    JS_FreeValue(ctx, j_err);
+    js_settle_or_reject(ctx, resolving_funcs, JS_EXCEPTION);
+    return;
+  }
+  if (JS_DefinePropertyValueStr(ctx, j_err, "message", j_message,
+                                JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) < 0)
+  {
+    // An Error with no own message is one Error.prototype answers for, which
+    // is what defining it was for, and the define's throw would be left to
+    // land on an unrelated evaluation.
+    JS_FreeValue(ctx, j_err);
+    js_settle_or_reject(ctx, resolving_funcs, JS_EXCEPTION);
+    return;
+  }
   JSValue ret = JS_Call(ctx, resolving_funcs[1], JS_UNDEFINED, 1, (JSValueConst *)&j_err);
   JS_FreeValue(ctx, j_err);
   JS_FreeValue(ctx, ret);
 }
 
+// Quickjs::CryptoKey, or Qnil while the Ruby layer that defines it has not been
+// loaded — requiring the extension alone is enough to reach the callers below.
+// Resolved without rb_const_get's raise, because these run inside QuickJS
+// native callbacks with no rb_protect between them and the interpreter: a
+// NameError there longjmps through QuickJS's own frames, past the JS values
+// they still hold.
+//
+// Looked up per call rather than cached in a static. A class held only by a
+// constant table is movable, so a cached VALUE survives GC.compact as an
+// address the collector has since handed to something else — which would name
+// the wrong class, or a non-class that makes rb_obj_is_kind_of raise the very
+// unprotected raise this function exists to avoid. Two constant lookups are
+// nothing beside the OpenSSL work every caller goes on to do.
+static VALUE r_crypto_key_class(void)
+{
+  // Gated too, though Init_quickjsrb defines it before any of this can run.
+  // Not for the promise, which every caller creates after resolving the key,
+  // but because a raise out of a JSCFunction unwinds past QuickJS's own call
+  // frame, which is what this function exists to answer instead of.
+  if (!rb_const_defined_at(rb_cObject, rb_intern("Quickjs")))
+    return Qnil;
+  // Defined answers true for an autoload here too, and rb_const_get would run
+  // its body from this callback, which is the raise being avoided.
+  if (!NIL_P(rb_autoload_p(rb_cObject, rb_intern("Quickjs"))))
+    return Qnil;
+
+  VALUE r_quickjs = rb_const_get(rb_cObject, rb_intern("Quickjs"));
+  // Same reason the inner one is type-checked: rb_const_defined_at reads a
+  // constant table off its receiver, so a non-module bound to the name is
+  // worse than the NameError being avoided.
+  if (!RB_TYPE_P(r_quickjs, T_MODULE))
+    return Qnil;
+  if (!rb_const_defined_at(r_quickjs, rb_intern("CryptoKey")))
+    return Qnil;
+  // Defined answers true for a registered autoload too, and rb_const_get would
+  // then run the autoload body here, which is a raise this function cannot
+  // afford for the reason above. Nobody autoloads this constant, but the claim
+  // has to hold rather than happen to.
+  if (!NIL_P(rb_autoload_p(r_quickjs, rb_intern("CryptoKey"))))
+    return Qnil;
+
+  VALUE r_class = rb_const_get(r_quickjs, rb_intern("CryptoKey"));
+  // Defined is not the same as a class. rb_obj_is_kind_of takes a class or a
+  // module and raises TypeError on anything else, so a String bound to the
+  // name would make the unprotected raise above; a Module would not raise but
+  // is not what a key is an instance of either. One predicate covers both.
+  return RB_TYPE_P(r_class, T_CLASS) ? r_class : Qnil;
+}
+
 // Find Ruby CryptoKey from a JS CryptoKey object via rb_object_id handle.
 static VALUE r_find_alive_crypto_key(JSContext *ctx, JSValueConst j_key)
 {
-  JSValue j_handle = JS_GetPropertyStr(ctx, j_key, "rb_object_id");
+  // Both of the reads below can run the guest's own code on a value it chose:
+  // a getter for the property, a valueOf for the conversion, either of which
+  // can reach a Ruby bridge. Nothing here can report what that raises, since
+  // this runs after its caller's rb_protect has returned, but the exception it
+  // parked in alive_objects has to come back out: find_ruby_error is the only
+  // thing that takes one out, so leaving it would pin one per call, at a rate
+  // the guest picks.
+  // Own data only, like the other two readers. Through the prototype chain an
+  // accessor on Object.prototype answers this, and then `{}` signs with a key
+  // it never carried a handle for, including one generated extractable: false.
+  JSValue j_handle = JS_UNDEFINED;
+  if (!j_read_own_handle(ctx, j_key, &j_handle))
+  {
+    // A Proxy trap can answer the descriptor read and throw, and what it throws
+    // can be a bridge that parked a host exception on its way out.
+    if (JS_IsException(j_handle))
+      quickjsrb_drain_pending(ctx);
+    return Qnil;
+  }
+
+  // Only a number is a handle. Asking JS_ToInt64 for one is what runs valueOf,
+  // and the answer for anything else was never going to be a handle anyway.
+  int32_t tag = JS_VALUE_GET_NORM_TAG(j_handle);
+  if (tag != JS_TAG_INT && tag != JS_TAG_FLOAT64)
+  {
+    JS_FreeValue(ctx, j_handle);
+    return Qnil;
+  }
+
   int64_t handle = 0;
   JS_ToInt64(ctx, &handle, j_handle);
   JS_FreeValue(ctx, j_handle);
   if (handle <= 0)
     return Qnil;
   VMData *data = JS_GetContextOpaque(ctx);
-  return rb_hash_aref(data->alive_objects, LONG2NUM(handle));
+  VALUE r_key = rb_hash_aref(data->alive_objects, LL2NUM(handle));
+  // Before the class lookup, which is otherwise paid on the path a guest can
+  // repeat for free: sign('HMAC', {}, buf) reaches no OpenSSL work to dwarf it.
+  if (NIL_P(r_key))
+    return Qnil;
+  // The handle is read off whatever the guest passed as the key, and
+  // alive_objects also holds bridged exceptions and the Ruby object behind a
+  // File proxy. Without this an object carrying another entry's id reaches the
+  // operations below as if it were a key, and the caller is told about a
+  // method missing on a File rather than about an invalid CryptoKey.
+  VALUE r_key_class = r_crypto_key_class();
+  if (NIL_P(r_key_class) || !rb_obj_is_kind_of(r_key, r_key_class))
+    return Qnil;
+  return r_key;
+}
+
+// Every read below is a property of an object the guest handed in, so a getter
+// answers it and may throw. The block that follows each read already skips an
+// exception, but skipping is not enough: a throw from a bridge carries a host
+// exception that find_ruby_error is the only thing to take back out of
+// alive_objects, so a skipped one pins it for the life of the VM, once per
+// read, at a rate the guest picks.
+//
+// The read only. What each block then does with the value, JS_ToInt32 on a
+// length, JS_ToCString on a curve name, a buffer conversion on an iv, runs the
+// guest's valueOf or toString and can throw for the same reason, and those
+// returns are unchecked here as they were before. #130.
+static JSValue js_algo_read(JSContext *ctx, JSValueConst j_algo, const char *name)
+{
+  JSValue j_value = JS_GetPropertyStr(ctx, j_algo, name);
+  if (JS_IsException(j_value))
+    // Taken, not put back. Putting it back and carrying on would leave it
+    // pending for the next thing that asks, and carrying on is what this does:
+    // the block below skips the property and the operation runs without it. So
+    // the guest's own error is lost here, replaced by whatever the call fails
+    // with next. Both halves want the same fix, a way for this function to
+    // refuse, which its ten callers do not have yet. #130.
+    quickjsrb_drain_pending(ctx);
+  return j_value;
 }
 
 // Build a comprehensive Ruby Hash (symbol keys) from a JS algorithm object.
@@ -103,7 +340,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   if (JS_IsString(j_algo))
     return r_hash;
 
-  JSValue j_length = JS_GetPropertyStr(ctx, j_algo, "length");
+  JSValue j_length = js_algo_read(ctx, j_algo, "length");
   if (!JS_IsUndefined(j_length) && !JS_IsException(j_length))
   {
     int32_t length = 0;
@@ -112,7 +349,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_length);
 
-  JSValue j_named_curve = JS_GetPropertyStr(ctx, j_algo, "namedCurve");
+  JSValue j_named_curve = js_algo_read(ctx, j_algo, "namedCurve");
   if (!JS_IsUndefined(j_named_curve) && !JS_IsException(j_named_curve))
   {
     const char *nc = JS_ToCString(ctx, j_named_curve);
@@ -124,7 +361,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_named_curve);
 
-  JSValue j_hash = JS_GetPropertyStr(ctx, j_algo, "hash");
+  JSValue j_hash = js_algo_read(ctx, j_algo, "hash");
   if (!JS_IsUndefined(j_hash) && !JS_IsException(j_hash))
   {
     const char *hash_name = js_get_algorithm_name(ctx, j_hash);
@@ -136,7 +373,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_hash);
 
-  JSValue j_modulus_length = JS_GetPropertyStr(ctx, j_algo, "modulusLength");
+  JSValue j_modulus_length = js_algo_read(ctx, j_algo, "modulusLength");
   if (!JS_IsUndefined(j_modulus_length) && !JS_IsException(j_modulus_length))
   {
     int32_t mod_len = 0;
@@ -145,7 +382,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_modulus_length);
 
-  JSValue j_pub_exp = JS_GetPropertyStr(ctx, j_algo, "publicExponent");
+  JSValue j_pub_exp = js_algo_read(ctx, j_algo, "publicExponent");
   if (!JS_IsUndefined(j_pub_exp) && !JS_IsException(j_pub_exp))
   {
     VALUE r_pe = js_buffer_to_ruby_str(ctx, j_pub_exp);
@@ -154,7 +391,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_pub_exp);
 
-  JSValue j_iv = JS_GetPropertyStr(ctx, j_algo, "iv");
+  JSValue j_iv = js_algo_read(ctx, j_algo, "iv");
   if (!JS_IsUndefined(j_iv) && !JS_IsException(j_iv))
   {
     VALUE r_iv = js_buffer_to_ruby_str(ctx, j_iv);
@@ -163,7 +400,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_iv);
 
-  JSValue j_tag_length = JS_GetPropertyStr(ctx, j_algo, "tagLength");
+  JSValue j_tag_length = js_algo_read(ctx, j_algo, "tagLength");
   if (!JS_IsUndefined(j_tag_length) && !JS_IsException(j_tag_length))
   {
     int32_t tag_length = 0;
@@ -172,7 +409,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_tag_length);
 
-  JSValue j_additional_data = JS_GetPropertyStr(ctx, j_algo, "additionalData");
+  JSValue j_additional_data = js_algo_read(ctx, j_algo, "additionalData");
   if (!JS_IsUndefined(j_additional_data) && !JS_IsException(j_additional_data))
   {
     VALUE r_ad = js_buffer_to_ruby_str(ctx, j_additional_data);
@@ -181,7 +418,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_additional_data);
 
-  JSValue j_counter = JS_GetPropertyStr(ctx, j_algo, "counter");
+  JSValue j_counter = js_algo_read(ctx, j_algo, "counter");
   if (!JS_IsUndefined(j_counter) && !JS_IsException(j_counter))
   {
     VALUE r_counter = js_buffer_to_ruby_str(ctx, j_counter);
@@ -190,7 +427,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_counter);
 
-  JSValue j_salt = JS_GetPropertyStr(ctx, j_algo, "salt");
+  JSValue j_salt = js_algo_read(ctx, j_algo, "salt");
   if (!JS_IsUndefined(j_salt) && !JS_IsException(j_salt))
   {
     VALUE r_salt = js_buffer_to_ruby_str(ctx, j_salt);
@@ -199,7 +436,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_salt);
 
-  JSValue j_iterations = JS_GetPropertyStr(ctx, j_algo, "iterations");
+  JSValue j_iterations = js_algo_read(ctx, j_algo, "iterations");
   if (!JS_IsUndefined(j_iterations) && !JS_IsException(j_iterations))
   {
     int32_t iterations = 0;
@@ -208,7 +445,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_iterations);
 
-  JSValue j_info = JS_GetPropertyStr(ctx, j_algo, "info");
+  JSValue j_info = js_algo_read(ctx, j_algo, "info");
   if (!JS_IsUndefined(j_info) && !JS_IsException(j_info))
   {
     VALUE r_info = js_buffer_to_ruby_str(ctx, j_info);
@@ -217,7 +454,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_info);
 
-  JSValue j_salt_length = JS_GetPropertyStr(ctx, j_algo, "saltLength");
+  JSValue j_salt_length = js_algo_read(ctx, j_algo, "saltLength");
   if (!JS_IsUndefined(j_salt_length) && !JS_IsException(j_salt_length))
   {
     int32_t salt_length = 0;
@@ -226,7 +463,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_salt_length);
 
-  JSValue j_label = JS_GetPropertyStr(ctx, j_algo, "label");
+  JSValue j_label = js_algo_read(ctx, j_algo, "label");
   if (!JS_IsUndefined(j_label) && !JS_IsException(j_label))
   {
     VALUE r_label = js_buffer_to_ruby_str(ctx, j_label);
@@ -235,7 +472,7 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   }
   JS_FreeValue(ctx, j_label);
 
-  JSValue j_public = JS_GetPropertyStr(ctx, j_algo, "public");
+  JSValue j_public = js_algo_read(ctx, j_algo, "public");
   if (!JS_IsUndefined(j_public) && !JS_IsException(j_public) && JS_IsObject(j_public))
   {
     VALUE r_public = r_find_alive_crypto_key(ctx, j_public);
@@ -247,77 +484,292 @@ static VALUE js_algo_to_ruby_hash(JSContext *ctx, JSValueConst j_algo)
   return r_hash;
 }
 
-// Build a JS CryptoKey plain object from a Ruby Quickjs::CryptoKey.
-// Stores the Ruby object in alive_objects; sets rb_object_id as non-enumerable.
-static JSValue js_crypto_key_to_js(JSContext *ctx, VALUE r_key)
+
+// Builds the string and defines it, reporting whether it got that far, so a
+// caller can throw away a half-described object rather than define the
+// allocation-failure sentinel as an ordinary property value. Defined, not
+// assigned, for the reason js_crypto_key_to_js gives.
+static bool j_define_str(JSContext *ctx, JSValue j_obj, const char *prop, VALUE r_str)
+{
+  JSValue j_val = JS_NewString(ctx, StringValueCStr(r_str));
+  if (JS_IsException(j_val))
+  {
+    JS_FreeValue(ctx, j_val);
+    return false;
+  }
+  return JS_DefinePropertyValueStr(ctx, j_obj, prop, j_val, JS_PROP_C_W_E) >= 0;
+}
+
+// Build a JS CryptoKey plain object from a Ruby Quickjs::CryptoKey. Stores the
+// Ruby object in alive_objects; sets rb_object_id as non-enumerable.
+//
+// registered_here, when given, says whether this call is the one that put the
+// key in alive_objects, so a caller that has to throw the key away can take
+// exactly the row it caused and not one an earlier crossing still relies on.
+static JSValue js_crypto_key_to_js(JSContext *ctx, VALUE r_key, bool *registered_here_out)
 {
   VMData *data = JS_GetContextOpaque(ctx);
-  VALUE r_object_id = rb_funcall(r_key, rb_intern("object_id"), 0);
-  rb_hash_aset(data->alive_objects, r_object_id, r_key);
-  int64_t handle = NUM2LONG(r_object_id);
 
+  // Nothing is registered until the key is fully described, which is the
+  // ordering j_error_from_ruby_error follows and the only version of it that
+  // holds: the reads below raise, and so does describing them, since
+  // StringValueCStr rejects a non-String and a NUL, and NUM2INT rejects a
+  // non-Integer. A raise out of a JSCFunction after registering would leave a
+  // row anchoring this key for the life of the VM with nothing able to reach
+  // it. With the draw last, there is nothing to leave.
   VALUE r_type = rb_funcall(r_key, rb_intern("type"), 0);
   VALUE r_extractable = rb_funcall(r_key, rb_intern("extractable"), 0);
   VALUE r_algorithm = rb_funcall(r_key, rb_intern("algorithm"), 0);
   VALUE r_usages = rb_funcall(r_key, rb_intern("usages"), 0);
 
-  JSValue j_key = JS_NewObject(ctx);
-
-  JS_SetPropertyStr(ctx, j_key, "type", JS_NewString(ctx, StringValueCStr(r_type)));
-  JS_SetPropertyStr(ctx, j_key, "extractable", JS_NewBool(ctx, RTEST(r_extractable)));
-
-  JSValue j_algo = JS_NewObject(ctx);
-
   VALUE r_algo_name = rb_hash_aref(r_algorithm, rb_str_new_cstr("name"));
-  JS_SetPropertyStr(ctx, j_algo, "name", JS_NewString(ctx, StringValueCStr(r_algo_name)));
-
   VALUE r_algo_length = rb_hash_aref(r_algorithm, rb_str_new_cstr("length"));
-  if (!NIL_P(r_algo_length))
-    JS_SetPropertyStr(ctx, j_algo, "length", JS_NewInt32(ctx, NUM2INT(r_algo_length)));
-
   VALUE r_algo_named_curve = rb_hash_aref(r_algorithm, rb_str_new_cstr("namedCurve"));
-  if (!NIL_P(r_algo_named_curve))
-    JS_SetPropertyStr(ctx, j_algo, "namedCurve", JS_NewString(ctx, StringValueCStr(r_algo_named_curve)));
-
   VALUE r_algo_hash = rb_hash_aref(r_algorithm, rb_str_new_cstr("hash"));
-  if (!NIL_P(r_algo_hash))
-  {
-    JSValue j_hash_obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, j_hash_obj, "name", JS_NewString(ctx, StringValueCStr(r_algo_hash)));
-    JS_SetPropertyStr(ctx, j_algo, "hash", j_hash_obj);
-  }
-
   VALUE r_algo_modulus_length = rb_hash_aref(r_algorithm, rb_str_new_cstr("modulusLength"));
-  if (!NIL_P(r_algo_modulus_length))
-    JS_SetPropertyStr(ctx, j_algo, "modulusLength", JS_NewInt32(ctx, NUM2INT(r_algo_modulus_length)));
-
   VALUE r_algo_pub_exp = rb_hash_aref(r_algorithm, rb_str_new_cstr("publicExponent"));
-  if (!NIL_P(r_algo_pub_exp))
-  {
-    JSValue j_pe_buf = JS_NewArrayBufferCopy(ctx,
-                                             (const uint8_t *)RSTRING_PTR(r_algo_pub_exp),
-                                             RSTRING_LEN(r_algo_pub_exp));
-    JSValue j_uint8 = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Uint8Array");
-    JSValue j_pe = JS_CallConstructor(ctx, j_uint8, 1, (JSValueConst *)&j_pe_buf);
-    JS_FreeValue(ctx, j_uint8);
-    JS_FreeValue(ctx, j_pe_buf);
-    JS_SetPropertyStr(ctx, j_algo, "publicExponent", j_pe);
-  }
-
-  JS_SetPropertyStr(ctx, j_key, "algorithm", j_algo);
-
   long usages_len = RARRAY_LEN(r_usages);
-  JSValue j_usages = JS_NewArray(ctx);
+
+  // Touched for their conversions, not their values: StringValueCStr raises on
+  // a non-String and on an embedded NUL, NUM2INT on a non-Integer. Doing that
+  // here means the describing below cannot raise, which is what lets the draw
+  // sit between the two. Both orderings cost something otherwise: draw first
+  // and a raise from describing orphans a table row that anchors this key, with
+  // its private material, for the life of the VM; draw last and a raise from
+  // the draw leaves j_key, and the promise capability the caller is holding,
+  // unreleased. With nothing between them able to raise, neither is reachable.
+  StringValueCStr(r_type);
+  StringValueCStr(r_algo_name);
+  if (!NIL_P(r_algo_length))
+    NUM2INT(r_algo_length);
+  if (!NIL_P(r_algo_named_curve))
+    StringValueCStr(r_algo_named_curve);
+  if (!NIL_P(r_algo_hash))
+    StringValueCStr(r_algo_hash);
+  if (!NIL_P(r_algo_modulus_length))
+    NUM2INT(r_algo_modulus_length);
+  if (!NIL_P(r_algo_pub_exp))
+    StringValue(r_algo_pub_exp);
+  // Into a list of our own, because StringValueCStr converts the local it is
+  // given and rb_ary_entry hands back a temporary: touching that would leave
+  // the caller's array holding the unconverted member, and the describing loop
+  // would convert it a second time, after the draw and with j_key allocated,
+  // which is the raise the ordering above exists to rule out.
+  VALUE r_usage_strings = rb_ary_new_capa(usages_len);
   for (long i = 0; i < usages_len; i++)
   {
     VALUE r_usage = rb_ary_entry(r_usages, i);
-    JS_SetPropertyUint32(ctx, j_usages, (uint32_t)i, JS_NewString(ctx, StringValueCStr(r_usage)));
+    StringValueCStr(r_usage);
+    rb_ary_push(r_usage_strings, r_usage);
   }
-  JS_SetPropertyStr(ctx, j_key, "usages", j_usages);
 
-  JS_DefinePropertyValueStr(ctx, j_key, "rb_object_id",
-                            JS_NewInt64(ctx, handle),
-                            JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE);
+  // Taken here, in the same raise-safe stretch, so the rollback paths below can
+  // undo a registration without dispatching from inside a JSCFunction.
+  VALUE r_key_object_id = rb_obj_id(r_key);
+
+  // Drawn here, with everything that can raise behind it and nothing allocated
+  // in front of it.
+  bool registered_here = false;
+  VALUE r_object_id = alive_objects_register(data, r_key, &registered_here);
+  if (registered_here_out != NULL)
+    *registered_here_out = registered_here;
+  if (NIL_P(r_object_id))
+    return JS_ThrowInternalError(ctx, "quickjs: could not publish a handle for a CryptoKey");
+
+  // Checked, like every value that becomes a property of the key: passing the
+  // sentinel to JS_DefinePropertyValue* stores it as an ordinary value, which
+  // is the shape the rest of this branch refuses.
+  JSValue j_key = JS_NewObject(ctx);
+  if (JS_IsException(j_key))
+  {
+    if (registered_here)
+    {
+      alive_objects_unregister(data, r_object_id, r_key_object_id);
+      // The claim goes with the row: a caller told the row is theirs would ask
+      // alive_objects_forget for one that is already gone.
+      registered_here = false;
+      if (registered_here_out != NULL)
+        *registered_here_out = false;
+    }
+    return j_key;
+  }
+
+  bool described = j_define_str(ctx, j_key, "type", r_type);
+  described = JS_DefinePropertyValueStr(ctx, j_key, "extractable", JS_NewBool(ctx, RTEST(r_extractable)),
+                                       JS_PROP_WRITABLE | JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE) >= 0 && described;
+
+  // Every one of these is defined rather than assigned: an accessor a guest
+  // puts on Object.prototype otherwise absorbs the write, and the key ends up
+  // describing itself with whatever that getter says, including reporting
+  // extractable: true for a key generated without it.
+  JSValue j_algo = JS_NewObject(ctx);
+  if (JS_IsException(j_algo))
+  {
+    if (registered_here)
+    {
+      alive_objects_unregister(data, r_object_id, r_key_object_id);
+      // The claim goes with the row: a caller told the row is theirs would ask
+      // alive_objects_forget for one that is already gone.
+      registered_here = false;
+      if (registered_here_out != NULL)
+        *registered_here_out = false;
+    }
+    JS_FreeValue(ctx, j_key);
+    return j_algo;
+  }
+
+  described = j_define_str(ctx, j_algo, "name", r_algo_name) && described;
+
+  if (!NIL_P(r_algo_length))
+    described = JS_DefinePropertyValueStr(ctx, j_algo, "length", JS_NewInt32(ctx, NUM2INT(r_algo_length)),
+                                         JS_PROP_WRITABLE | JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE) >= 0 && described;
+
+  if (!NIL_P(r_algo_named_curve))
+    described = j_define_str(ctx, j_algo, "namedCurve", r_algo_named_curve) && described;
+
+  if (!NIL_P(r_algo_hash))
+  {
+    JSValue j_hash_obj = JS_NewObject(ctx);
+    if (JS_IsException(j_hash_obj))
+    {
+      if (registered_here)
+        alive_objects_unregister(data, r_object_id, r_key_object_id);
+      JS_FreeValue(ctx, j_algo);
+      JS_FreeValue(ctx, j_key);
+      return j_hash_obj;
+    }
+    described = j_define_str(ctx, j_hash_obj, "name", r_algo_hash) && described;
+    described = JS_DefinePropertyValueStr(ctx, j_algo, "hash", j_hash_obj,
+                                         JS_PROP_WRITABLE | JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE) >= 0 && described;
+  }
+
+  if (!NIL_P(r_algo_modulus_length))
+    described = JS_DefinePropertyValueStr(ctx, j_algo, "modulusLength", JS_NewInt32(ctx, NUM2INT(r_algo_modulus_length)),
+                                         JS_PROP_WRITABLE | JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE) >= 0 && described;
+
+  if (!NIL_P(r_algo_pub_exp))
+  {
+    // Built through JS_NewTypedArray rather than by calling globalThis's
+    // Uint8Array. That constructor is the guest's to delete or replace, and a
+    // replacement can throw anything it likes, including a Ruby exception from
+    // a bridge: nothing here can report it, because this runs after its
+    // caller's rb_protect has returned and every caller stores the result
+    // unchecked. Not reading the global removes the question rather than
+    // answering it. What remains is the runtime's own allocation failing, and
+    // both branches below take that rather than leave it: no caller of this
+    // function returns JS_EXCEPTION, so a throw left set would be attributed to
+    // whatever evaluation next asked for one. The cost is that a key can come
+    // back describing itself without publicExponent, with the out-of-memory
+    // reported nowhere. #129.
+    JSValue j_pe_buf = JS_NewArrayBufferCopy(ctx,
+                                             (const uint8_t *)RSTRING_PTR(r_algo_pub_exp),
+                                             RSTRING_LEN(r_algo_pub_exp));
+    if (JS_IsException(j_pe_buf))
+    {
+      // Taken here for the reason the branch below gives: the key is still
+      // handed over without a publicExponent, so leaving this set would
+      // attribute the allocation failure to whatever asked next.
+      JS_FreeValue(ctx, JS_GetException(ctx));
+    }
+    else
+    {
+      JSValue j_args[3] = {j_pe_buf, JS_NewInt32(ctx, 0), JS_NewInt64(ctx, RSTRING_LEN(r_algo_pub_exp))};
+      JSValue j_pe = JS_NewTypedArray(ctx, 3, (JSValueConst *)j_args, JS_TYPED_ARRAY_UINT8);
+      JS_FreeValue(ctx, j_pe_buf);
+      if (JS_IsException(j_pe))
+        // Taken and lost, because the key is still described well enough to
+        // hand over and a throw left here would surface at whatever calls
+        // JS_GetException next. It can be a throw an earlier describe set, so
+        // js_settle_or_reject no longer assumes the slot is full. The only way
+        // to get here is the runtime's own allocation failing, which the next
+        // one will fail at too.
+        JS_FreeValue(ctx, JS_GetException(ctx));
+      else
+        described = JS_DefinePropertyValueStr(ctx, j_algo, "publicExponent", j_pe,
+                                             JS_PROP_WRITABLE | JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE) >= 0 && described;
+    }
+  }
+
+  described = JS_DefinePropertyValueStr(ctx, j_key, "algorithm", j_algo,
+                                       JS_PROP_WRITABLE | JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE) >= 0 && described;
+
+  JSValue j_usages = JS_NewArray(ctx);
+  if (JS_IsException(j_usages))
+  {
+    if (registered_here)
+    {
+      alive_objects_unregister(data, r_object_id, r_key_object_id);
+      // The claim goes with the row: a caller told the row is theirs would ask
+      // alive_objects_forget for one that is already gone.
+      registered_here = false;
+      if (registered_here_out != NULL)
+        *registered_here_out = false;
+    }
+    JS_FreeValue(ctx, j_key);
+    return j_usages;
+  }
+  for (long i = 0; i < usages_len; i++)
+  {
+    VALUE r_usage = rb_ary_entry(r_usage_strings, i);
+    // Defined, like every other property of the key: an index property on
+    // Array.prototype takes the fast array path away, and the element write
+    // then walks the chain into the guest's setter like any named one would.
+    // StringValueCStr cannot raise here: it is a String already, converted
+    // above, before anything was drawn or allocated.
+    JSValue j_usage = JS_NewString(ctx, StringValueCStr(r_usage));
+    if (JS_IsException(j_usage))
+    {
+      JS_FreeValue(ctx, j_usage);
+      described = false;
+    }
+    else
+    {
+      described = JS_DefinePropertyValueUint32(ctx, j_usages, (uint32_t)i, j_usage, JS_PROP_C_W_E) >= 0 && described;
+    }
+  }
+  described = JS_DefinePropertyValueStr(ctx, j_key, "usages", j_usages,
+                                       JS_PROP_WRITABLE | JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE) >= 0 && described;
+
+  if (!described)
+  {
+    // A key that cannot say what it is, is not one to hand over: the runtime's
+    // own throw is already pending from whichever allocation failed. The row
+    // goes with it, since the draw is behind us now: left there it would anchor
+    // this key, key_data included, for the life of the VM with nothing in JS
+    // able to reach it. Only what this call made, because the same key crossing
+    // twice reuses its handle and the earlier crossing still relies on that row.
+    if (registered_here)
+    {
+      alive_objects_unregister(data, r_object_id, r_key_object_id);
+      // The claim goes with the row: a caller told the row is theirs would ask
+      // alive_objects_forget for one that is already gone.
+      registered_here = false;
+      if (registered_here_out != NULL)
+        *registered_here_out = false;
+    }
+    JS_FreeValue(ctx, j_key);
+    return JS_EXCEPTION;
+  }
+
+  // A key that looks like a key and carries no handle is worse than no key:
+  // every later sign or exportKey on it fails as an invalid key while the row
+  // keeps anchoring the Ruby object.
+  if (JS_DefinePropertyValueStr(ctx, j_key, "rb_object_id",
+                                JS_NewInt64(ctx, NUM2LL(r_object_id)),
+                                JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE) < 0)
+  {
+    // Only what this call put there: the same key object crossing twice reuses
+    // its handle, and taking that row would unanchor the key the earlier
+    // crossing handed the guest.
+    if (registered_here)
+    {
+      alive_objects_unregister(data, r_object_id, r_key_object_id);
+      if (registered_here_out != NULL)
+        *registered_here_out = false;
+    }
+    JS_FreeValue(ctx, j_key);
+    return JS_EXCEPTION;
+  }
 
   return j_key;
 }
@@ -389,6 +841,8 @@ static JSValue js_subtle_generate_key(JSContext *ctx, JSValueConst this_val, int
   VALUE r_algo_hash = js_algo_to_ruby_hash(ctx, argv[0]);
   VALUE r_extractable = JS_ToBool(ctx, argv[1]) ? Qtrue : Qfalse;
   VALUE r_usages = js_usages_to_ruby_array(ctx, argv[2]);
+  if (NIL_P(r_usages))
+    return JS_ThrowTypeError(ctx, "SubtleCrypto: keyUsages has more entries than a key can have");
 
   JSValue promise, resolving_funcs[2];
   promise = JS_NewPromiseCapability(ctx, resolving_funcs);
@@ -407,21 +861,45 @@ static JSValue js_subtle_generate_key(JSContext *ctx, JSValueConst this_val, int
   {
     VALUE r_priv = rb_hash_aref(r_result, ID2SYM(rb_intern("private_key")));
     VALUE r_pub = rb_hash_aref(r_result, ID2SYM(rb_intern("public_key")));
+    bool priv_registered_here = false;
+    bool pub_registered_here = false;
+    JSValue j_priv = js_crypto_key_to_js(ctx, r_priv, &priv_registered_here);
+    JSValue j_pub = js_crypto_key_to_js(ctx, r_pub, &pub_registered_here);
     JSValue j_pair = JS_NewObject(ctx);
-    JSValue j_priv = js_crypto_key_to_js(ctx, r_priv);
-    JSValue j_pub = js_crypto_key_to_js(ctx, r_pub);
-    JS_SetPropertyStr(ctx, j_pair, "privateKey", j_priv);
-    JS_SetPropertyStr(ctx, j_pair, "publicKey", j_pub);
-    JSValue ret = JS_Call(ctx, resolving_funcs[0], JS_UNDEFINED, 1, (JSValueConst *)&j_pair);
-    JS_FreeValue(ctx, j_pair);
-    JS_FreeValue(ctx, ret);
+    bool built = !JS_IsException(j_priv) && !JS_IsException(j_pub) && !JS_IsException(j_pair);
+    if (built)
+    {
+      built = JS_DefinePropertyValueStr(ctx, j_pair, "privateKey", j_priv, JS_PROP_C_W_E) >= 0;
+      built = JS_DefinePropertyValueStr(ctx, j_pair, "publicKey", j_pub, JS_PROP_C_W_E) >= 0 && built;
+    }
+    else
+    {
+      // Half a pair is not a pair, and the sentinel is not a value to hand on.
+      JS_FreeValue(ctx, j_priv);
+      JS_FreeValue(ctx, j_pub);
+    }
+
+    if (built)
+    {
+      js_settle_or_reject(ctx, resolving_funcs, j_pair);
+    }
+    else
+    {
+      // Whichever key did get built is being dropped here, so its row goes with
+      // it. Left behind, it would anchor a Ruby CryptoKey, private material
+      // included, for the life of the VM with nothing in JS able to reach it.
+      VMData *data = JS_GetContextOpaque(ctx);
+      if (priv_registered_here)
+        alive_objects_forget(data, r_priv);
+      if (pub_registered_here)
+        alive_objects_forget(data, r_pub);
+      JS_FreeValue(ctx, j_pair);
+      js_settle_or_reject(ctx, resolving_funcs, JS_EXCEPTION);
+    }
   }
   else
   {
-    JSValue j_result = js_crypto_key_to_js(ctx, r_result);
-    JSValue ret = JS_Call(ctx, resolving_funcs[0], JS_UNDEFINED, 1, (JSValueConst *)&j_result);
-    JS_FreeValue(ctx, j_result);
-    JS_FreeValue(ctx, ret);
+    js_settle_or_reject(ctx, resolving_funcs, js_crypto_key_to_js(ctx, r_result, NULL));
   }
 
   JS_FreeValue(ctx, resolving_funcs[0]);
@@ -457,6 +935,8 @@ static JSValue js_subtle_import_key(JSContext *ctx, JSValueConst this_val, int a
   VALUE r_algo_hash = js_algo_to_ruby_hash(ctx, argv[2]);
   VALUE r_extractable = JS_ToBool(ctx, argv[3]) ? Qtrue : Qfalse;
   VALUE r_usages = js_usages_to_ruby_array(ctx, argv[4]);
+  if (NIL_P(r_usages))
+    return JS_ThrowTypeError(ctx, "SubtleCrypto: keyUsages has more entries than a key can have");
 
   JSValue promise, resolving_funcs[2];
   promise = JS_NewPromiseCapability(ctx, resolving_funcs);
@@ -473,10 +953,7 @@ static JSValue js_subtle_import_key(JSContext *ctx, JSValueConst this_val, int a
   }
   else
   {
-    JSValue j_result = js_crypto_key_to_js(ctx, r_result);
-    JSValue ret = JS_Call(ctx, resolving_funcs[0], JS_UNDEFINED, 1, (JSValueConst *)&j_result);
-    JS_FreeValue(ctx, j_result);
-    JS_FreeValue(ctx, ret);
+    js_settle_or_reject(ctx, resolving_funcs, js_crypto_key_to_js(ctx, r_result, NULL));
   }
 
   JS_FreeValue(ctx, resolving_funcs[0]);
@@ -809,6 +1286,8 @@ static JSValue js_subtle_derive_key(JSContext *ctx, JSValueConst this_val, int a
   VALUE r_derived_algo_hash = js_algo_to_ruby_hash(ctx, argv[2]);
   VALUE r_extractable = JS_ToBool(ctx, argv[3]) ? Qtrue : Qfalse;
   VALUE r_usages = js_usages_to_ruby_array(ctx, argv[4]);
+  if (NIL_P(r_usages))
+    return JS_ThrowTypeError(ctx, "SubtleCrypto: keyUsages has more entries than a key can have");
 
   JSValue promise, resolving_funcs[2];
   promise = JS_NewPromiseCapability(ctx, resolving_funcs);
@@ -825,10 +1304,7 @@ static JSValue js_subtle_derive_key(JSContext *ctx, JSValueConst this_val, int a
   }
   else
   {
-    JSValue j_result = js_crypto_key_to_js(ctx, r_result);
-    JSValue ret = JS_Call(ctx, resolving_funcs[0], JS_UNDEFINED, 1, (JSValueConst *)&j_result);
-    JS_FreeValue(ctx, j_result);
-    JS_FreeValue(ctx, ret);
+    js_settle_or_reject(ctx, resolving_funcs, js_crypto_key_to_js(ctx, r_result, NULL));
   }
 
   JS_FreeValue(ctx, resolving_funcs[0]);
@@ -934,6 +1410,8 @@ static JSValue js_subtle_unwrap_key(JSContext *ctx, JSValueConst this_val, int a
   VALUE r_unwrapped_algo_hash = js_algo_to_ruby_hash(ctx, argv[4]);
   VALUE r_extractable = JS_ToBool(ctx, argv[5]) ? Qtrue : Qfalse;
   VALUE r_usages = js_usages_to_ruby_array(ctx, argv[6]);
+  if (NIL_P(r_usages))
+    return JS_ThrowTypeError(ctx, "SubtleCrypto: keyUsages has more entries than a key can have");
 
   JSValue promise, resolving_funcs[2];
   promise = JS_NewPromiseCapability(ctx, resolving_funcs);
@@ -959,10 +1437,7 @@ static JSValue js_subtle_unwrap_key(JSContext *ctx, JSValueConst this_val, int a
   }
   else
   {
-    JSValue j_result = js_crypto_key_to_js(ctx, r_result);
-    JSValue ret = JS_Call(ctx, resolving_funcs[0], JS_UNDEFINED, 1, (JSValueConst *)&j_result);
-    JS_FreeValue(ctx, j_result);
-    JS_FreeValue(ctx, ret);
+    js_settle_or_reject(ctx, resolving_funcs, js_crypto_key_to_js(ctx, r_result, NULL));
   }
 
   JS_FreeValue(ctx, resolving_funcs[0]);

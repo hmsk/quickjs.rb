@@ -407,9 +407,12 @@ vm.memory_usage
 vm.gc!             # trigger a QuickJS GC cycle; returns nil
 
 vm.memory_poisoned? #=> false (true once the VM has hit out-of-memory)
+vm.poisoned?        #=> false (true when the VM has stopped accepting work, for any reason)
 ```
 
 When the JS heap exhausts its memory limit, QuickJS enters a fragile state where further evaluation can segfault the process. `memory_poisoned?` flips to `true` after such an event, and subsequent `eval_code` / `call` calls raise `Quickjs::RuntimeError` immediately instead of risking a crash. Rescue it and recreate the VM.
+
+A VM can also stop accepting work for a reason recreating it will not fix. `poisoned?` answers for any of them, `memory_poisoned?` only for out-of-memory, so the recycle path below tests the narrower one on purpose: if `poisoned?` is true while `memory_poisoned?` is false, a new VM will refuse in the same way and the failure belongs to the host. The one case today is `SecureRandom.random_number` no longer returning distinct integers, which leaves objects crossing into JS with no handle a guest cannot guess; the raised message says so.
 
 ```rb
 vm = Quickjs::VM.new(memory_limit: 256 * 1024 * 1024)
