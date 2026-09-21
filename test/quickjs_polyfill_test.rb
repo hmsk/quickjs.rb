@@ -355,6 +355,91 @@ describe "RubyFileProxy" do
   end
 
   describe "with POLYFILL_FILE feature" do
+    # instanceof runs Symbol.hasInstance, which the guest defines and which can
+    # reach a bridge. A failure there has to be drained, or the host exception
+    # it parked stays parked for the life of the VM.
+    it "parks nothing when a hasInstance the conversion runs raises" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:boom) { raise IOError.new('host'), cause: nil }
+      vm.define_function(:take) { |x| x.class.to_s }
+
+      20.times do
+        vm.eval_code(<<~JS) rescue nil
+          Object.defineProperty(Blob, Symbol.hasInstance, { value() { boom() }, configurable: true });
+          take({})
+        JS
+      end
+
+      GC.start(full_mark: true, immediate_sweep: true)
+      before = ObjectSpace.each_object(IOError).count
+      vm.dispose!
+      GC.start(full_mark: true, immediate_sweep: true)
+
+      _(before - ObjectSpace.each_object(IOError).count).must_equal 0
+    ensure
+      vm&.dispose! unless vm&.disposed?
+    end
+
+    # QuickJS resolves a missing Proxy trap with an ordinary property get, which
+    # walks the handler's prototype chain. The handler has none, so a guest
+    # cannot supply the trap for the handle read and decide what a host File
+    # converts back to.
+    it "keeps its identity when the guest supplies a missing trap" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.define_function(:take) { |x| x.class.to_s }
+      vm.eval_code("Object.prototype.getOwnPropertyDescriptor = function () { throw 1 }; 1")
+
+      _(vm.eval_code('take(get_file())')).must_equal 'File'
+    end
+
+    # Object, Proxy, Reflect and Symbol are bound once at init, not resolved
+    # per crossing, which happens after guest code has run.
+    it "crosses with intrinsics the guest cannot replace" do
+      [
+        'globalThis.Proxy = null',
+        'globalThis.Object.defineProperty = (o, k, d) => { o[k] = d.value; return o }',
+        'globalThis.Reflect = { get() { throw 1 } }'
+      ].each do |poison|
+        vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+        vm.define_function(:get_file) { @file }
+        vm.define_function(:take) { |x| x.class.to_s }
+        vm.eval_code("#{poison}; 1")
+
+        _(vm.eval_code('take(get_file())')).must_equal 'File'
+        vm.dispose!
+      end
+    end
+
+    # The proxy factory takes File.prototype at init rather than reading
+    # globalThis.File per crossing, which happens after guest code.
+    it "stays an instance of the real File when the guest replaces the name" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.eval_code("globalThis.RealFile = File; globalThis.File = class Fake {}; 1")
+
+      shape = vm.eval_code(<<~JS)
+        const x = get_file();
+        [x instanceof RealFile, x instanceof File, Object.getPrototypeOf(x) === RealFile.prototype].join('|')
+      JS
+
+      _(shape).must_equal 'true|false|true'
+      # And the bridge still answers, which was never the broken part.
+      _(vm.eval_code('get_file().name')).must_equal File.basename(@file.path)
+    end
+
+    # slice builds its result with JS_NewTypedArray and the Blob constructor
+    # captured at init, so replacing the global names does not reach it. The
+    # Blob polyfill itself still reads Uint8Array from the global, which is why
+    # only Blob is poisoned here: that one is entirely ours to answer for.
+    it "builds a slice through a Blob constructor the guest cannot replace" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.eval_code("globalThis.Blob = function () { throw new Error('nope') }; 1")
+
+      _(vm.eval_code("get_file().slice(0, 5).size")).must_equal 5
+    end
+
     it "is an instance of File" do
       vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
       vm.define_function(:get_file) { @file }
@@ -483,6 +568,133 @@ describe "RubyFileProxy" do
       vm.define_function(:get_file) { @file }
       result = vm.eval_code("get_file()")
       _(result).must_include '#<File:'
+    end
+  end
+
+  # slice converts its bounds with JS_ToInt64, which runs the guest's valueOf.
+  # An unchecked failure parked whatever a bridge raised there and then used an
+  # uninitialised offset.
+  describe "slice with a bound the guest computes" do
+    it "gives the guest back its own error" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.eval_code('globalThis.h = get_file();')
+
+      message = vm.eval_code("let m = 'none'; try { globalThis.h.slice({valueOf() { throw new Error('no') }}, 5) } catch (e) { m = e.message } m")
+
+      _(message).must_equal 'no'
+    ensure
+      vm&.dispose!
+    end
+
+    # The throw goes back into JS carrying its handle, which is what lets it
+    # come out the other side as the host exception it started as. Unparking it
+    # here would hand the caller a generic Quickjs::RuntimeError instead.
+    it "still reports the host exception the bound raised" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:boom) { raise ArgumentError, 'host' }
+      vm.define_function(:get_file) { @file }
+      vm.eval_code('globalThis.h = get_file();')
+
+      error = _ { vm.eval_code("globalThis.h.slice({valueOf() { boom() }}, 5)") }.must_raise ArgumentError
+
+      _(error.message).must_equal 'host'
+    ensure
+      vm&.dispose!
+    end
+
+    it "still slices when the bounds are ordinary" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.eval_code('globalThis.h = get_file();')
+
+      _(vm.eval_code('await globalThis.h.slice(0, 5).text()')).must_equal 'hello'
+      _(vm.eval_code('await globalThis.h.slice(-5).text()')).must_equal 'world'
+    ensure
+      vm&.dispose!
+    end
+  end
+
+  # One entry per object rather than per crossing. The handle used to be the
+  # object_id, so re-bridging overwrote its own row; a fresh draw each time
+  # would add one instead, and nothing is ever removed from the table.
+  describe "crossing into JS more than once" do
+    it "keeps one handle for one object" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+
+      first = vm.eval_code('get_file().rb_object_id')
+      _(vm.eval_code("for (let i = 0; i < 500; i++) get_file(); get_file().rb_object_id")).must_equal first
+      _(first).must_be :>, 0
+    ensure
+      vm&.dispose!
+    end
+
+    it "still converts back to the same Ruby object" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.define_function(:same) { |x| x.equal?(@file) }
+
+      _(vm.eval_code('get_file(); same(get_file())')).must_equal true
+    ensure
+      vm&.dispose!
+    end
+  end
+
+  # The handle used to be the Ruby object_id, a small sequential integer that
+  # nothing ever removes from the table, so a later script could walk the space
+  # and be handed a File it had never held.
+  describe "when a later script scans the handle space" do
+    it "does not hand back a file it was never given" do
+      vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      vm.define_function(:get_file) { @file }
+      vm.define_function(:take) { |x| x.is_a?(::File) ? "FILE:#{x.read}" : x.class.to_s }
+      vm.eval_code('get_file(); 1')
+
+      found = vm.eval_code(<<~JS)
+        let found = 'none';
+        for (let i = 1; i < 4000; i++) {
+          const got = take({rb_object_id: i});
+          if (typeof got === 'string' && got.startsWith('FILE:')) { found = 'recovered at ' + i; break }
+        }
+        found
+      JS
+
+      _(found).must_equal 'none'
+    ensure
+      vm&.dispose!
+    end
+  end
+
+  # The proxy publishes its rb_object_id to the guest, and a thrown error
+  # carrying that id used to reach the same table the exception bridge reads,
+  # which deletes what it finds. The File stayed an instance of File and
+  # answered undefined for everything.
+  describe "when the guest throws the proxy's own rb_object_id" do
+    before do
+      @vm = Quickjs::VM.new(features: [Quickjs::POLYFILL_FILE])
+      @vm.define_function(:get_file) { @file }
+      @vm.eval_code('globalThis.h = get_file();')
+    end
+
+    after { @vm.dispose! }
+
+    it "leaves the file readable" do
+      # Broadly, so that what fails when the guard goes is the readability
+      # below rather than the class of the throw, which the test after this
+      # one is for.
+      _ { @vm.eval_code('throw Object.assign(new Error("guest"), {rb_object_id: globalThis.h.rb_object_id})') }
+        .must_raise Exception
+
+      _(@vm.eval_code('globalThis.h.name')).must_equal File.basename(@file.path)
+      _(@vm.eval_code('globalThis.h.size')).must_equal 'hello world'.bytesize
+    end
+
+    it "reports the forged throw as the guest's own error" do
+      error = _ { @vm.eval_code('throw Object.assign(new Error("guest"), {rb_object_id: globalThis.h.rb_object_id})') }
+        .must_raise Quickjs::RuntimeError
+
+      _(error.message).must_equal 'guest'
     end
   end
 end

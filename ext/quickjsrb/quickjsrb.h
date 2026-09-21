@@ -63,6 +63,9 @@ typedef struct VMData
   struct EvalTime *eval_time;
   VALUE log_listener;
   VALUE alive_objects;
+  // object_id -> handle, so an object bridged twice keeps one entry. Private:
+  // the guest is told the handle, never this key.
+  VALUE alive_handles;
   VALUE module_loader;
   VALUE on_unhandled_rejection;
   // Memoize (specifier, importer) → canonical so the user's loader Proc
@@ -81,12 +84,30 @@ typedef struct VMData
   // ReferenceError when the loader doesn't know the name.
   VALUE preloaded_module_names;
   JSValue j_file_proxy_creator;
+  // Captured with it, at init, so slice does not build its result by calling
+  // a constructor the guest has had a chance to replace.
+  JSValue j_blob_ctor;
   // Once the runtime has hit JS-level "out of memory", the QuickJS heap is in
   // a fragile state where further evaluation can trigger a use-after-free in
   // the parser-error-during-OOM cascade (segfault inside js_shape_hash_unlink).
   // Trip this flag so subsequent eval_code/call calls refuse cleanly with a
   // Ruby exception instead of risking a process crash.
   bool oom_poisoned;
+  // Latched when the handle source stops giving out distinct values. Like
+  // oom_poisoned, it is reported from the next entry point rather than from
+  // wherever it was noticed, because that place is inside a JSCFunction.
+  bool handle_source_broken;
+  // What was raised at the registrar, when something was. rb_protect cannot
+  // tell a stubbed source apart from an Interrupt, a Timeout::Error or any
+  // other Thread#raise landing in that window, and discarding one of those
+  // loses it entirely. Kept instead, and re-raised from the next entry point,
+  // where there is no QuickJS frame to unwind through.
+  VALUE r_registrar_error;
+  // The class id a Proxy reports in this runtime, learned at init from a Proxy
+  // this extension builds, before any guest code can run. Read from the guest's
+  // own Proxy instead and a script that reassigns or deletes that global
+  // decides what the readers treat as a Proxy.
+  JSClassID proxy_class_id;
   // Whether interrupt_handler is currently installed. started_at belongs to
   // whichever evaluation armed it, so without this the elapsed time is read
   // off a stale clock — an unbudgeted polyfill load disarms deliberately and
@@ -192,6 +213,8 @@ static void vm_free(void *ptr)
   {
     if (!JS_IsUndefined(data->j_file_proxy_creator))
       JS_FreeValue(data->context, data->j_file_proxy_creator);
+    if (!JS_IsUndefined(data->j_blob_ctor))
+      JS_FreeValue(data->context, data->j_blob_ctor);
 
     vm_teardown_context(data->context, data->std_handlers_installed);
   }
@@ -210,6 +233,8 @@ static void vm_mark(void *ptr)
   rb_gc_mark_movable(data->defined_functions);
   rb_gc_mark_movable(data->log_listener);
   rb_gc_mark_movable(data->alive_objects);
+  rb_gc_mark_movable(data->alive_handles);
+  rb_gc_mark_movable(data->r_registrar_error);
   rb_gc_mark_movable(data->module_loader);
   rb_gc_mark_movable(data->on_unhandled_rejection);
   rb_gc_mark_movable(data->module_resolution_cache);
@@ -227,6 +252,8 @@ static void vm_compact(void *ptr)
   data->defined_functions = rb_gc_location(data->defined_functions);
   data->log_listener = rb_gc_location(data->log_listener);
   data->alive_objects = rb_gc_location(data->alive_objects);
+  data->alive_handles = rb_gc_location(data->alive_handles);
+  data->r_registrar_error = rb_gc_location(data->r_registrar_error);
   data->module_loader = rb_gc_location(data->module_loader);
   data->on_unhandled_rejection = rb_gc_location(data->on_unhandled_rejection);
   data->module_resolution_cache = rb_gc_location(data->module_resolution_cache);
@@ -264,13 +291,18 @@ static VALUE vm_alloc(VALUE r_self)
   data->defined_functions = rb_hash_new();
   data->log_listener = Qnil;
   data->alive_objects = rb_hash_new();
+  data->alive_handles = rb_hash_new();
   data->module_loader = Qnil;
   data->on_unhandled_rejection = Qnil;
   data->module_resolution_cache = rb_hash_new();
   data->module_source_cache = rb_hash_new();
   data->preloaded_module_names = rb_hash_new();
   data->j_file_proxy_creator = JS_UNDEFINED;
+  data->j_blob_ctor = JS_UNDEFINED;
+  data->proxy_class_id = 0;
   data->oom_poisoned = false;
+  data->handle_source_broken = false;
+  data->r_registrar_error = Qnil;
   data->eval_timer_armed = false;
   data->disposed = false;
   data->gvl_released_js = false;
@@ -301,6 +333,250 @@ static VALUE vm_alloc(VALUE r_self)
 // shorter name than asked for the moment anyone raised the entropy.
 #define QUICKJSRB_GENERATED_NAME_LEN 12
 #define QUICKJSRB_GENERATED_NAME_SIZE (QUICKJSRB_GENERATED_NAME_LEN + 1)
+
+// The handle a bridged object is published to the guest under. It was the
+// Ruby object_id, which is a small sequential integer, and nothing ever leaves
+// alive_objects — so a script could walk 1..4000 and be handed back objects it
+// had never held: a File to read, a CryptoKey to sign with after every JS
+// reference to it was gone. Drawn from 2^48 instead, which stays exact in a JS
+// double and is not a space to walk. Collisions are re-drawn rather than
+// trusted to be unlikely, since one would hand two subsystems the same entry.
+#define QUICKJSRB_HANDLE_BITS 48
+#define QUICKJSRB_HANDLE_DRAW_LIMIT 16
+
+// Reads rb_object_id as an own data property, never through the prototype
+// chain and never through a getter, and answers whether there was one. All
+// three writers define it that way, so nothing legitimate is missed, and an
+// accessor a guest puts on Object.prototype otherwise answers for every object
+// that crosses back: one line of setup and a returned Hash becomes whichever
+// host File or CryptoKey the guest already holds a handle for.
+static inline bool j_read_own_handle(JSContext *ctx, JSValueConst j_val, JSValue *j_handle_out)
+{
+  JSAtom atom = JS_NewAtom(ctx, "rb_object_id");
+  JSPropertyDescriptor desc;
+  int found = JS_GetOwnProperty(ctx, &desc, j_val, atom);
+  JS_FreeAtom(ctx, atom);
+  if (found < 0)
+  {
+    // A Proxy trap answered and threw. The callers drain it.
+    *j_handle_out = JS_EXCEPTION;
+    return false;
+  }
+  if (found == 0)
+    return false;
+  if ((desc.flags & JS_PROP_TMASK) != JS_PROP_NORMAL)
+  {
+    JS_FreeValue(ctx, desc.value);
+    JS_FreeValue(ctx, desc.getter);
+    JS_FreeValue(ctx, desc.setter);
+    return false;
+  }
+  JS_FreeValue(ctx, desc.getter);
+  JS_FreeValue(ctx, desc.setter);
+  *j_handle_out = desc.value;
+  return true;
+}
+
+// Defined in quickjsrb.c. Declared here because the crypto reader needs it to
+// give back an exception a guest's getter parked on its way through.
+VALUE find_ruby_error(JSContext *ctx, JSValue j_error);
+// Also in quickjsrb.c: whether the evaluation has outrun the budget it was
+// armed with. Anything that hands a throw back to the guest has to ask, or a
+// deadline that fired inside a getter becomes catchable.
+bool eval_budget_lapsed_now(JSContext *ctx);
+// Also in quickjsrb.c: takes a throw a reader is about to drop, after giving
+// find_ruby_error the chance to unpark what it carries.
+void quickjsrb_drain_pending(JSContext *ctx);
+
+// The source the handle is drawn from, resolved once at Init and pinned rather
+// than looked up per registration: the registrar runs inside QuickJS native
+// callbacks with no rb_protect between them and the interpreter, which is the
+// hazard r_crypto_key_class is written around, and a constant lookup is exactly
+// the raise that hazard is about. The limit is 2^48 - 1 so the draw lands in
+// 1 .. 2^48 - 1, because every reader treats a zero handle as "no entry" and a
+// zero draw would strand the object.
+//
+// Narrowed rather than closed: the draw still calls into Ruby, so a
+// NoMemoryError or an entropy failure raises from the same place. Pre-resolving
+// takes the reachable cause off that path; the rest goes with the table, in
+// #114.
+//
+// Defined in quickjsrb.c rather than here, because a static in a header gives
+// every translation unit its own copy and only the one Init touched would be
+// set.
+extern VALUE quickjsrb_secure_random;
+extern VALUE quickjsrb_handle_limit;
+void quickjsrb_init_handle_source(void);
+
+// Both rows go together: alive_handles is only a way back to the handle, and a
+// handle left in alive_objects is what anchors the object for the life of the
+// VM.
+// Takes the handle rather than deriving it, so nothing here dispatches: these
+// run on unwind paths inside JSCFunctions, where a raise is #134, and the
+// registration side is under rb_protect for exactly that reason. rb_hash_delete
+// on an existing key allocates nothing.
+static inline void alive_objects_unregister(VMData *data, VALUE r_handle, VALUE r_object_id)
+{
+  rb_hash_delete(data->alive_objects, r_handle);
+  rb_hash_delete(data->alive_handles, r_object_id);
+}
+
+// Same, for a caller that has the object but not the handle it was given. A
+// miss is not an error: the object may never have been registered.
+static inline void alive_objects_forget(VMData *data, VALUE r_object)
+{
+  VALUE r_object_id = rb_obj_id(r_object);
+  VALUE r_handle = rb_hash_lookup2(data->alive_handles, r_object_id, Qnil);
+  if (!NIL_P(r_handle))
+    alive_objects_unregister(data, r_handle, r_object_id);
+}
+
+struct alive_register_work
+{
+  VMData *data;
+  VALUE r_object;
+  bool created;
+};
+
+static VALUE alive_objects_register_body(VALUE r_work)
+{
+  struct alive_register_work *work = (struct alive_register_work *)r_work;
+  VMData *data = work->data;
+  VALUE r_object = work->r_object;
+  bool *created = &work->created;
+
+  // One entry per object, not per crossing. The old handle was the object_id,
+  // so re-bridging the same File or exception overwrote its own row; drawing a
+  // fresh handle every time would instead add one, and nothing is ever removed,
+  // so `for (i = 0; i < 200000; i++) f()` would grow the table by 200000.
+  // rb_obj_id, not the method: a subclass can override object_id, and the two
+  // sides of this table have to agree on the key find_ruby_error will use.
+  VALUE r_object_id = rb_obj_id(r_object);
+  VALUE r_known = rb_hash_lookup2(data->alive_handles, r_object_id, Qnil);
+  // Reused only when the row still holds this object. Asking merely whether
+  // the handle is occupied would hand back one that a later draw had given to
+  // something else, since an object_id is only unique among live objects.
+  if (!NIL_P(r_known) && rb_hash_lookup2(data->alive_objects, r_known, Qnil) == r_object)
+  {
+    if (created != NULL)
+      *created = false;
+    return r_known;
+  }
+
+  // Bounded, because nothing can interrupt a C loop: no QuickJS interrupt is
+  // polled inside it, so timeout_msec cannot end it and only an outer
+  // Timeout.timeout would, by longjmping out of here through the JSCFunction
+  // frames this file warns about elsewhere. A host whose suite stubs the
+  // source flat (`SecureRandom.random_number` returning a constant is an
+  // ordinary test-double line) would otherwise spin forever on the second
+  // object it bridges. Sixteen draws against a 2^48 range only run out when
+  // the source is not random, so say that rather than degrade to a sequence a
+  // guest could walk.
+  //
+  // Refusing rather than raising also settles what the old note here worried
+  // about: there is no longjmp out of js_crypto_key_to_js past a promise
+  // capability it never allocated, because there is no longjmp at all.
+  VALUE r_handle;
+  int attempts = 0;
+  do
+  {
+    if (++attempts > QUICKJSRB_HANDLE_DRAW_LIMIT)
+    {
+      // Latched and handed back as a refusal, never raised from here. This runs
+      // inside a JSCFunction, and a longjmp out of one leaves the runtime's
+      // frame chain pointing at C stack that is gone: the next Error the guest
+      // builds walks it in build_backtrace and takes the process with it. The
+      // next entry point reports this instead, the way an out-of-memory is.
+      data->handle_source_broken = true;
+      if (created != NULL)
+        *created = false;
+      return Qnil;
+    }
+    r_handle = rb_funcall(quickjsrb_secure_random, rb_intern("random_number"), 1, quickjsrb_handle_limit);
+
+    // The draw is checked into an int64_t before anything uses it as a number.
+    // The bound above only catches a source that keeps returning the same
+    // value, and everything else a source can return raises here, inside the
+    // loop, before the bound is ever consulted: NUM2LL raises RangeError on a
+    // Bignum, dispatching + raises NoMethodError on nil, and a raise out of a
+    // JSCFunction is #134. rb_integer_pack answers the sign and reports a
+    // value too wide to fit rather than raising about it, and it does not
+    // dispatch, which a source could also answer for.
+    //
+    // Out of range is refused rather than clamped: a negative draw is stored
+    // under a key every reader treats as "no entry", so the object is anchored
+    // for the life of the VM and the exception it was bridging comes back as a
+    // generic Quickjs::RuntimeError instead of itself.
+    int64_t drawn = 0;
+    bool usable = RB_INTEGER_TYPE_P(r_handle);
+    if (usable)
+    {
+      // Asked only of an Integer: rb_integer_pack raises on anything else,
+      // which is the raise this check exists to avoid.
+      int sign = rb_integer_pack(r_handle, &drawn, 1, sizeof(int64_t), 0,
+                                 INTEGER_PACK_NATIVE_BYTE_ORDER | INTEGER_PACK_2COMP);
+      usable = sign >= 0 && sign <= 1 && drawn >= 0 && drawn < ((int64_t)1 << QUICKJSRB_HANDLE_BITS);
+    }
+    if (!usable)
+    {
+      data->handle_source_broken = true;
+      if (created != NULL)
+        *created = false;
+      return Qnil;
+    }
+    r_handle = LL2NUM(drawn + 1);
+  } while (!NIL_P(rb_hash_lookup2(data->alive_objects, r_handle, Qnil)));
+
+  rb_hash_aset(data->alive_objects, r_handle, r_object);
+  rb_hash_aset(data->alive_handles, r_object_id, r_handle);
+  if (created != NULL)
+    *created = true;
+  return r_handle;
+}
+
+// Answers the handle, and says through `created` whether this call is the one
+// that made the row: a caller that has to undo the registration must not undo
+// a row an earlier crossing of the same object is still relying on. Answers
+// Qnil, having latched handle_source_broken, when it cannot draw one.
+//
+// Protected, because the work it wraps runs inside a JSCFunction and a raise out
+// of one leaves QuickJS's frame chain pointing at C stack that is gone: the
+// next Error the guest builds walks it and takes the process with it (#134).
+// The draw is a Ruby dispatch this branch introduced, so it is this branch's
+// job not to open that door: a strict test double raises on an unexpected
+// invocation as readily as a loose one returns a constant, and rb_hash_aset can
+// raise NoMemoryError on the same path. A raise is treated as an unusable draw,
+// which is what it is.
+static inline VALUE alive_objects_register(VMData *data, VALUE r_object, bool *created)
+{
+  struct alive_register_work work = {data, r_object, false};
+  int state = 0;
+  VALUE r_handle = rb_protect(alive_objects_register_body, (VALUE)&work, &state);
+  if (state)
+  {
+    // Kept, not discarded. rb_protect catches everything, and most of what it
+    // can catch here is not a broken handle source: an Interrupt from Ctrl-C, a
+    // Timeout::Error from the host's own Timeout.timeout, anything a
+    // Thread#raise lands in this window. Swallowing one of those loses it with
+    // no trace and then blames a test double that does not exist. It is
+    // re-raised from the next entry point instead, with its own class and
+    // message, because here there is a QuickJS frame to unwind through and
+    // that is #134.
+    //
+    // Not latched, either: a Timeout::Error that arrived once says nothing
+    // about the handle source, and condemning the VM for it would be the wrong
+    // diagnosis twice over. The latch is for a source that answers badly, which
+    // is decided inside the body and does not come through here.
+    data->r_registrar_error = rb_errinfo();
+    rb_set_errinfo(Qnil);
+    if (created != NULL)
+      *created = false;
+    return Qnil;
+  }
+  if (created != NULL)
+    *created = work.created;
+  return r_handle;
+}
 
 static void random_filename(char buf[QUICKJSRB_GENERATED_NAME_SIZE])
 {
