@@ -1223,6 +1223,26 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
       return Qnil;
     }
 
+    // Asked before anything reads the value, and before the function branch
+    // claims it. JS_IsArray answers 1 for an array, 0 for anything else, and
+    // -1 when it cannot resolve a proxy, which is what a revoked one does,
+    // whatever its target was. Read as a boolean further down, that -1 took
+    // the array path and a value the guest is forbidden to touch came back as
+    // an ordinary empty Array, indistinguishable from a real one.
+    //
+    // Here rather than at the array dispatch because JS_IsFunction stays true
+    // for a revoked proxy over a callable target: leaving it to that branch
+    // reported the same thing through a toString it also refuses, which is a
+    // second way to the same answer.
+    int is_array = JS_IsArray(ctx, j_val);
+    if (is_array < 0)
+    {
+      // The throw it left is what the guest would be told, so that is what the
+      // caller is told, rendered and taken off the context. Answering nil
+      // instead would collide with the value a cycle already converts to.
+      return raise_js_exception(ctx);
+    }
+
     if (JS_IsFunction(ctx, j_val))
     {
       // A user-defined toString is guest code and can reach a Ruby bridge that
@@ -1314,7 +1334,8 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
 
     VALUE r_result;
     int memoize = 1;
-    if (JS_IsArray(ctx, j_val))
+    // Answered at the top of this case, before anything read the value.
+    if (is_array > 0)
     {
       r_result = js_array_to_rb(ctx, j_val, conv);
     }

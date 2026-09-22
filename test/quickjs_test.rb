@@ -17,6 +17,54 @@ describe Quickjs do
   end
 
   describe "ResultConversion" do
+    describe "a revoked Proxy" do
+      REVOKED = "const { proxy, revoke } = Proxy.revocable({ a: 1 }, {}); revoke(); "
+
+      # JS_IsArray answers 1, 0, or -1 when it cannot resolve a proxy. Read as a
+      # boolean the -1 took the array path, and a value the guest is forbidden
+      # to touch came back as an ordinary empty Array.
+      it "is reported rather than fabricated into an empty Array" do
+        vm = Quickjs::VM.new
+
+        error = _ { vm.eval_code(REVOKED + 'proxy') }.must_raise Quickjs::TypeError
+
+        # What the guest is told for the same value.
+        _(error.message).must_equal 'revoked proxy'
+      ensure
+        vm&.dispose!
+      end
+
+      it "is reported wherever the conversion reaches it" do
+        ['({ ok: 1, bad: proxy })', '[1, proxy]'].each do |shape|
+          vm = Quickjs::VM.new
+          _ { vm.eval_code(REVOKED + shape) }.must_raise Quickjs::TypeError
+          vm.dispose!
+        end
+      end
+
+      # Rendering the throw also takes it off the context, which is the half of
+      # the issue that is about the VM rather than the value.
+      it "leaves the VM usable, with nothing pending" do
+        vm = Quickjs::VM.new
+        _ { vm.eval_code(REVOKED + 'proxy') }.must_raise Quickjs::TypeError
+
+        _(vm.eval_code('1 + 1')).must_equal 2
+      ensure
+        vm&.dispose!
+      end
+
+      # The guard against reading -1 as "not an array" instead: a live Proxy
+      # resolves, and both shapes convert as they always did.
+      it "does not change what a live Proxy converts to" do
+        vm = Quickjs::VM.new
+
+        _(vm.eval_code('new Proxy([1, 2], {})')).must_equal [1, 2]
+        _(vm.eval_code('new Proxy({ a: 1 }, {})')).must_equal({ 'a' => 1 })
+      ensure
+        vm&.dispose!
+      end
+    end
+
     it "null becomes nil" do
       assert_code("null", nil)
     end
