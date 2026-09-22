@@ -2919,8 +2919,20 @@ static VALUE raise_from_js_exception_held(VMData *data)
 
 static VALUE eval_code_job_run_body(VALUE p)
 {
-  eval_code_job_run((struct eval_code_job *)p);
-  return Qnil;
+  struct eval_code_job *job = (struct eval_code_job *)p;
+  eval_code_job_run(job);
+  return to_rb_return_value(job->ctx, job->result);
+}
+
+// Unwraps js_std_await's {value, done}, or raises the JS exception.
+static VALUE bytecode_eval_result_to_rb(JSContext *ctx, JSValue j_result)
+{
+  if (JS_IsException(j_result))
+    return to_rb_value(ctx, j_result); // raises
+
+  JSValue j_returnedValue = JS_GetPropertyStr(ctx, j_result, "value");
+  JS_FreeValue(ctx, j_result);
+  return to_rb_return_value(ctx, j_returnedValue);
 }
 
 // rb_ensure bodies over the shared bytecode core, for the GVL-held call
@@ -2937,8 +2949,9 @@ static VALUE bytecode_load_body(VALUE p)
 
 static VALUE bytecode_eval_await_body(VALUE p)
 {
-  bytecode_eval_await_job_run((struct bytecode_load_job *)p);
-  return Qnil;
+  struct bytecode_load_job *job = (struct bytecode_load_job *)p;
+  bytecode_eval_await_job_run(job);
+  return bytecode_eval_result_to_rb(job->ctx, job->result);
 }
 
 // Copy a Ruby String to a malloc'd buffer that outlives a GVL release —
@@ -3046,8 +3059,7 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
       .async_mode = async_mode,
       .result = JS_UNDEFINED,
   };
-  run_held_js_entry(data, eval_code_job_run_body, (VALUE)&job);
-  return to_rb_return_value_held(data, job.result);
+  return run_held_js_entry(data, eval_code_job_run_body, (VALUE)&job);
 }
 
 struct compile_job
@@ -3560,8 +3572,7 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
                                     (const uint8_t *)RSTRING_PTR(r_bytecode),
                                     (size_t)RSTRING_LEN(r_bytecode),
                                     JS_UNDEFINED};
-    run_held_js_entry(data, bytecode_eval_await_body, (VALUE)&job);
-    j_result = job.result;
+    return run_held_js_entry(data, bytecode_eval_await_body, (VALUE)&job);
   }
 
   if (JS_IsException(j_result))
