@@ -3693,7 +3693,7 @@ static VALUE vm_m_evalBytecode(VALUE r_self, VALUE r_bytecode)
                                     (const uint8_t *)RSTRING_PTR(r_bytecode),
                                     (size_t)RSTRING_LEN(r_bytecode),
                                     JS_UNDEFINED};
-    return run_held_js_entry(data, bytecode_eval_await_body, (VALUE)&job);
+    return run_held_js_checkpoint_entry(data, bytecode_eval_await_body, (VALUE)&job);
   }
 
   if (JS_IsException(j_result))
@@ -4229,7 +4229,7 @@ static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
   // conversion), and a concurrent dispose! landing in such a gap would
   // free the runtime out from under them.
   struct js_entry_call call = {argc, argv, data};
-  return run_held_js_entry(data, call_global_function_body, (VALUE)&call);
+  return run_held_js_checkpoint_entry(data, call_global_function_body, (VALUE)&call);
 }
 
 static VALUE vm_m_set_module_loader(VALUE r_self, VALUE r_loader)
@@ -4403,7 +4403,7 @@ static VALUE vm_m_import(int argc, VALUE *argv, VALUE r_self)
   // evals_in_flight elevated for the whole call so a concurrent dispose!
   // can't free the runtime in those gaps.
   struct js_entry_call call = {argc, argv, data};
-  return run_held_js_entry(data, import_body, (VALUE)&call);
+  return run_held_js_checkpoint_entry(data, import_body, (VALUE)&call);
 }
 
 RUBY_FUNC_EXPORTED void Init_quickjsrb(void)

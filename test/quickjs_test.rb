@@ -3216,6 +3216,15 @@ end
       _(captured.sort).must_equal((0...50).map { |i| "r#{i}" }.sort)
     end
 
+    it "reports a rejection raised inside a Ruby-initiated call at its checkpoint's end" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err.message }
+      @vm.eval_code("function boom() { void Promise.reject(new Error('via-call')); }")
+      @vm.call("boom")
+
+      _(captured).must_equal ["via-call"]
+    end
+
     it "disposes cleanly with rejections still pending" do
       vm = Quickjs::VM.new
       captured = []
@@ -3235,6 +3244,22 @@ end
 
       _(result).must_equal 7
       _(captured).must_equal ["during-conversion"]
+    end
+
+    it "reports a rejection left behind by bytecode at eval_bytecode's end" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err.message }
+      @vm.compile("void Promise.reject(new Error('from-bytecode'));").run(on: @vm)
+
+      _(captured).must_equal ["from-bytecode"]
+    end
+
+    it "reports a rejection left behind by a module body at import's end" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err.message }
+      @vm.import("{ x }", from: "export const x = 1; void Promise.reject(new Error('from-import'));")
+
+      _(captured).must_equal ["from-import"]
     end
 
     it "does not end the checkpoint when a nested call returns" do
