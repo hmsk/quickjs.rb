@@ -1716,6 +1716,16 @@ static void quickjsrb_promise_rejection_tracker(
     pending_rejections_add(data, promise);
 }
 
+// A promise the host awaits is handled by the host: its rejection is raised.
+static JSValue quickjsrb_host_await(JSContext *ctx, JSValue promise)
+{
+  JSValue held = JS_DupValue(ctx, promise);
+  JSValue ret = js_std_await(ctx, promise); // frees promise
+  pending_rejections_remove(JS_GetContextOpaque(ctx), held);
+  JS_FreeValue(ctx, held);
+  return ret;
+}
+
 static void quickjsrb_notify_unhandled_rejections(VMData *data)
 {
   if (NIL_P(data->on_unhandled_rejection) || JS_IsUndefined(data->j_pending_rejections))
@@ -2227,7 +2237,7 @@ static void *bytecode_eval_await_job_run(void *p)
 {
   struct bytecode_load_job *job = p;
   bytecode_load_job_run(job);
-  job->result = js_std_await(job->ctx, job->result);
+  job->result = quickjsrb_host_await(job->ctx, job->result);
   return NULL;
 }
 
@@ -2619,7 +2629,7 @@ static void *eval_code_job_run(void *p)
   JSValue j_codeResult = JS_Eval(job->ctx, job->code, job->code_len, job->filename, eval_flags);
   if (job->async_mode)
   {
-    JSValue j_awaitedResult = js_std_await(job->ctx, j_codeResult); // frees j_codeResult
+    JSValue j_awaitedResult = quickjsrb_host_await(job->ctx, j_codeResult); // frees j_codeResult
     job->result = JS_GetPropertyStr(job->ctx, j_awaitedResult, "value");
     JS_FreeValue(job->ctx, j_awaitedResult);
   }
@@ -4208,7 +4218,7 @@ static VALUE call_global_function_run(VALUE p)
   JS_FreeValue(data->context, j_this);
 
   // js_std_await handles both async (promise) and sync results; frees j_result
-  return to_rb_return_value(data->context, js_std_await(data->context, j_result));
+  return to_rb_return_value(data->context, quickjsrb_host_await(data->context, j_result));
 }
 
 static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
@@ -4371,7 +4381,7 @@ static VALUE import_body(VALUE p)
   // Module eval returns a Promise. Awaiting it surfaces top-level throws,
   // rejected dynamic imports, and rejected top-level awaits as Ruby
   // exceptions instead of silently dropping them.
-  JSValue j_awaited = js_std_await(data->context, j_codeResult);
+  JSValue j_awaited = quickjsrb_host_await(data->context, j_codeResult);
   if (JS_IsException(j_awaited))
     return to_rb_value(data->context, j_awaited);
   JS_FreeValue(data->context, j_awaited);

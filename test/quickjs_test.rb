@@ -3278,6 +3278,25 @@ end
       _(captured).must_equal ["from-import"]
     end
 
+    it "reports rejections left behind by a throwing eval alongside the raise" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err.message }
+      _ { @vm.eval_code("void Promise.reject(new Error('before-throw')); throw new Error('boom');") }
+        .must_raise Quickjs::RuntimeError
+
+      _(captured).must_equal ["before-throw"]
+    end
+
+    it "does not report the promise the host itself awaits (async eval / call)" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err.message }
+      _ { @vm.eval_code("throw new Error('top-level')") }.must_raise Quickjs::RuntimeError
+      @vm.eval_code("async function fail() { throw new Error('from-call'); }")
+      _ { @vm.call("fail") }.must_raise Quickjs::RuntimeError
+
+      _(captured).must_be_empty
+    end
+
     it "does not end the checkpoint when a nested call returns" do
       captured = []
       @vm.on_unhandled_rejection { |err| captured << err.message }
