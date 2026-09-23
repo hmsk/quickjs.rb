@@ -3133,6 +3133,158 @@ end
       _(called).must_equal true
       _(@vm.eval_code('42')).must_equal 42
     end
+
+    it "does not report Promise.reject(x).catch(...) handled in the same checkpoint" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err }
+      @vm.eval_code("void Promise.reject(new Error('handled')).catch(() => {});")
+
+      _(captured).must_be_empty
+    end
+
+    it "does not report new Promise((_, reject) => reject(x)).catch(...)" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err }
+      @vm.eval_code("void new Promise((_, reject) => reject(new Error('handled'))).catch(() => {});")
+
+      _(captured).must_be_empty
+    end
+
+    it "does not report a rejection awaited after an intervening await" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err }
+      @vm.eval_code(<<~JS, async: true)
+        const p = Promise.reject(new Error('late-but-handled'));
+        await Promise.resolve();
+        try { await p; } catch (e) {}
+      JS
+
+      _(captured).must_be_empty
+    end
+
+    it "still reports a genuinely unhandled async throw" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err }
+      @vm.eval_code(<<~JS, async: true)
+        async function boom() { throw new Error('genuine'); }
+        void boom();
+        await Promise.resolve();
+      JS
+
+      _(captured.size).must_equal 1
+      _(captured.first.message).must_match(/genuine/)
+    end
+
+    it "defers reporting to drain_jobs! when a job is still queued after eval" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err }
+      @vm.eval_code(<<~JS, async: false)
+        const p = Promise.reject(new Error('survivor'));
+        void Promise.resolve().then(() => {});
+      JS
+
+      _(captured).must_be_empty
+
+      @vm.drain_jobs!
+      _(captured.size).must_equal 1
+      _(captured.first.message).must_match(/survivor/)
+    end
+
+    it "does not report when a later microtask attaches the handler" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err }
+      @vm.eval_code(<<~JS, async: false)
+        const p = Promise.reject(new Error('handled-in-job'));
+        void Promise.resolve().then(() => { p.catch(() => {}); });
+      JS
+
+      _(captured).must_be_empty
+      @vm.drain_jobs!
+      _(captured).must_be_empty
+    end
+
+    # Freed promises can be reused at the same address within a checkpoint;
+    # the list must hold references or earlier rejections vanish.
+    it "reports every rejection even when promise addresses get recycled" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err.message }
+      @vm.eval_code(<<~JS)
+        for (let i = 0; i < 50; i++) { void Promise.reject(new Error('r' + i)); }
+        0
+      JS
+
+      _(captured.sort).must_equal((0...50).map { |i| "r#{i}" }.sort)
+    end
+
+    it "disposes cleanly with rejections still pending" do
+      vm = Quickjs::VM.new
+      captured = []
+      vm.on_unhandled_rejection { |err| captured << err }
+      vm.eval_code("void Promise.reject(new Error('x')); void Promise.resolve().then(() => {});")
+      vm.dispose!
+      _(captured).must_be_empty
+    end
+
+    it "reports a rejection raised while converting the result to Ruby" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err.message }
+      result = @vm.eval_code(<<~JS)
+        class Box { toJSON() { void Promise.reject(new Error('during-conversion')); return 7; } }
+        new Box()
+      JS
+
+      _(result).must_equal 7
+      _(captured).must_equal ["during-conversion"]
+    end
+
+    it "does not end the checkpoint when a nested call returns" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err.message }
+      @vm.define_function("reenter") { @vm.eval_code("0", async: false) }
+      @vm.eval_code(<<~JS, async: false)
+        const p = Promise.reject(new Error('handled-after-reentry'));
+        reenter();
+        void p.catch(() => {});
+      JS
+      @vm.drain_jobs!
+
+      _(captured).must_be_empty
+    end
+
+    it "skips a promise that an earlier notification's handler catches" do
+      captured = []
+      @vm.on_unhandled_rejection do |err|
+        captured << err.message
+        @vm.eval_code("void second.catch(() => {}); 0", async: false) if err.message == "first"
+      end
+      @vm.eval_code("void Promise.reject(new Error('first')); var second = Promise.reject(new Error('second')); 0", async: false)
+      @vm.drain_jobs!
+
+      _(captured).must_equal ["first"]
+    end
+
+    it "skips a promise caught while an earlier reason is being read" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err.message }
+      @vm.eval_code(<<~JS, async: false)
+        const first = new Error('first');
+        Object.defineProperty(first, 'message', { get() { void second.catch(() => {}); return 'first'; } });
+        void Promise.reject(first);
+        var second = Promise.reject(new Error('second'));
+      JS
+      @vm.drain_jobs!
+
+      _(captured).must_equal ["first"]
+    end
+
+    it "refuses dispose! from inside the handler instead of freeing the live runtime" do
+      vm = Quickjs::VM.new
+      vm.on_unhandled_rejection { |_err| vm.dispose! }
+      vm.eval_code("void Promise.reject(new Error('a')); void Promise.reject(new Error('b'));")
+
+      _(vm.disposed?).must_equal false
+      _(vm.eval_code("1 + 1")).must_equal 2
+    end
   end
 
   describe "ModuleLoader" do

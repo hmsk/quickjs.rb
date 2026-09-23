@@ -1633,48 +1633,138 @@ static VALUE r_rejection_call(VALUE r_args_val)
   return rb_funcall(args->proc, rb_intern("call"), 1, args->r_reason);
 }
 
+static uint32_t rejection_list_length(JSContext *ctx, JSValueConst list)
+{
+  if (JS_IsUndefined(list))
+    return 0;
+  JSValue j_len = JS_GetPropertyStr(ctx, list, "length");
+  uint32_t len = 0;
+  JS_ToUint32(ctx, &len, j_len);
+  JS_FreeValue(ctx, j_len);
+  return len;
+}
+
+static void pending_rejections_clear_exception(JSContext *ctx)
+{
+  JS_FreeValue(ctx, JS_GetException(ctx));
+}
+
+static JSValue pending_rejections_array(VMData *data)
+{
+  if (JS_IsUndefined(data->j_pending_rejections))
+  {
+    data->j_pending_rejections = JS_NewArray(data->context);
+    if (JS_IsException(data->j_pending_rejections))
+    {
+      data->j_pending_rejections = JS_UNDEFINED;
+      pending_rejections_clear_exception(data->context);
+    }
+  }
+  return data->j_pending_rejections;
+}
+
+static void pending_rejections_add(VMData *data, JSValueConst promise)
+{
+  JSValue arr = pending_rejections_array(data);
+  if (JS_IsUndefined(arr))
+    return;
+  if (JS_DefinePropertyValueUint32(data->context, arr, rejection_list_length(data->context, arr),
+                                   JS_DupValue(data->context, promise), JS_PROP_C_W_E) < 0)
+    pending_rejections_clear_exception(data->context);
+}
+
+static bool rejection_list_remove(JSContext *ctx, JSValueConst list, JSValueConst promise)
+{
+  uint32_t len = rejection_list_length(ctx, list);
+  for (uint32_t i = 0; i < len; i++)
+  {
+    JSValue v = JS_GetPropertyUint32(ctx, list, i);
+    bool hit = JS_VALUE_GET_TAG(v) == JS_TAG_OBJECT &&
+               JS_VALUE_GET_PTR(v) == JS_VALUE_GET_PTR(promise);
+    JS_FreeValue(ctx, v);
+    if (hit)
+    {
+      JS_DefinePropertyValueUint32(ctx, list, i, JS_UNDEFINED, JS_PROP_C_W_E);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Also looks in the batch being notified, so a promise handled by then is skipped.
+static void pending_rejections_remove(VMData *data, JSValueConst promise)
+{
+  if (JS_VALUE_GET_TAG(promise) != JS_TAG_OBJECT)
+    return;
+  if (!rejection_list_remove(data->context, data->j_pending_rejections, promise))
+    rejection_list_remove(data->context, data->j_notifying_rejections, promise);
+}
+
+// A handler may still be attached later in the same checkpoint, so only
+// record here; the verdict is made at the checkpoint's end.
 static void quickjsrb_promise_rejection_tracker(
     JSContext *ctx, JSValueConst promise, JSValueConst reason,
     JS_BOOL is_handled, void *opaque)
 {
-  if (is_handled)
-    return;
-
   VMData *data = JS_GetContextOpaque(ctx);
   if (NIL_P(data->on_unhandled_rejection))
     return;
 
-  // Protected on its own, and not merely as the first statement of the call
-  // below, because the two failures are not the same failure. The reason is a
-  // guest object whose own getters run while it converts, so a bridge can raise
-  // here — and a host error found while reading one property of a rejection
-  // that was otherwise perfectly reportable is something the listener wants to
-  // hear, not grounds for dropping the rejection. It becomes the reason.
-  struct rejection_reason_args reason_args = {ctx, reason};
-  int state;
-  VALUE r_reason = rb_protect(r_rejection_reason, (VALUE)&reason_args, &state);
-  if (state)
-  {
-    // rb_protect reports every non-local exit, not only a raise, and a Ruby
-    // `throw` leaves internal throw data in errinfo rather than an exception.
-    // There is nothing to hand a listener there and nowhere to re-raise it
-    // from a host callback, so that one keeps going on the floor.
-    VALUE r_raised = rb_errinfo();
-    rb_set_errinfo(Qnil);
-    if (!rb_obj_is_kind_of(r_raised, rb_eException))
-      return;
-    r_reason = r_raised;
-  }
+  if (is_handled)
+    pending_rejections_remove(data, promise);
+  else
+    pending_rejections_add(data, promise);
+}
 
-  struct rejection_call_args call_args = {data->on_unhandled_rejection, r_reason};
-  rb_protect(r_rejection_call, (VALUE)&call_args, &state);
-  if (state)
+static void quickjsrb_notify_unhandled_rejections(VMData *data)
+{
+  if (NIL_P(data->on_unhandled_rejection) || JS_IsUndefined(data->j_pending_rejections))
+    return;
+
+  // Rejections made while notifying go into a fresh list.
+  JSValue batch = data->j_pending_rejections;
+  data->j_pending_rejections = JS_UNDEFINED;
+  data->j_notifying_rejections = batch;
+
+  uint32_t n = rejection_list_length(data->context, batch);
+  for (uint32_t i = 0; i < n; i++)
   {
-    // Longjmping out of a QuickJS host callback corrupts the runtime, so
-    // a raise inside the user's tracker has to be dropped on the floor. There
-    // is nowhere left to put this one: the listener was the place.
-    rb_set_errinfo(Qnil);
+    JSValue v = JS_GetPropertyUint32(data->context, batch, i);
+    if (JS_VALUE_GET_TAG(v) != JS_TAG_OBJECT)
+      continue;
+
+    JSValue j_reason = JS_PromiseResult(data->context, v);
+    // A bridge error raised while reading the reason becomes the reason.
+    struct rejection_reason_args reason_args = {data->context, j_reason};
+    int state;
+    VALUE r_reason = rb_protect(r_rejection_reason, (VALUE)&reason_args, &state);
+    JS_FreeValue(data->context, j_reason);
+    JS_FreeValue(data->context, v);
+    if (state)
+    {
+      VALUE r_raised = rb_errinfo();
+      rb_set_errinfo(Qnil);
+      if (!rb_obj_is_kind_of(r_raised, rb_eException))
+        continue; // a Ruby `throw`, not an exception
+      r_reason = r_raised;
+    }
+
+    struct rejection_call_args call_args = {data->on_unhandled_rejection, r_reason};
+    rb_protect(r_rejection_call, (VALUE)&call_args, &state);
+    if (state)
+      rb_set_errinfo(Qnil);
   }
+  data->j_notifying_rejections = JS_UNDEFINED;
+  JS_FreeValue(data->context, batch);
+}
+
+// With jobs still queued, whoever drains them ends the checkpoint.
+static void quickjsrb_end_microtask_checkpoint(VMData *data)
+{
+  if (data->oom_poisoned)
+    return;
+  if (!JS_IsJobPending(JS_GetRuntime(data->context)))
+    quickjsrb_notify_unhandled_rejections(data);
 }
 
 static VALUE r_try_call_proc(VALUE r_try_args)
@@ -2917,6 +3007,36 @@ static VALUE raise_from_js_exception_held(VMData *data)
   return run_held_js_entry(data, js_exception_held_body, (VALUE)&owned);
 }
 
+// run_held_js_entry that ends the microtask checkpoint after body, raise or not.
+struct held_checkpoint_call
+{
+  VMData *data;
+  VALUE (*body)(VALUE);
+  VALUE arg;
+};
+
+static VALUE held_checkpoint_end(VALUE p)
+{
+  VMData *data = ((struct held_checkpoint_call *)p)->data;
+  // Only the outermost entry: a nested one returns while outer JS is still
+  // running, and this also keeps the handler from re-entering the checkpoint.
+  if (data->evals_in_flight == 1)
+    quickjsrb_end_microtask_checkpoint(data);
+  return Qnil;
+}
+
+static VALUE held_checkpoint_body(VALUE p)
+{
+  struct held_checkpoint_call *call = (struct held_checkpoint_call *)p;
+  return rb_ensure(call->body, call->arg, held_checkpoint_end, p);
+}
+
+static VALUE run_held_js_checkpoint_entry(VMData *data, VALUE (*body)(VALUE), VALUE arg)
+{
+  struct held_checkpoint_call call = {data, body, arg};
+  return run_held_js_entry(data, held_checkpoint_body, (VALUE)&call);
+}
+
 static VALUE eval_code_job_run_body(VALUE p)
 {
   struct eval_code_job *job = (struct eval_code_job *)p;
@@ -3059,7 +3179,8 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
       .async_mode = async_mode,
       .result = JS_UNDEFINED,
   };
-  return run_held_js_entry(data, eval_code_job_run_body, (VALUE)&job);
+  // No checkpoint on the GVL-free path: it is not taken with a handler set.
+  return run_held_js_checkpoint_entry(data, eval_code_job_run_body, (VALUE)&job);
 }
 
 struct compile_job
@@ -4387,7 +4508,7 @@ static VALUE vm_m_drainJobs(VALUE r_self)
 
   arm_eval_timer(data);
 
-  return run_held_js_entry(data, drain_jobs_body, (VALUE)data);
+  return run_held_js_checkpoint_entry(data, drain_jobs_body, (VALUE)data);
 }
 
 static VALUE vm_m_memoryPoisoned(VALUE r_self)
@@ -4460,6 +4581,12 @@ static VALUE vm_m_dispose(VALUE r_self)
   {
     JS_FreeValue(data->context, data->j_blob_ctor);
     data->j_blob_ctor = JS_UNDEFINED;
+  }
+
+  if (!JS_IsUndefined(data->j_pending_rejections))
+  {
+    JS_FreeValue(data->context, data->j_pending_rejections);
+    data->j_pending_rejections = JS_UNDEFINED;
   }
 
   // Mark disposed before releasing the GVL so a concurrent dfree finds

@@ -68,6 +68,11 @@ typedef struct VMData
   VALUE alive_handles;
   VALUE module_loader;
   VALUE on_unhandled_rejection;
+  // Rejected promises not yet handled, as a JS Array so that it keeps them
+  // alive until the checkpoint ends. JS_UNDEFINED when empty.
+  JSValue j_pending_rejections;
+  // The batch being notified; JS_UNDEFINED outside notification.
+  JSValue j_notifying_rejections;
   // Memoize (specifier, importer) → canonical so the user's loader Proc
   // runs at most once per distinct pair across the VM's lifetime. Without
   // this, QuickJS calls normalize on every import statement — including
@@ -216,6 +221,9 @@ static void vm_free(void *ptr)
     if (!JS_IsUndefined(data->j_blob_ctor))
       JS_FreeValue(data->context, data->j_blob_ctor);
 
+    if (!JS_IsUndefined(data->j_pending_rejections))
+      JS_FreeValue(data->context, data->j_pending_rejections);
+
     vm_teardown_context(data->context, data->std_handlers_installed);
   }
 
@@ -294,6 +302,8 @@ static VALUE vm_alloc(VALUE r_self)
   data->alive_handles = rb_hash_new();
   data->module_loader = Qnil;
   data->on_unhandled_rejection = Qnil;
+  data->j_pending_rejections = JS_UNDEFINED;
+  data->j_notifying_rejections = JS_UNDEFINED;
   data->module_resolution_cache = rb_hash_new();
   data->module_source_cache = rb_hash_new();
   data->preloaded_module_names = rb_hash_new();
