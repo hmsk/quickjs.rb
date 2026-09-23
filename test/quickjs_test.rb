@@ -3190,6 +3190,22 @@ end
       _(captured.first.message).must_match(/survivor/)
     end
 
+    it "reports on drain_jobs! a rejection pending with no job queued" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err.message }
+      @vm.eval_code(<<~JS)
+        const e = new Error('outer');
+        Object.defineProperty(e, 'message', {
+          get() { void Promise.reject(new Error('inner')); return 'outer'; },
+        });
+        void Promise.reject(e);
+      JS
+
+      _(captured).must_equal ["outer"]
+      @vm.drain_jobs!
+      _(captured).must_equal ["outer", "inner"]
+    end
+
     it "does not report when a later microtask attaches the handler" do
       captured = []
       @vm.on_unhandled_rejection { |err| captured << err }

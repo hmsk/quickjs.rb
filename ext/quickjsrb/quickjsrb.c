@@ -4482,14 +4482,18 @@ static VALUE drain_jobs_body(VALUE p)
   VMData *data = (VMData *)p;
   JSRuntime *runtime = JS_GetRuntime(data->context);
   int executed = 0;
-  for (;;)
+  if (JS_IsJobPending(runtime))
   {
-    int err = JS_ExecutePendingJob(runtime, NULL);
-    if (err == 0)
-      break;
-    if (err < 0)
-      return to_rb_value(data->context, JS_EXCEPTION); // raises
-    executed++;
+    arm_eval_timer(data);
+    for (;;)
+    {
+      int err = JS_ExecutePendingJob(runtime, NULL);
+      if (err == 0)
+        break;
+      if (err < 0)
+        return to_rb_value(data->context, JS_EXCEPTION); // raises
+      executed++;
+    }
   }
   return INT2NUM(executed);
 }
@@ -4503,10 +4507,10 @@ static VALUE vm_m_drainJobs(VALUE r_self)
   check_vm_poisoned(data);
   check_js_entry_owner(data);
 
-  if (!JS_IsJobPending(JS_GetRuntime(data->context)))
+  // Rejections can be pending with no job queued.
+  if (!JS_IsJobPending(JS_GetRuntime(data->context)) &&
+      JS_IsUndefined(data->j_pending_rejections))
     return INT2NUM(0);
-
-  arm_eval_timer(data);
 
   return run_held_js_checkpoint_entry(data, drain_jobs_body, (VALUE)data);
 }
