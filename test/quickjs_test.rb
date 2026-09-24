@@ -2311,6 +2311,95 @@ end
   end
 
   describe "GlobalFunction" do
+    # Converting an argument runs guest code and can raise, in a loop that sits
+    # inside a JSCFunction. A Promise is the shape that reaches it on any
+    # build: the conversion refuses one, because there is nothing to await on
+    # the Ruby side.
+    describe "when converting an argument raises" do
+      it "is catchable, the way every other error from this bridge is" do
+        vm = Quickjs::VM.new
+        vm.define_function(:take) { |x| "took #{x.class}" }
+
+        caught = vm.eval_code("let o = 'none'; try { take(Promise.resolve(1)) } catch (e) { o = 'caught: ' + e.message } o")
+        _(caught).must_include 'Promise'
+
+        # And it is still the host's when it travels out instead.
+        _ { vm.eval_code('take(Promise.resolve(1))') }.must_raise Quickjs::RuntimeError
+        # The bridge still works afterwards.
+        _(vm.eval_code('take({ a: 1 })')).must_equal 'took Hash'
+      ensure
+        vm&.dispose!
+      end
+
+      it "retains nothing on the way out" do
+        vm = Quickjs::VM.new
+        vm.define_function(:take) { |x| 'took' }
+
+        20.times { vm.eval_code('take(Promise.resolve(1))') rescue nil }
+        GC.start(full_mark: true, immediate_sweep: true)
+        before = vm.memory_usage[:obj_count]
+        200.times { vm.eval_code('take(Promise.resolve(1))') rescue nil }
+        GC.start(full_mark: true, immediate_sweep: true)
+
+        _(vm.memory_usage[:obj_count] - before).must_equal 0
+      ensure
+        vm&.dispose!
+      end
+
+      # rb_protect catches everything, and two of those things are not the
+      # guest's to swallow.
+      it "does not let a guest catch a deadline that lapsed in the conversion" do
+        vm = Quickjs::VM.new(timeout_msec: 300)
+        vm.define_function(:take) { |x| 'took' }
+
+        _ {
+          vm.eval_code(<<~JS)
+            const slow = { get a() { const s = Date.now(); while (Date.now() - s < 1000) {} return 1 } };
+            let out = 'none';
+            try { take(slow) } catch (e) { out = 'caught: ' + e.message }
+            out
+          JS
+        }.must_raise Quickjs::InterruptedError
+      ensure
+        vm&.dispose!
+      end
+
+      it "does not let a guest catch an out-of-memory from the conversion" do
+        vm = Quickjs::VM.new(memory_limit: 4 * 1024 * 1024)
+        vm.define_function(:take) { |x| 'took' }
+
+        error = _ {
+          vm.eval_code(<<~JS)
+            let out = 'none';
+            try { take({ get x() { return new Array(2_000_000).fill(0) } }) } catch (e) { out = 'caught: ' + e.message }
+            out
+          JS
+        }.must_raise Quickjs::RuntimeError
+
+        # Said in its own words, not as an interruption.
+        _(error.message).must_equal 'out of memory'
+        _(vm.memory_poisoned?).must_equal true
+      ensure
+        vm&.dispose!
+      end
+
+      # An async bridged function rejects rather than throwing at the call,
+      # which is the shape its caller was written against and how every other
+      # failure of the same function already arrives.
+      it "rejects an async bridged function rather than throwing at the call" do
+        vm = Quickjs::VM.new
+        vm.define_function(:take, :async) { |x| "took #{x.class}" }
+
+        rejected = vm.eval_code("let o = 'none'; try { await take(Promise.resolve(1)) } catch (e) { o = 'rejected: ' + e.message } o")
+        _(rejected).must_include 'Promise'
+
+        _(vm.eval_code('await take({ a: 1 })')).must_equal 'took Hash'
+        _ { vm.eval_code('await take(Promise.resolve(1))') }.must_raise Quickjs::RuntimeError
+      ensure
+        vm&.dispose!
+      end
+    end
+
     before do
       @vm = Quickjs::VM.new
     end
