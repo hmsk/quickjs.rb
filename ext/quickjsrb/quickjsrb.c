@@ -1689,6 +1689,25 @@ static VALUE r_try_call_proc(VALUE r_try_args)
   );
 }
 
+// The argument conversion, run under rb_protect by the bridge below. The
+// values are borrowed: QuickJS owns argv for the length of the call, and
+// to_rb_value does not consume what it is given.
+struct call_args_conv
+{
+  JSContext *ctx;
+  int argc;
+  JSValueConst *argv;
+  VALUE r_argv;
+};
+
+static VALUE r_convert_call_args(VALUE r_work)
+{
+  struct call_args_conv *work = (struct call_args_conv *)r_work;
+  for (int i = 0; i < work->argc; i++)
+    rb_ary_push(work->r_argv, to_rb_value(work->ctx, work->argv[i]));
+  return Qnil;
+}
+
 static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int argc, JSValueConst *argv, int _magic, JSValue *func_data)
 {
   // func_data[0] holds the Ruby Symbol ID for the defined function (stored by
@@ -1711,12 +1730,98 @@ static JSValue js_quickjsrb_call_global(JSContext *ctx, JSValueConst _this, int 
   VALUE r_call_args = rb_ary_new();
   rb_ary_push(r_call_args, r_proc);
 
+  // Protected, like the call below it. Converting an argument runs guest code
+  // and can raise, and this is inside a JSCFunction: an unprotected raise
+  // unwinds through QuickJS, taking the values this frame holds with it, and
+  // the guest cannot catch what every other error from this bridge is
+  // catchable. Measured before this, a revoked proxy argument cost 7 QuickJS
+  // objects and about 1.5KB per call, at a rate the guest picks.
   VALUE r_argv = rb_ary_new();
-  for (int i = 0; i < argc; i++)
+  struct call_args_conv conv_work = {ctx, argc, argv, r_argv};
+  int conv_failed;
+  rb_protect(r_convert_call_args, (VALUE)&conv_work, &conv_failed);
+  if (conv_failed)
   {
-    JSValue j_v = JS_DupValue(ctx, argv[i]);
-    rb_ary_push(r_argv, to_rb_value(ctx, j_v));
-    JS_FreeValue(ctx, j_v);
+    VALUE r_conv_error = rb_errinfo();
+    rb_set_errinfo(Qnil);
+
+    // Two things outrank whatever else the conversion raised, and neither is
+    // the guest's to catch. rb_protect catches everything, so without this the
+    // deadline came back as an ordinary Error and a script that swallowed it
+    // returned a value for a run that had already overrun; and an
+    // out-of-memory came back the same way, on a heap whose own latch says
+    // further evaluation may segfault, leaving the guest free to keep
+    // allocating until the next Ruby entry point refuses. The same two calls
+    // js_poll_interrupts makes, which is what the log bridge does with its own
+    // protect for the same reason.
+    if (eval_budget_lapsed_now(ctx))
+    {
+      JS_ThrowInternalError(ctx, "interrupted");
+      JS_SetUncatchableException(ctx, TRUE);
+      return JS_EXCEPTION;
+    }
+    if (data->oom_poisoned)
+    {
+      // Uncatchable for the same reason, and said in its own words: reporting
+      // this as an interruption would tell the caller the run ran out of time
+      // when it ran out of memory, and the top-level renderer classifies by
+      // the message.
+      JS_ThrowInternalError(ctx, "out of memory");
+      JS_SetUncatchableException(ctx, TRUE);
+      return JS_EXCEPTION;
+    }
+
+    // Only an Exception can be bridged: rb_protect reports every non-local
+    // exit, and a Ruby throw leaves data in errinfo that j_error_from_ruby_error
+    // would immediately send #message to. The promise rejection tracker guards
+    // the same way.
+    if (!rb_obj_is_kind_of(r_conv_error, rb_eException))
+      return JS_ThrowInternalError(ctx, "quickjs: converting an argument was interrupted by a non-local exit");
+
+    // The capability is taken before the error is built, not after: building
+    // the error publishes a handle into alive_objects, and a capability that
+    // then failed to allocate would leave that entry with nothing able to read
+    // it back out, pinning the Ruby exception for the life of the VM. The
+    // async path below this function is ordered the same way for the same
+    // reason.
+    bool is_async = JS_ToBool(ctx, func_data[1]);
+    JSValue resolving_funcs[2];
+    JSValue promise = JS_UNDEFINED;
+    if (is_async)
+    {
+      promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+      if (JS_IsException(promise))
+        return JS_EXCEPTION;
+    }
+
+    // Handed back the way the call's own failures are: as a JS error carrying
+    // the host exception, so a guest that wrapped this in try/catch sees it
+    // and the host still gets it back if the throw travels out. An async
+    // function rejects with it rather than throwing at the call, since that is
+    // the shape its caller was written against.
+    JSValue j_conv_error = j_error_from_ruby_error(ctx, r_conv_error);
+    if (JS_IsException(j_conv_error))
+    {
+      if (is_async)
+      {
+        JS_FreeValue(ctx, promise);
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+      }
+      return JS_EXCEPTION;
+    }
+
+    if (is_async)
+    {
+      JSValue j_settled = JS_Call(ctx, resolving_funcs[1], JS_UNDEFINED, 1, (JSValueConst *)&j_conv_error);
+      JS_FreeValue(ctx, j_conv_error);
+      JS_FreeValue(ctx, j_settled);
+      JS_FreeValue(ctx, resolving_funcs[0]);
+      JS_FreeValue(ctx, resolving_funcs[1]);
+      return promise;
+    }
+
+    return JS_Throw(ctx, j_conv_error);
   }
   rb_ary_push(r_call_args, r_argv);
   rb_ary_push(r_call_args, ULONG2NUM(data->eval_time->limit_ms));
