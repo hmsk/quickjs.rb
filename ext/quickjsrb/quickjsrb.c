@@ -34,6 +34,7 @@ static void rebase_stack_limit(VMData *data);
 
 JSValue to_js_value(JSContext *ctx, VALUE r_value);
 VALUE to_rb_value(JSContext *ctx, JSValue j_val);
+VALUE to_rb_value_substituting(JSContext *ctx, JSValue j_val);
 typedef struct ConvState ConvState;
 static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv);
 static VALUE raise_js_exception(JSContext *ctx);
@@ -603,6 +604,11 @@ struct ConvState
   long frame_count;
   long frame_capacity;
   ConvFrame frames_inline[CONV_FRAMES_INLINE];
+  // Set when the caller cannot be handed an exception: a console.log row is
+  // built inside a JSCFunction, so raising from there would unwind through
+  // QuickJS, and it would cost the guest the rest of the statement and the
+  // convertible arguments beside the offending one.
+  int substitute_unresolvable;
 };
 
 // Frames move when the stack grows, so a walk holds its depth and re-derives
@@ -691,6 +697,10 @@ static void conv_frame_pop(ConvState *conv)
     frame->ptab = NULL;
   }
 }
+
+// What a value that cannot be rendered is shown as, wherever one is shown
+// rather than reported.
+#define QUICKJSRB_UNRENDERABLE "(unrenderable value)"
 
 static VALUE js_array_to_rb(JSContext *ctx, JSValue j_val, ConvState *conv)
 {
@@ -974,7 +984,6 @@ static VALUE js_hold_release(VALUE r_hold)
 
 // Stands in wherever a value refused to convert to a string, so the diagnostic
 // says so rather than printing "(null)" or dereferencing it.
-#define QUICKJSRB_UNRENDERABLE "(unrenderable value)"
 
 // A budget that lapsed inside one of the reads outranks whatever the script was
 // in the middle of saying. Rendering happens after the evaluation is over, so
@@ -1176,6 +1185,24 @@ VALUE to_rb_value(JSContext *ctx, JSValue j_val)
   conv.frames = conv.frames_inline;
   conv.frame_count = 0;
   conv.frame_capacity = CONV_FRAMES_INLINE;
+  conv.substitute_unresolvable = 0;
+  return rb_ensure(conv_run, (VALUE)&conv, conv_release, (VALUE)&conv);
+}
+
+// The same conversion, for a caller that has to answer with a value: a proxy
+// it cannot resolve becomes the placeholder rather than an exception, at
+// whatever depth it is found.
+VALUE to_rb_value_substituting(JSContext *ctx, JSValue j_val)
+{
+  if (JS_VALUE_GET_NORM_TAG(j_val) != JS_TAG_OBJECT)
+    return to_rb_value_inner(ctx, j_val, NULL);
+
+  ConvState conv = {ctx, j_val, rb_hash_new(), NULL, 0, CONV_PINNED_INLINE};
+  conv.pinned = conv.pinned_inline;
+  conv.frames = conv.frames_inline;
+  conv.frame_count = 0;
+  conv.frame_capacity = CONV_FRAMES_INLINE;
+  conv.substitute_unresolvable = 1;
   return rb_ensure(conv_run, (VALUE)&conv, conv_release, (VALUE)&conv);
 }
 
@@ -1221,6 +1248,37 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
       VALUE r_error_message = rb_str_new2("cannot translate a Promise to Ruby. await within JavaScript's end");
       rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_ROOT_RUNTIME_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
       return Qnil;
+    }
+
+    // Asked before anything reads the value, and before the function branch
+    // claims it. JS_IsArray answers 1 for an array, 0 for anything else, and
+    // -1 when it cannot resolve a proxy. A revoked one is the reachable way
+    // there, whatever its target was; a chain of live proxies more than 1000
+    // deep is the other, and reports the stack overflow it left pending. Both
+    // are values this conversion cannot see through, and the guest is told the
+    // same thing by Array.isArray on either. Read as a boolean further down, that -1 took
+    // the array path and a value the guest is forbidden to touch came back as
+    // an ordinary empty Array, indistinguishable from a real one.
+    //
+    // Here rather than at the array dispatch because JS_IsFunction stays true
+    // for a revoked proxy over a callable target: leaving it to that branch
+    // reported the same thing through a toString it also refuses, which is a
+    // second way to the same answer and, in substituting mode, a way past the
+    // substitution.
+    int is_array = JS_IsArray(ctx, j_val);
+    if (is_array < 0)
+    {
+      if (conv != NULL && conv->substitute_unresolvable)
+      {
+        // Taken rather than left pending: nothing downstream will report it,
+        // and an unrelated evaluation would otherwise be handed it.
+        quickjsrb_drain_pending(ctx);
+        return rb_str_new2(QUICKJSRB_UNRENDERABLE);
+      }
+      // The throw it left is what the guest would be told, so that is what the
+      // caller is told, rendered and taken off the context. Answering nil
+      // instead would collide with the value a cycle already converts to.
+      return raise_js_exception(ctx);
     }
 
     if (JS_IsFunction(ctx, j_val))
@@ -1314,7 +1372,26 @@ static VALUE to_rb_value_inner(JSContext *ctx, JSValue j_val, ConvState *conv)
 
     VALUE r_result;
     int memoize = 1;
-    if (JS_IsArray(ctx, j_val))
+    // Asked again. The answer taken at the top of this case is stale by now:
+    // the handle read and the File check both run guest traps, and a proxy
+    // that revokes itself from one of them was resolvable when we asked and is
+    // not any more. Reading the old answer here put that value back on the
+    // array path, which is the fabrication this is all about.
+    is_array = JS_IsArray(ctx, j_val);
+    if (is_array < 0)
+    {
+      if (conv->substitute_unresolvable)
+      {
+        quickjsrb_drain_pending(ctx);
+        // The in-progress mark goes with it: this value never entered the walk
+        // it was marked into, and leaving the mark would make a second
+        // occurrence answer the cycle check and convert to nil.
+        rb_hash_delete(conv->r_seen, r_key);
+        return rb_str_new2(QUICKJSRB_UNRENDERABLE);
+      }
+      return raise_js_exception(ctx);
+    }
+    if (is_array > 0)
     {
       r_result = js_array_to_rb(ctx, j_val, conv);
     }
@@ -2020,7 +2097,7 @@ static VALUE r_build_log_row(VALUE r_build)
     }
     else
     {
-      r_raw = to_rb_value(ctx, j_logged);
+      r_raw = to_rb_value_substituting(ctx, j_logged);
     }
     VALUE r_c = rb_str_new2(js_hold_cstring(hold, j_logged, QUICKJSRB_UNRENDERABLE));
 
