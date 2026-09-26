@@ -3414,6 +3414,40 @@ end
       JS
     end
 
+    it "still reports when the eval raises a JS error, with $! cleared for the handler" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << [err.message, $!] }
+      _ { @vm.eval_code("void Promise.reject(new Error('a')); throw new Error('b')") }.must_raise Quickjs::RuntimeError
+      _(captured).must_equal [["a", nil]]
+    end
+
+    it "still reports when a define_function block raises out of the eval" do
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err.message }
+      @vm.define_function("boom") { raise ArgumentError, "host" }
+      _ { @vm.eval_code("void Promise.reject(new Error('a')); boom()") }.must_raise ArgumentError
+      _(captured).must_equal ["a"]
+    end
+
+    it "reports when an async interrupt unwinds the eval" do
+      vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT])
+      captured = []
+      vm.on_unhandled_rejection { |err| captured << err.message }
+      _ {
+        Timeout.timeout(0.1) do
+          vm.eval_code(<<~JS)
+            const e = new Error();
+            Object.defineProperty(e, 'message', { get() { return new Error('built').stack ? 'a' : 'a'; } });
+            void Promise.reject(e);
+            await new Promise(r => setTimeout(r, 60000));
+          JS
+        end
+      }.must_raise Timeout::Error
+      _(captured).must_equal ["a"]
+      vm.dispose!
+      _(captured).must_equal ["a"]
+    end
+
     it "reports a rejection raised while converting the result to Ruby" do
       captured = []
       @vm.on_unhandled_rejection { |err| captured << err.message }

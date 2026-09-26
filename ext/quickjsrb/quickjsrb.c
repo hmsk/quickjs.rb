@@ -1858,10 +1858,17 @@ static void quickjsrb_notify_oldest_rejections(VMData *data, uint32_t n)
 {
   if (NIL_P(data->on_unhandled_rejection) || n == 0)
     return;
+  // $! is neither shown to the handler nor lost to its errors. A throw or a
+  // kill in flight has no exception to put back, so its rejections wait.
+  VALUE r_errinfo = rb_errinfo();
+  if (!NIL_P(r_errinfo) && !rb_obj_is_kind_of(r_errinfo, rb_eException))
+    return;
+  rb_set_errinfo(Qnil);
   RejectionList batch;
   rejection_list_split_oldest(data->context, &data->pending_rejections, n, &batch);
   notify_rejection_batch(data, &batch);
   rejection_list_free(data->context, &batch);
+  rb_set_errinfo(r_errinfo);
 }
 
 // Reports every pending rejection, then once more for what the handler
