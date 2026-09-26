@@ -3192,15 +3192,28 @@ end
 
     it "reports on drain_jobs! a rejection pending with no job queued" do
       captured = []
+      # Each report rejects the next, one level past what the checkpoint's
+      # second round reports.
       @vm.on_unhandled_rejection do |err|
         captured << err.message
-        @vm.eval_code("void Promise.reject(new Error('from handler')); 0") if err.message == "outer"
+        following = { "outer" => "second", "second" => "third" }[err.message]
+        @vm.eval_code("void Promise.reject(new Error('#{following}')); 0") if following
       end
       @vm.eval_code("void Promise.reject(new Error('outer')); 0")
 
-      _(captured).must_equal ["outer"]
+      _(captured).must_equal ["outer", "second"]
       @vm.drain_jobs!
-      _(captured).must_equal ["outer", "from handler"]
+      _(captured).must_equal ["outer", "second", "third"]
+    end
+
+    it "reports in the same checkpoint what the handler itself rejects" do
+      captured = []
+      @vm.on_unhandled_rejection do |err|
+        captured << err.message
+        @vm.eval_code("void Promise.reject(new Error('from handler')); 0") if err.message == "x"
+      end
+      @vm.eval_code("void Promise.reject(new Error('x')); 0")
+      _(captured).must_equal ["x", "from handler"]
     end
 
     it "reads a reason when it is rejected, in the order rejections are made" do
@@ -3320,6 +3333,30 @@ end
         vm&.dispose!
       end
       _(growth.call(true) - growth.call(false)).must_be :<, 100_000
+    end
+
+    it "reports a rejection the dispose! notification itself makes" do
+      vm = Quickjs::VM.new
+      captured = []
+      vm.on_unhandled_rejection do |err|
+        captured << err.message
+        vm.eval_code("void Promise.reject(new Error('second')); 0") if err.message == "first"
+      end
+      vm.eval_code("void Promise.reject(new Error('first')); void Promise.resolve().then(() => {}); 0")
+      vm.dispose!
+      _(captured).must_equal ["first", "second"]
+    end
+
+    it "finishes dispose! when the handler rejects on every report" do
+      vm = Quickjs::VM.new
+      captured = []
+      vm.on_unhandled_rejection do |err|
+        captured << err.message
+        vm.eval_code("void Promise.reject(new Error('again')); 0")
+      end
+      vm.eval_code("void Promise.reject(new Error('first')); void Promise.resolve().then(() => {}); 0")
+      vm.dispose!
+      _(captured).must_equal ["first", "again"]
     end
 
     it "carries at most max_pending_rejections past an entry that leaves jobs queued" do

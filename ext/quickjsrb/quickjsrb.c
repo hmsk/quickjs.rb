@@ -1864,6 +1864,17 @@ static void quickjsrb_notify_oldest_rejections(VMData *data, uint32_t n)
   rejection_list_free(data->context, &batch);
 }
 
+// Reports every pending rejection, then once more for what the handler
+// rejected meanwhile, and no further. The second round is left to whoever
+// drains the queue if the first one queued jobs that may still run.
+static void quickjsrb_notify_all_rejections(VMData *data, bool jobs_may_run)
+{
+  quickjsrb_notify_oldest_rejections(data, data->pending_rejections.live);
+  if (jobs_may_run && JS_IsJobPending(JS_GetRuntime(data->context)))
+    return;
+  quickjsrb_notify_oldest_rejections(data, data->pending_rejections.live);
+}
+
 // With jobs still queued, whoever drains them ends the checkpoint; until then
 // at most max_pending_rejections are carried over, the oldest reported first.
 static void quickjsrb_end_microtask_checkpoint(VMData *data)
@@ -1872,7 +1883,7 @@ static void quickjsrb_end_microtask_checkpoint(VMData *data)
     return;
   uint32_t live = data->pending_rejections.live;
   if (!JS_IsJobPending(JS_GetRuntime(data->context)))
-    quickjsrb_notify_oldest_rejections(data, live);
+    quickjsrb_notify_all_rejections(data, true);
   else if (live > data->max_pending_rejections)
     quickjsrb_notify_oldest_rejections(data, live - data->max_pending_rejections);
   // Give back what an emptied list still holds, rather than keep its peak.
@@ -4678,8 +4689,7 @@ static void *vm_dispose_no_gvl(void *p)
 
 static VALUE dispose_notify_body(VALUE p)
 {
-  VMData *data = (VMData *)p;
-  quickjsrb_notify_oldest_rejections(data, data->pending_rejections.live);
+  quickjsrb_notify_all_rejections((VMData *)p, false);
   return Qnil;
 }
 
