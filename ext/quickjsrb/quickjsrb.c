@@ -291,7 +291,7 @@ JSValue to_js_value(JSContext *ctx, VALUE r_value)
   }
 }
 
-static VALUE find_ruby_error_at(JSContext *ctx, JSValue j_error);
+static VALUE find_ruby_error_at(JSContext *ctx, JSValue j_error, int64_t *peek_handle);
 
 static bool js_is_proxy(JSContext *ctx, JSValue j_val)
 {
@@ -299,7 +299,9 @@ static bool js_is_proxy(JSContext *ctx, JSValue j_val)
   return JS_IsObject(j_val) && data->proxy_class_id != 0 && JS_GetClassID(j_val) == data->proxy_class_id;
 }
 
-VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
+// With peek_handle, the exception is left in alive_objects and its handle
+// written there, for a caller that may take it later.
+static VALUE find_ruby_error_peeking(JSContext *ctx, JSValue j_error, int64_t *peek_handle)
 {
   // Whether anything was already pending before we read anything. Without it,
   // a throw some earlier unchecked read left set looks exactly like one our own
@@ -324,7 +326,7 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
       JS_SetUncatchableException(ctx, TRUE);
   }
 
-  VALUE r_error = find_ruby_error_at(ctx, j_error);
+  VALUE r_error = find_ruby_error_at(ctx, j_error, peek_handle);
   if (!NIL_P(r_error) || !JS_HasException(ctx))
   {
     JS_FreeValue(ctx, j_was_pending);
@@ -353,7 +355,7 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
   // keeps one wrapped in a Proxy thrown directly, which is the shape that
   // reaches here in practice.
   if (!js_is_proxy(ctx, j_trap_threw))
-    r_error = find_ruby_error_at(ctx, j_trap_threw);
+    r_error = find_ruby_error_at(ctx, j_trap_threw, peek_handle);
   JS_FreeValue(ctx, j_trap_threw);
 
   // Put back what was pending before any of this, which the trap's throw
@@ -369,7 +371,23 @@ VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
   return r_error;
 }
 
-static VALUE find_ruby_error_at(JSContext *ctx, JSValue j_error)
+VALUE find_ruby_error(JSContext *ctx, JSValue j_error)
+{
+  return find_ruby_error_peeking(ctx, j_error, NULL);
+}
+
+// Takes a peeked exception out of alive_objects, unless something took it since.
+static void release_peeked_ruby_error(VMData *data, int64_t handle, VALUE r_error)
+{
+  VALUE r_key = LL2NUM(handle);
+  if (rb_hash_lookup2(data->alive_objects, r_key, Qundef) != r_error)
+    return;
+  VALUE r_error_object_id = rb_obj_id(r_error);
+  rb_hash_delete(data->alive_objects, r_key);
+  rb_hash_delete(data->alive_handles, r_error_object_id);
+}
+
+static VALUE find_ruby_error_at(JSContext *ctx, JSValue j_error, int64_t *peek_handle)
 {
   // Most callers know they hold an Error before they ask, but the one that
   // inspects a failed conversion's throw cannot: `throw null` and `throw 1` are
@@ -432,6 +450,11 @@ static VALUE find_ruby_error_at(JSContext *ctx, JSValue j_error)
       // answer as never having matched.
       if (!rb_obj_is_kind_of(r_error, rb_eException))
         return Qnil;
+      if (peek_handle != NULL)
+      {
+        *peek_handle = errorOriginalRubyObjectId;
+        return r_error;
+      }
       // Both rows, and the reverse one's key taken before either delete:
       // rb_obj_id rather than the object_id method, which a subclass may
       // override and which may allocate, so asking after the first delete
@@ -1549,6 +1572,7 @@ struct js_reason_conversion
 {
   JSContext *ctx;
   JSValueConst j_reason;
+  int64_t *peek_handle;
   JsHold hold;
 };
 
@@ -1561,7 +1585,7 @@ static VALUE js_reason_conversion_run(VALUE r_conversion)
 
   if (JS_IsError(ctx, j_reason))
   {
-    VALUE r_maybe_ruby_error = find_ruby_error(ctx, j_reason);
+    VALUE r_maybe_ruby_error = find_ruby_error_peeking(ctx, j_reason, conversion->peek_handle);
     if (!NIL_P(r_maybe_ruby_error))
       return r_maybe_ruby_error;
 
@@ -1596,11 +1620,12 @@ static VALUE js_reason_conversion_run(VALUE r_conversion)
 // The reason belongs to the tracker, which is a QuickJS host callback, so this
 // never raises out: the caller runs it under rb_protect and the hold gives the
 // references back on the way past.
-static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason)
+static VALUE r_exception_from_js_reason(JSContext *ctx, JSValueConst j_reason, int64_t *peek_handle)
 {
   struct js_reason_conversion conversion;
   conversion.ctx = ctx;
   conversion.j_reason = j_reason;
+  conversion.peek_handle = peek_handle;
   js_hold_init(&conversion.hold, ctx);
   VALUE r_exc = rb_ensure(js_reason_conversion_run, (VALUE)&conversion, js_hold_release, (VALUE)&conversion.hold);
   // The flag outlives the release, which is why it is sticky: a budget that
@@ -1613,12 +1638,13 @@ struct rejection_reason_args
 {
   JSContext *ctx;
   JSValueConst j_reason;
+  int64_t *peek_handle;
 };
 
 static VALUE r_rejection_reason(VALUE r_args_val)
 {
   struct rejection_reason_args *args = (struct rejection_reason_args *)r_args_val;
-  return r_exception_from_js_reason(args->ctx, args->j_reason);
+  return r_exception_from_js_reason(args->ctx, args->j_reason, args->peek_handle);
 }
 
 struct rejection_call_args
@@ -1642,7 +1668,7 @@ static uint32_t rejection_list_hash(JSValueConst promise, uint32_t mask)
 static void rejection_list_index_insert(RejectionList *list, uint32_t i)
 {
   uint32_t mask = list->cap * 2 - 1;
-  uint32_t h = rejection_list_hash(list->items[i], mask);
+  uint32_t h = rejection_list_hash(list->items[i].promise, mask);
   while (list->index[h] != 0)
     h = (h + 1) & mask;
   list->index[h] = i + 1;
@@ -1651,7 +1677,7 @@ static void rejection_list_index_insert(RejectionList *list, uint32_t i)
 // Compacts the live items into new storage and reindexes them.
 static bool rejection_list_rebuild(JSContext *ctx, RejectionList *list, uint32_t cap)
 {
-  JSValue *items = js_malloc(ctx, sizeof(JSValue) * cap);
+  RejectionEntry *items = js_malloc(ctx, sizeof(RejectionEntry) * cap);
   uint32_t *index = js_mallocz(ctx, sizeof(uint32_t) * cap * 2);
   if (items == NULL || index == NULL)
   {
@@ -1662,7 +1688,7 @@ static bool rejection_list_rebuild(JSContext *ctx, RejectionList *list, uint32_t
   }
   uint32_t n = 0;
   for (uint32_t i = 0; i < list->count; i++)
-    if (!JS_IsUndefined(list->items[i]))
+    if (!JS_IsUndefined(list->items[i].promise))
       items[n++] = list->items[i];
   js_free(ctx, list->items);
   js_free(ctx, list->index);
@@ -1675,7 +1701,8 @@ static bool rejection_list_rebuild(JSContext *ctx, RejectionList *list, uint32_t
   return true;
 }
 
-static void rejection_list_add(JSContext *ctx, RejectionList *list, JSValueConst promise)
+static void rejection_list_add(JSContext *ctx, RejectionList *list, JSValueConst promise, VALUE reason,
+                               int64_t error_handle)
 {
   if (list->count == list->cap)
   {
@@ -1684,30 +1711,37 @@ static void rejection_list_add(JSContext *ctx, RejectionList *list, JSValueConst
       return;
   }
   uint32_t i = list->count++;
-  list->items[i] = JS_DupValue(ctx, promise);
+  list->items[i] = (RejectionEntry){JS_DupValue(ctx, promise), reason, error_handle};
   list->live++;
   rejection_list_index_insert(list, i);
 }
 
-static bool rejection_list_remove(JSContext *ctx, RejectionList *list, JSValueConst promise)
+// The index slot holding promise, or -1.
+static int64_t rejection_list_slot(const RejectionList *list, JSValueConst promise)
 {
   if (list == NULL || list->cap == 0)
-    return false;
+    return -1;
   uint32_t mask = list->cap * 2 - 1;
   for (uint32_t h = rejection_list_hash(promise, mask); list->index[h] != 0; h = (h + 1) & mask)
   {
-    if (list->index[h] == UINT32_MAX)
-      continue;
-    uint32_t i = list->index[h] - 1;
-    if (JS_VALUE_GET_PTR(list->items[i]) != JS_VALUE_GET_PTR(promise))
-      continue;
-    JS_FreeValue(ctx, list->items[i]);
-    list->items[i] = JS_UNDEFINED;
-    list->index[h] = UINT32_MAX;
-    list->live--;
-    return true;
+    if (list->index[h] != UINT32_MAX &&
+        JS_VALUE_GET_PTR(list->items[list->index[h] - 1].promise) == JS_VALUE_GET_PTR(promise))
+      return h;
   }
-  return false;
+  return -1;
+}
+
+static bool rejection_list_remove(JSContext *ctx, RejectionList *list, JSValueConst promise)
+{
+  int64_t h = rejection_list_slot(list, promise);
+  if (h < 0)
+    return false;
+  uint32_t i = list->index[h] - 1;
+  JS_FreeValue(ctx, list->items[i].promise);
+  list->items[i] = (RejectionEntry){JS_UNDEFINED, Qnil, 0};
+  list->index[h] = UINT32_MAX;
+  list->live--;
+  return true;
 }
 
 // Also looks in the batch being notified, so a promise handled by then is skipped.
@@ -1719,8 +1753,9 @@ static void pending_rejections_remove(VMData *data, JSValueConst promise)
     rejection_list_remove(data->context, data->notifying_rejections, promise);
 }
 
-// A handler may still be attached later in the same checkpoint, so only
-// record here; the verdict is made at the checkpoint's end.
+// The reason is read here, inside the JS that rejected and on its clock, as
+// it always was; only the delivery waits, since a handler may still be
+// attached later in the same checkpoint.
 static void quickjsrb_promise_rejection_tracker(
     JSContext *ctx, JSValueConst promise, JSValueConst reason,
     JS_BOOL is_handled, void *opaque)
@@ -1730,9 +1765,39 @@ static void quickjsrb_promise_rejection_tracker(
     return;
 
   if (is_handled)
+  {
     pending_rejections_remove(data, promise);
-  else
-    rejection_list_add(ctx, &data->pending_rejections, promise);
+    return;
+  }
+
+  // Recorded before the reason is read, so a rejection the read makes comes
+  // after it, and a handler the read attaches removes it.
+  rejection_list_add(ctx, &data->pending_rejections, promise, Qnil, 0);
+
+  // A bridge error raised while reading the reason becomes the reason.
+  int64_t error_handle = 0;
+  struct rejection_reason_args reason_args = {ctx, reason, &error_handle};
+  int state;
+  VALUE r_reason = rb_protect(r_rejection_reason, (VALUE)&reason_args, &state);
+  if (state)
+  {
+    VALUE r_raised = rb_errinfo();
+    rb_set_errinfo(Qnil);
+    // A Ruby `throw` leaves no exception to report.
+    r_reason = rb_obj_is_kind_of(r_raised, rb_eException) ? r_raised : Qnil;
+    error_handle = 0;
+  }
+  int64_t h = rejection_list_slot(&data->pending_rejections, promise);
+  if (h < 0)
+    return;
+  if (NIL_P(r_reason))
+  {
+    rejection_list_remove(ctx, &data->pending_rejections, promise);
+    return;
+  }
+  RejectionEntry *entry = &data->pending_rejections.items[data->pending_rejections.index[h] - 1];
+  entry->reason = r_reason;
+  entry->error_handle = error_handle;
 }
 
 // A promise the host awaits is handled by the host: its rejection is raised.
@@ -1757,27 +1822,14 @@ static void quickjsrb_notify_unhandled_rejections(VMData *data)
 
   for (uint32_t i = 0; i < batch.count; i++)
   {
-    if (JS_IsUndefined(batch.items[i]))
+    RejectionEntry entry = batch.items[i];
+    if (JS_IsUndefined(entry.promise))
       continue;
-    JSValue v = JS_DupValue(data->context, batch.items[i]);
+    if (entry.error_handle != 0)
+      release_peeked_ruby_error(data, entry.error_handle, entry.reason);
 
-    JSValue j_reason = JS_PromiseResult(data->context, v);
-    // A bridge error raised while reading the reason becomes the reason.
-    struct rejection_reason_args reason_args = {data->context, j_reason};
+    struct rejection_call_args call_args = {data->on_unhandled_rejection, entry.reason};
     int state;
-    VALUE r_reason = rb_protect(r_rejection_reason, (VALUE)&reason_args, &state);
-    JS_FreeValue(data->context, j_reason);
-    JS_FreeValue(data->context, v);
-    if (state)
-    {
-      VALUE r_raised = rb_errinfo();
-      rb_set_errinfo(Qnil);
-      if (!rb_obj_is_kind_of(r_raised, rb_eException))
-        continue; // a Ruby `throw`, not an exception
-      r_reason = r_raised;
-    }
-
-    struct rejection_call_args call_args = {data->on_unhandled_rejection, r_reason};
     rb_protect(r_rejection_call, (VALUE)&call_args, &state);
     if (state)
       rb_set_errinfo(Qnil);

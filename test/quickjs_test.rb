@@ -3192,6 +3192,19 @@ end
 
     it "reports on drain_jobs! a rejection pending with no job queued" do
       captured = []
+      @vm.on_unhandled_rejection do |err|
+        captured << err.message
+        @vm.eval_code("void Promise.reject(new Error('from handler')); 0") if err.message == "outer"
+      end
+      @vm.eval_code("void Promise.reject(new Error('outer')); 0")
+
+      _(captured).must_equal ["outer"]
+      @vm.drain_jobs!
+      _(captured).must_equal ["outer", "from handler"]
+    end
+
+    it "reads a reason when it is rejected, in the order rejections are made" do
+      captured = []
       @vm.on_unhandled_rejection { |err| captured << err.message }
       @vm.eval_code(<<~JS)
         const e = new Error('outer');
@@ -3201,9 +3214,25 @@ end
         void Promise.reject(e);
       JS
 
-      _(captured).must_equal ["outer"]
-      @vm.drain_jobs!
       _(captured).must_equal ["outer", "inner"]
+    end
+
+    it "still raises a bridged error as itself when the host awaits the rejection" do
+      marker = Class.new(StandardError)
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err }
+      @vm.define_function("boom") { raise marker, "host" }
+      _ { @vm.eval_code("await boom()") }.must_raise marker
+      _(captured).must_be_empty
+    end
+
+    it "hands the handler a bridged error as itself" do
+      marker = Class.new(StandardError)
+      captured = []
+      @vm.on_unhandled_rejection { |err| captured << err }
+      @vm.define_function("boom") { raise marker, "host" }
+      @vm.eval_code("void (async () => boom())(); 0")
+      _(captured.map(&:class)).must_equal [marker]
     end
 
     it "does not report when a later microtask attaches the handler" do
@@ -3346,20 +3375,6 @@ end
         @vm.eval_code("void second.catch(() => {}); 0", async: false) if err.message == "first"
       end
       @vm.eval_code("void Promise.reject(new Error('first')); var second = Promise.reject(new Error('second')); 0", async: false)
-      @vm.drain_jobs!
-
-      _(captured).must_equal ["first"]
-    end
-
-    it "skips a promise caught while an earlier reason is being read" do
-      captured = []
-      @vm.on_unhandled_rejection { |err| captured << err.message }
-      @vm.eval_code(<<~JS, async: false)
-        const first = new Error('first');
-        Object.defineProperty(first, 'message', { get() { void second.catch(() => {}); return 'first'; } });
-        void Promise.reject(first);
-        var second = Promise.reject(new Error('second'));
-      JS
       @vm.drain_jobs!
 
       _(captured).must_equal ["first"]

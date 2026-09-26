@@ -56,12 +56,22 @@ static int64_t eval_elapsed_ms(const EvalTime *eval_time)
        + (now.tv_nsec - eval_time->started_at.tv_nsec) / 1000000;
 }
 
-// Promises in insertion order, JS_UNDEFINED once removed, with a pointer-keyed
-// open-addressing index (2 * cap slots: 0 empty, UINT32_MAX removed, else
-// item + 1) so removal stays O(1). Zeroed when empty.
+// A rejected promise and its reason, converted when it was rejected.
+// error_handle names the bridged exception the reason was, if any: peeked
+// rather than taken, so it is taken only if this is reported.
+typedef struct RejectionEntry
+{
+  JSValue promise;
+  VALUE reason;
+  int64_t error_handle;
+} RejectionEntry;
+
+// Entries in insertion order, promise JS_UNDEFINED once removed, with a
+// pointer-keyed open-addressing index (2 * cap slots: 0 empty, UINT32_MAX
+// removed, else item + 1) so removal stays O(1). Zeroed when empty.
 typedef struct RejectionList
 {
-  JSValue *items;
+  RejectionEntry *items;
   uint32_t *index;
   uint32_t count;
   uint32_t cap;
@@ -71,10 +81,20 @@ typedef struct RejectionList
 static void rejection_list_free(JSContext *ctx, RejectionList *list)
 {
   for (uint32_t i = 0; i < list->count; i++)
-    JS_FreeValue(ctx, list->items[i]);
+    JS_FreeValue(ctx, list->items[i].promise);
   js_free(ctx, list->items);
   js_free(ctx, list->index);
   memset(list, 0, sizeof(*list));
+}
+
+// Pinned: the list lives in js_malloc'd memory the GC cannot update.
+static void rejection_list_mark(const RejectionList *list)
+{
+  if (list == NULL)
+    return;
+  for (uint32_t i = 0; i < list->count; i++)
+    if (!JS_IsUndefined(list->items[i].promise))
+      rb_gc_mark(list->items[i].reason);
 }
 
 typedef struct VMData
@@ -271,6 +291,8 @@ static void vm_mark(void *ptr)
   // rb_thread_current(), and it is only ever set for the duration of a JS
   // entry, so there is nothing to gain from letting it move.
   rb_gc_mark(data->owner_thread);
+  rejection_list_mark(&data->pending_rejections);
+  rejection_list_mark(data->notifying_rejections);
 }
 
 static void vm_compact(void *ptr)
