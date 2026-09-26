@@ -4642,6 +4642,12 @@ static void *vm_dispose_no_gvl(void *p)
   return NULL;
 }
 
+static VALUE dispose_notify_body(VALUE p)
+{
+  quickjsrb_notify_unhandled_rejections((VMData *)p);
+  return Qnil;
+}
+
 static VALUE vm_m_dispose(VALUE r_self)
 {
   VMData *data;
@@ -4659,6 +4665,12 @@ static VALUE vm_m_dispose(VALUE r_self)
   if (data->evals_in_flight > 0)
     rb_raise(rb_eThreadError, "cannot dispose a Quickjs::VM while it is evaluating");
 
+  // Jobs still queued will never run, so what is pending is unhandled. Counted
+  // as an entry, so the handler cannot dispose! under it.
+  if (data->pending_rejections.live > 0 && !data->oom_poisoned)
+    run_held_js_entry(data, dispose_notify_body, (VALUE)data);
+  rejection_list_free(data->context, &data->pending_rejections);
+
   if (!JS_IsUndefined(data->j_file_proxy_creator))
   {
     JS_FreeValue(data->context, data->j_file_proxy_creator);
@@ -4669,8 +4681,6 @@ static VALUE vm_m_dispose(VALUE r_self)
     JS_FreeValue(data->context, data->j_blob_ctor);
     data->j_blob_ctor = JS_UNDEFINED;
   }
-
-  rejection_list_free(data->context, &data->pending_rejections);
 
   // Mark disposed before releasing the GVL so a concurrent dfree finds
   // disposed=true and skips its own teardown.

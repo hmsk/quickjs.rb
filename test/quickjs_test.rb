@@ -3270,13 +3270,39 @@ end
       _(captured).must_equal ["via-call"]
     end
 
-    it "disposes cleanly with rejections still pending" do
+    it "reports rejections still pending at dispose!" do
       vm = Quickjs::VM.new
       captured = []
-      vm.on_unhandled_rejection { |err| captured << err }
+      vm.on_unhandled_rejection { |err| captured << err.message }
+      vm.eval_code("void Promise.reject(new Error('x')); void Promise.resolve().then(() => {});")
+      _(captured).must_be_empty
+      vm.dispose!
+      _(captured).must_equal ["x"]
+      _(vm.disposed?).must_equal true
+    end
+
+    it "still bridges a File into JS from the handler notified at dispose!" do
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_FILE])
+      vm.define_function("rbFile") { File.open(__FILE__) }
+      bridged = nil
+      vm.on_unhandled_rejection { |_err| bridged = vm.eval_code("rbFile() instanceof File") }
+      vm.eval_code("void Promise.reject(new Error('x')); void Promise.resolve().then(() => {}); 0")
+      vm.dispose!
+      _(bridged).must_equal true
+    end
+
+    it "refuses dispose! from the handler notified at dispose!" do
+      vm = Quickjs::VM.new
+      raised = []
+      vm.on_unhandled_rejection do |_err|
+        vm.dispose!
+      rescue ThreadError => e
+        raised << e
+      end
       vm.eval_code("void Promise.reject(new Error('x')); void Promise.resolve().then(() => {});")
       vm.dispose!
-      _(captured).must_be_empty
+      _(raised.size).must_equal 1
+      _(vm.disposed?).must_equal true
     end
 
     it "gives the list's storage back once a checkpoint empties it" do
