@@ -1744,6 +1744,29 @@ static bool rejection_list_remove(JSContext *ctx, RejectionList *list, JSValueCo
   return true;
 }
 
+// Moves the oldest n live entries into out; the rest stay, in order.
+static void rejection_list_split_oldest(JSContext *ctx, RejectionList *list, uint32_t n, RejectionList *out)
+{
+  if (n >= list->live)
+  {
+    *out = *list;
+    memset(list, 0, sizeof(*list));
+    return;
+  }
+  memset(out, 0, sizeof(*out));
+  for (uint32_t i = 0; i < list->count && out->live < n; i++)
+  {
+    RejectionEntry entry = list->items[i];
+    if (JS_IsUndefined(entry.promise))
+      continue;
+    uint32_t before = out->live;
+    rejection_list_add(ctx, out, entry.promise, entry.reason, entry.error_handle);
+    if (out->live == before)
+      break; // out of memory: the rest stays pending
+    rejection_list_remove(ctx, list, entry.promise);
+  }
+}
+
 // Also looks in the batch being notified, so a promise handled by then is skipped.
 static void pending_rejections_remove(VMData *data, JSValueConst promise)
 {
@@ -1810,19 +1833,12 @@ static JSValue quickjsrb_host_await(JSContext *ctx, JSValue promise)
   return ret;
 }
 
-static void quickjsrb_notify_unhandled_rejections(VMData *data)
+static void notify_rejection_batch(VMData *data, RejectionList *batch)
 {
-  if (NIL_P(data->on_unhandled_rejection) || data->pending_rejections.live == 0)
-    return;
-
-  // Rejections made while notifying go into a fresh list.
-  RejectionList batch = data->pending_rejections;
-  memset(&data->pending_rejections, 0, sizeof(data->pending_rejections));
-  data->notifying_rejections = &batch;
-
-  for (uint32_t i = 0; i < batch.count; i++)
+  data->notifying_rejections = batch;
+  for (uint32_t i = 0; i < batch->count; i++)
   {
-    RejectionEntry entry = batch.items[i];
+    RejectionEntry entry = batch->items[i];
     if (JS_IsUndefined(entry.promise))
       continue;
     if (entry.error_handle != 0)
@@ -1835,16 +1851,30 @@ static void quickjsrb_notify_unhandled_rejections(VMData *data)
       rb_set_errinfo(Qnil);
   }
   data->notifying_rejections = NULL;
+}
+
+// The rest stay pending, ahead of any made while notifying.
+static void quickjsrb_notify_oldest_rejections(VMData *data, uint32_t n)
+{
+  if (NIL_P(data->on_unhandled_rejection) || n == 0)
+    return;
+  RejectionList batch;
+  rejection_list_split_oldest(data->context, &data->pending_rejections, n, &batch);
+  notify_rejection_batch(data, &batch);
   rejection_list_free(data->context, &batch);
 }
 
-// With jobs still queued, whoever drains them ends the checkpoint.
+// With jobs still queued, whoever drains them ends the checkpoint; until then
+// at most max_pending_rejections are carried over, the oldest reported first.
 static void quickjsrb_end_microtask_checkpoint(VMData *data)
 {
   if (data->oom_poisoned)
     return;
+  uint32_t live = data->pending_rejections.live;
   if (!JS_IsJobPending(JS_GetRuntime(data->context)))
-    quickjsrb_notify_unhandled_rejections(data);
+    quickjsrb_notify_oldest_rejections(data, live);
+  else if (live > data->max_pending_rejections)
+    quickjsrb_notify_oldest_rejections(data, live - data->max_pending_rejections);
   // Give back what an emptied list still holds, rather than keep its peak.
   if (data->pending_rejections.live == 0)
     rejection_list_free(data->context, &data->pending_rejections);
@@ -2419,6 +2449,9 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   VALUE r_timeout_msec = rb_hash_aref(r_opts, ID2SYM(rb_intern("timeout_msec")));
   if (NIL_P(r_timeout_msec))
     r_timeout_msec = UINT2NUM(100);
+  VALUE r_max_pending_rejections = rb_hash_aref(r_opts, ID2SYM(rb_intern("max_pending_rejections")));
+  size_t max_pending_rejections =
+      NIL_P(r_max_pending_rejections) ? 1000 : size_option(r_max_pending_rejections, "max_pending_rejections");
 
   VMData *data;
   TypedData_Get_Struct(r_self, VMData, &vm_type, data);
@@ -2434,6 +2467,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   check_js_entry_owner(data);
 
   data->eval_time->limit_ms = (int64_t)NUM2UINT(r_timeout_msec);
+  data->max_pending_rejections = max_pending_rejections > UINT32_MAX ? UINT32_MAX : (uint32_t)max_pending_rejections;
   JS_SetContextOpaque(data->context, data);
   // Learned here, before the first line of guest code: the constructor is read
   // off the global, and a script that reassigns or deletes Proxy would
@@ -4644,7 +4678,8 @@ static void *vm_dispose_no_gvl(void *p)
 
 static VALUE dispose_notify_body(VALUE p)
 {
-  quickjsrb_notify_unhandled_rejections((VMData *)p);
+  VMData *data = (VMData *)p;
+  quickjsrb_notify_oldest_rejections(data, data->pending_rejections.live);
   return Qnil;
 }
 

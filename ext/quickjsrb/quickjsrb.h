@@ -113,6 +113,8 @@ typedef struct VMData
   RejectionList pending_rejections;
   // The batch being notified; NULL outside notification.
   RejectionList *notifying_rejections;
+  // How many may stay pending past an entry that leaves jobs queued.
+  uint32_t max_pending_rejections;
   // Memoize (specifier, importer) → canonical so the user's loader Proc
   // runs at most once per distinct pair across the VM's lifetime. Without
   // this, QuickJS calls normalize on every import statement — including

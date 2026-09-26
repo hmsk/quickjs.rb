@@ -3322,6 +3322,50 @@ end
       _(growth.call(true) - growth.call(false)).must_be :<, 100_000
     end
 
+    it "carries at most max_pending_rejections past an entry that leaves jobs queued" do
+      vm = Quickjs::VM.new(max_pending_rejections: 2)
+      captured = []
+      vm.on_unhandled_rejection { |err| captured << err.message }
+      vm.eval_code("void Promise.resolve().then(() => {}); for (const m of ['a', 'b', 'c', 'd']) void Promise.reject(new Error(m)); 0")
+      _(captured).must_equal ["a", "b"]
+      vm.eval_code("void Promise.reject(new Error('e')); 0")
+      _(captured).must_equal ["a", "b", "c"]
+      vm.drain_jobs!
+      _(captured).must_equal ["a", "b", "c", "d", "e"]
+    ensure
+      vm&.dispose!
+    end
+
+    it "reports at once with max_pending_rejections: 0" do
+      vm = Quickjs::VM.new(max_pending_rejections: 0)
+      captured = []
+      vm.on_unhandled_rejection { |err| captured << err.message }
+      vm.eval_code("void Promise.reject(new Error('x')); void Promise.resolve().then(() => {}); 0")
+      _(captured).must_equal ["x"]
+    ensure
+      vm&.dispose!
+    end
+
+    it "does not apply max_pending_rejections within one checkpoint" do
+      vm = Quickjs::VM.new(max_pending_rejections: 0)
+      captured = []
+      vm.on_unhandled_rejection { |err| captured << err.message }
+      vm.eval_code(<<~JS)
+        const ps = [];
+        for (let i = 0; i < 100; i++) ps.push(Promise.reject(new Error(String(i))));
+        await 0;
+        ps.forEach(p => p.catch(() => {}));
+      JS
+      _(captured).must_be_empty
+    ensure
+      vm&.dispose!
+    end
+
+    it "refuses a max_pending_rejections that is not a non-negative Integer" do
+      _ { Quickjs::VM.new(max_pending_rejections: -1) }.must_raise ArgumentError
+      _ { Quickjs::VM.new(max_pending_rejections: "10") }.must_raise ArgumentError
+    end
+
     it "keeps handled rejections cheap in a long loop" do
       @vm.on_unhandled_rejection { |_err| }
       _(@vm.eval_code("for (let i = 0; i < 16000; i++) { Promise.reject(i).catch(() => {}); } 'done'")).must_equal "done"
