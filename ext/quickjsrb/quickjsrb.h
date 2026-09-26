@@ -56,6 +56,27 @@ static int64_t eval_elapsed_ms(const EvalTime *eval_time)
        + (now.tv_nsec - eval_time->started_at.tv_nsec) / 1000000;
 }
 
+// Promises in insertion order, JS_UNDEFINED once removed, with a pointer-keyed
+// open-addressing index (2 * cap slots: 0 empty, UINT32_MAX removed, else
+// item + 1) so removal stays O(1). Zeroed when empty.
+typedef struct RejectionList
+{
+  JSValue *items;
+  uint32_t *index;
+  uint32_t count;
+  uint32_t cap;
+  uint32_t live;
+} RejectionList;
+
+static void rejection_list_free(JSContext *ctx, RejectionList *list)
+{
+  for (uint32_t i = 0; i < list->count; i++)
+    JS_FreeValue(ctx, list->items[i]);
+  js_free(ctx, list->items);
+  js_free(ctx, list->index);
+  memset(list, 0, sizeof(*list));
+}
+
 typedef struct VMData
 {
   struct JSContext *context;
@@ -68,11 +89,10 @@ typedef struct VMData
   VALUE alive_handles;
   VALUE module_loader;
   VALUE on_unhandled_rejection;
-  // Rejected promises not yet handled, as a JS Array so that it keeps them
-  // alive until the checkpoint ends. JS_UNDEFINED when empty.
-  JSValue j_pending_rejections;
-  // The batch being notified; JS_UNDEFINED outside notification.
-  JSValue j_notifying_rejections;
+  // Rejected promises not yet handled, held until the checkpoint ends.
+  RejectionList pending_rejections;
+  // The batch being notified; NULL outside notification.
+  RejectionList *notifying_rejections;
   // Memoize (specifier, importer) → canonical so the user's loader Proc
   // runs at most once per distinct pair across the VM's lifetime. Without
   // this, QuickJS calls normalize on every import statement — including
@@ -221,8 +241,7 @@ static void vm_free(void *ptr)
     if (!JS_IsUndefined(data->j_blob_ctor))
       JS_FreeValue(data->context, data->j_blob_ctor);
 
-    if (!JS_IsUndefined(data->j_pending_rejections))
-      JS_FreeValue(data->context, data->j_pending_rejections);
+    rejection_list_free(data->context, &data->pending_rejections);
 
     vm_teardown_context(data->context, data->std_handlers_installed);
   }
@@ -302,8 +321,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->alive_handles = rb_hash_new();
   data->module_loader = Qnil;
   data->on_unhandled_rejection = Qnil;
-  data->j_pending_rejections = JS_UNDEFINED;
-  data->j_notifying_rejections = JS_UNDEFINED;
+  data->notifying_rejections = NULL;
   data->module_resolution_cache = rb_hash_new();
   data->module_source_cache = rb_hash_new();
   data->preloaded_module_names = rb_hash_new();

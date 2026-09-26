@@ -3250,6 +3250,34 @@ end
       _(captured).must_be_empty
     end
 
+    it "gives the list's storage back once a checkpoint empties it" do
+      growth = lambda do |handler|
+        vm = Quickjs::VM.new
+        vm.on_unhandled_rejection { |_err| } if handler
+        vm.eval_code("0")
+        vm.gc!
+        before = vm.memory_usage[:malloc_size]
+        vm.eval_code("const ps = []; for (let i = 0; i < 16000; i++) ps.push(Promise.reject(i)); for (const p of ps) p.catch(() => {}); ps.length = 0; 0")
+        vm.drain_jobs!
+        vm.gc!
+        vm.memory_usage[:malloc_size] - before
+      ensure
+        vm&.dispose!
+      end
+      _(growth.call(true) - growth.call(false)).must_be :<, 100_000
+    end
+
+    it "keeps handled rejections cheap in a long loop" do
+      @vm.on_unhandled_rejection { |_err| }
+      _(@vm.eval_code("for (let i = 0; i < 16000; i++) { Promise.reject(i).catch(() => {}); } 'done'")).must_equal "done"
+      _(@vm.eval_code(<<~JS)).must_equal "done"
+        const ps = [];
+        for (let i = 0; i < 16000; i++) ps.push(Promise.reject(i));
+        for (const p of ps) p.catch(() => {});
+        'done'
+      JS
+    end
+
     it "reports a rejection raised while converting the result to Ruby" do
       captured = []
       @vm.on_unhandled_rejection { |err| captured << err.message }

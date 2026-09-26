@@ -1633,60 +1633,79 @@ static VALUE r_rejection_call(VALUE r_args_val)
   return rb_funcall(args->proc, rb_intern("call"), 1, args->r_reason);
 }
 
-static uint32_t rejection_list_length(JSContext *ctx, JSValueConst list)
+static uint32_t rejection_list_hash(JSValueConst promise, uint32_t mask)
 {
-  if (JS_IsUndefined(list))
-    return 0;
-  JSValue j_len = JS_GetPropertyStr(ctx, list, "length");
-  uint32_t len = 0;
-  JS_ToUint32(ctx, &len, j_len);
-  JS_FreeValue(ctx, j_len);
-  return len;
+  uint64_t p = (uint64_t)(uintptr_t)JS_VALUE_GET_PTR(promise);
+  return (uint32_t)((p * 0x9E3779B97F4A7C15ULL) >> 32) & mask;
 }
 
-static void pending_rejections_clear_exception(JSContext *ctx)
+static void rejection_list_index_insert(RejectionList *list, uint32_t i)
 {
-  JS_FreeValue(ctx, JS_GetException(ctx));
+  uint32_t mask = list->cap * 2 - 1;
+  uint32_t h = rejection_list_hash(list->items[i], mask);
+  while (list->index[h] != 0)
+    h = (h + 1) & mask;
+  list->index[h] = i + 1;
 }
 
-static JSValue pending_rejections_array(VMData *data)
+// Compacts the live items into new storage and reindexes them.
+static bool rejection_list_rebuild(JSContext *ctx, RejectionList *list, uint32_t cap)
 {
-  if (JS_IsUndefined(data->j_pending_rejections))
+  JSValue *items = js_malloc(ctx, sizeof(JSValue) * cap);
+  uint32_t *index = js_mallocz(ctx, sizeof(uint32_t) * cap * 2);
+  if (items == NULL || index == NULL)
   {
-    data->j_pending_rejections = JS_NewArray(data->context);
-    if (JS_IsException(data->j_pending_rejections))
-    {
-      data->j_pending_rejections = JS_UNDEFINED;
-      pending_rejections_clear_exception(data->context);
-    }
+    js_free(ctx, items);
+    js_free(ctx, index);
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    return false;
   }
-  return data->j_pending_rejections;
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < list->count; i++)
+    if (!JS_IsUndefined(list->items[i]))
+      items[n++] = list->items[i];
+  js_free(ctx, list->items);
+  js_free(ctx, list->index);
+  list->items = items;
+  list->index = index;
+  list->count = n;
+  list->cap = cap;
+  for (uint32_t i = 0; i < n; i++)
+    rejection_list_index_insert(list, i);
+  return true;
 }
 
-static void pending_rejections_add(VMData *data, JSValueConst promise)
+static void rejection_list_add(JSContext *ctx, RejectionList *list, JSValueConst promise)
 {
-  JSValue arr = pending_rejections_array(data);
-  if (JS_IsUndefined(arr))
-    return;
-  if (JS_DefinePropertyValueUint32(data->context, arr, rejection_list_length(data->context, arr),
-                                   JS_DupValue(data->context, promise), JS_PROP_C_W_E) < 0)
-    pending_rejections_clear_exception(data->context);
-}
-
-static bool rejection_list_remove(JSContext *ctx, JSValueConst list, JSValueConst promise)
-{
-  uint32_t len = rejection_list_length(ctx, list);
-  for (uint32_t i = 0; i < len; i++)
+  if (list->count == list->cap)
   {
-    JSValue v = JS_GetPropertyUint32(ctx, list, i);
-    bool hit = JS_VALUE_GET_TAG(v) == JS_TAG_OBJECT &&
-               JS_VALUE_GET_PTR(v) == JS_VALUE_GET_PTR(promise);
-    JS_FreeValue(ctx, v);
-    if (hit)
-    {
-      JS_DefinePropertyValueUint32(ctx, list, i, JS_UNDEFINED, JS_PROP_C_W_E);
-      return true;
-    }
+    uint32_t cap = list->cap == 0 ? 8 : list->live * 2 > list->cap ? list->cap * 2 : list->cap;
+    if (cap > (UINT32_MAX >> 2) || !rejection_list_rebuild(ctx, list, cap))
+      return;
+  }
+  uint32_t i = list->count++;
+  list->items[i] = JS_DupValue(ctx, promise);
+  list->live++;
+  rejection_list_index_insert(list, i);
+}
+
+static bool rejection_list_remove(JSContext *ctx, RejectionList *list, JSValueConst promise)
+{
+  if (list == NULL || list->cap == 0)
+    return false;
+  uint32_t mask = list->cap * 2 - 1;
+  for (uint32_t h = rejection_list_hash(promise, mask); list->index[h] != 0; h = (h + 1) & mask)
+  {
+    if (list->index[h] == UINT32_MAX)
+      continue;
+    uint32_t i = list->index[h] - 1;
+    if (JS_VALUE_GET_PTR(list->items[i]) != JS_VALUE_GET_PTR(promise))
+      continue;
+    JS_FreeValue(ctx, list->items[i]);
+    list->items[i] = JS_UNDEFINED;
+    list->index[h] = UINT32_MAX;
+    list->live--;
+    return true;
   }
   return false;
 }
@@ -1696,8 +1715,8 @@ static void pending_rejections_remove(VMData *data, JSValueConst promise)
 {
   if (JS_VALUE_GET_TAG(promise) != JS_TAG_OBJECT)
     return;
-  if (!rejection_list_remove(data->context, data->j_pending_rejections, promise))
-    rejection_list_remove(data->context, data->j_notifying_rejections, promise);
+  if (!rejection_list_remove(data->context, &data->pending_rejections, promise))
+    rejection_list_remove(data->context, data->notifying_rejections, promise);
 }
 
 // A handler may still be attached later in the same checkpoint, so only
@@ -1713,7 +1732,7 @@ static void quickjsrb_promise_rejection_tracker(
   if (is_handled)
     pending_rejections_remove(data, promise);
   else
-    pending_rejections_add(data, promise);
+    rejection_list_add(ctx, &data->pending_rejections, promise);
 }
 
 // A promise the host awaits is handled by the host: its rejection is raised.
@@ -1728,20 +1747,19 @@ static JSValue quickjsrb_host_await(JSContext *ctx, JSValue promise)
 
 static void quickjsrb_notify_unhandled_rejections(VMData *data)
 {
-  if (NIL_P(data->on_unhandled_rejection) || JS_IsUndefined(data->j_pending_rejections))
+  if (NIL_P(data->on_unhandled_rejection) || data->pending_rejections.live == 0)
     return;
 
   // Rejections made while notifying go into a fresh list.
-  JSValue batch = data->j_pending_rejections;
-  data->j_pending_rejections = JS_UNDEFINED;
-  data->j_notifying_rejections = batch;
+  RejectionList batch = data->pending_rejections;
+  memset(&data->pending_rejections, 0, sizeof(data->pending_rejections));
+  data->notifying_rejections = &batch;
 
-  uint32_t n = rejection_list_length(data->context, batch);
-  for (uint32_t i = 0; i < n; i++)
+  for (uint32_t i = 0; i < batch.count; i++)
   {
-    JSValue v = JS_GetPropertyUint32(data->context, batch, i);
-    if (JS_VALUE_GET_TAG(v) != JS_TAG_OBJECT)
+    if (JS_IsUndefined(batch.items[i]))
       continue;
+    JSValue v = JS_DupValue(data->context, batch.items[i]);
 
     JSValue j_reason = JS_PromiseResult(data->context, v);
     // A bridge error raised while reading the reason becomes the reason.
@@ -1764,8 +1782,8 @@ static void quickjsrb_notify_unhandled_rejections(VMData *data)
     if (state)
       rb_set_errinfo(Qnil);
   }
-  data->j_notifying_rejections = JS_UNDEFINED;
-  JS_FreeValue(data->context, batch);
+  data->notifying_rejections = NULL;
+  rejection_list_free(data->context, &batch);
 }
 
 // With jobs still queued, whoever drains them ends the checkpoint.
@@ -1775,6 +1793,9 @@ static void quickjsrb_end_microtask_checkpoint(VMData *data)
     return;
   if (!JS_IsJobPending(JS_GetRuntime(data->context)))
     quickjsrb_notify_unhandled_rejections(data);
+  // Give back what an emptied list still holds, rather than keep its peak.
+  if (data->pending_rejections.live == 0)
+    rejection_list_free(data->context, &data->pending_rejections);
 }
 
 static VALUE r_try_call_proc(VALUE r_try_args)
@@ -4519,7 +4540,7 @@ static VALUE vm_m_drainJobs(VALUE r_self)
 
   // Rejections can be pending with no job queued.
   if (!JS_IsJobPending(JS_GetRuntime(data->context)) &&
-      JS_IsUndefined(data->j_pending_rejections))
+      data->pending_rejections.live == 0)
     return INT2NUM(0);
 
   return run_held_js_checkpoint_entry(data, drain_jobs_body, (VALUE)data);
@@ -4597,11 +4618,7 @@ static VALUE vm_m_dispose(VALUE r_self)
     data->j_blob_ctor = JS_UNDEFINED;
   }
 
-  if (!JS_IsUndefined(data->j_pending_rejections))
-  {
-    JS_FreeValue(data->context, data->j_pending_rejections);
-    data->j_pending_rejections = JS_UNDEFINED;
-  }
+  rejection_list_free(data->context, &data->pending_rejections);
 
   // Mark disposed before releasing the GVL so a concurrent dfree finds
   // disposed=true and skips its own teardown.
