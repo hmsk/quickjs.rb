@@ -56,6 +56,47 @@ static int64_t eval_elapsed_ms(const EvalTime *eval_time)
        + (now.tv_nsec - eval_time->started_at.tv_nsec) / 1000000;
 }
 
+// A rejected promise and its reason, converted when it was rejected.
+// error_handle names the bridged exception the reason was, if any: peeked
+// rather than taken, so it is taken only if this is reported.
+typedef struct RejectionEntry
+{
+  JSValue promise;
+  VALUE reason;
+  int64_t error_handle;
+} RejectionEntry;
+
+// Entries in insertion order, promise JS_UNDEFINED once removed, with a
+// pointer-keyed open-addressing index (2 * cap slots: 0 empty, UINT32_MAX
+// removed, else item + 1) so removal stays O(1). Zeroed when empty.
+typedef struct RejectionList
+{
+  RejectionEntry *items;
+  uint32_t *index;
+  uint32_t count;
+  uint32_t cap;
+  uint32_t live;
+} RejectionList;
+
+static void rejection_list_free(JSContext *ctx, RejectionList *list)
+{
+  for (uint32_t i = 0; i < list->count; i++)
+    JS_FreeValue(ctx, list->items[i].promise);
+  js_free(ctx, list->items);
+  js_free(ctx, list->index);
+  memset(list, 0, sizeof(*list));
+}
+
+// Pinned: the list lives in js_malloc'd memory the GC cannot update.
+static void rejection_list_mark(const RejectionList *list)
+{
+  if (list == NULL)
+    return;
+  for (uint32_t i = 0; i < list->count; i++)
+    if (!JS_IsUndefined(list->items[i].promise))
+      rb_gc_mark(list->items[i].reason);
+}
+
 typedef struct VMData
 {
   struct JSContext *context;
@@ -68,6 +109,12 @@ typedef struct VMData
   VALUE alive_handles;
   VALUE module_loader;
   VALUE on_unhandled_rejection;
+  // Rejected promises not yet handled, held until the checkpoint ends.
+  RejectionList pending_rejections;
+  // The batch being notified; NULL outside notification.
+  RejectionList *notifying_rejections;
+  // How many may stay pending past an entry that leaves jobs queued.
+  uint32_t max_pending_rejections;
   // Memoize (specifier, importer) → canonical so the user's loader Proc
   // runs at most once per distinct pair across the VM's lifetime. Without
   // this, QuickJS calls normalize on every import statement — including
@@ -216,6 +263,8 @@ static void vm_free(void *ptr)
     if (!JS_IsUndefined(data->j_blob_ctor))
       JS_FreeValue(data->context, data->j_blob_ctor);
 
+    rejection_list_free(data->context, &data->pending_rejections);
+
     vm_teardown_context(data->context, data->std_handlers_installed);
   }
 
@@ -244,6 +293,8 @@ static void vm_mark(void *ptr)
   // rb_thread_current(), and it is only ever set for the duration of a JS
   // entry, so there is nothing to gain from letting it move.
   rb_gc_mark(data->owner_thread);
+  rejection_list_mark(&data->pending_rejections);
+  rejection_list_mark(data->notifying_rejections);
 }
 
 static void vm_compact(void *ptr)
@@ -294,6 +345,7 @@ static VALUE vm_alloc(VALUE r_self)
   data->alive_handles = rb_hash_new();
   data->module_loader = Qnil;
   data->on_unhandled_rejection = Qnil;
+  data->notifying_rejections = NULL;
   data->module_resolution_cache = rb_hash_new();
   data->module_source_cache = rb_hash_new();
   data->preloaded_module_names = rb_hash_new();
