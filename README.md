@@ -664,6 +664,7 @@ Intl APIs (Collator, DateTimeFormat, NumberFormat, PluralRules, Locale, etc.) li
 ## Acknowledgements
 
 - [@ursm](https://github.com/ursm) — for continuous contributions improving performance and developer experience
+- [@takahashim](https://github.com/takahashim) — for aligning unhandled promise rejection reporting with the HTML specification
 - [@persona-id](https://github.com/persona-id) — for providing real-world use cases that shape the direction of this project
 
 ## License
