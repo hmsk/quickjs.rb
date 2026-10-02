@@ -4181,13 +4181,19 @@ static VALUE define_function_resolve_and_install(VALUE p)
     // The first segment is not a lookup, it is an eval: `myLib` can be a
     // lexical binding as well as a global property, and either can be an
     // accessor.
-    const char *first_seg = StringValueCStr(RARRAY_AREF(r_segs, 0));
+    // Through a local, not the array slot: StringValueCStr takes a writable
+    // pointer so it can store a converted String back, and RARRAY_AREF hands
+    // out the array's own const storage. The segments are Strings already, so
+    // nothing is stored, but the slot is not ours to offer.
+    VALUE r_first_seg = RARRAY_AREF(r_segs, 0);
+    const char *first_seg = StringValueCStr(r_first_seg);
     install->j_parent = JS_Eval(ctx, first_seg, strlen(first_seg), vmInternalFilename, JS_EVAL_TYPE_GLOBAL);
     check_path_segment(ctx, install->j_parent, first_seg);
 
     for (long i = 1; i < path_len - 1; i++)
     {
-      const char *seg = StringValueCStr(RARRAY_AREF(r_segs, i));
+      VALUE r_seg = RARRAY_AREF(r_segs, i);
+      const char *seg = StringValueCStr(r_seg);
       JSValue j_next = JS_GetPropertyStr(ctx, install->j_parent, seg);
       JS_FreeValue(ctx, install->j_parent);
       install->j_parent = j_next;
@@ -4206,7 +4212,8 @@ static VALUE define_function_resolve_and_install(VALUE p)
     install->j_parent = JS_GetGlobalObject(ctx);
   }
 
-  const char *funcName = StringValueCStr(RARRAY_AREF(r_segs, path_len - 1));
+  VALUE r_func_name = RARRAY_AREF(r_segs, path_len - 1);
+  const char *funcName = StringValueCStr(r_func_name);
 
   JSValue j_func = JS_NewCFunctionData(ctx, js_quickjsrb_call_global, 1, 0, 2, install->ruby_data);
   if (JS_IsException(j_func))
