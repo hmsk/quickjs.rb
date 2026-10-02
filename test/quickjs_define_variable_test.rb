@@ -932,7 +932,7 @@ describe "a value that expands past what the VM could hold" do
   # not ask the object. Keying on value.object_id let a Hash subclass answer,
   # in either direction.
   it "does not call an acyclic structure circular because it says so" do
-    fixed = Class.new(Hash) { def object_id = 12_345 }
+    fixed = deliberately { Class.new(Hash) { def object_id = 12_345 } }
     inner = fixed.new
     inner["b"] = 1
     outer = fixed.new
@@ -945,7 +945,7 @@ describe "a value that expands past what the VM could hold" do
   end
 
   it "still catches a cycle that reports a new identity every time" do
-    shifty = Class.new(Hash) { def object_id = rand(1 << 62) }
+    shifty = deliberately { Class.new(Hash) { def object_id = rand(1 << 62) } }
     cyclic = shifty.new
     cyclic["self"] = cyclic
     vm = Quickjs::VM.new

@@ -59,6 +59,17 @@ module QuickjsTestHelpers
       singleton.private_instance_methods(false).include?(name)
   end
 
+  # Ruby objects to redefining object_id however it is done, and says so
+  # whatever -w is set to. These tests redefine it on purpose: the point is
+  # that the conversions must not ask an object for its own identity.
+  def deliberately
+    verbose = $VERBOSE
+    $VERBOSE = nil
+    yield
+  ensure
+    $VERBOSE = verbose
+  end
+
   # Asserts the block releases the GVL while it works, which is the point of
   # the GVL release work (#56, #59, #63, #75, #76).
   #
