@@ -491,8 +491,7 @@ describe Quickjs do
       vm = Quickjs::VM.new(timeout_msec: 300)
       vm.define_function(:boom) { |n| raise IOError, "e#{n}" }
 
-      SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
-      SecureRandom.define_singleton_method(:random_number) { |_limit| 4 }
+      stub_singleton(SecureRandom, :random_number) { |_limit| 4 }
 
       vm.eval_code('try { boom(1) } catch (e) {} 1')
       # The bridge refuses inside JS rather than unwinding through it.
@@ -501,8 +500,7 @@ describe Quickjs do
       error = _ { vm.eval_code('1') }.must_raise Quickjs::RuntimeError
       _(error.message).must_match(/distinct usable integers/)
     ensure
-      SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
-      SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      unstub_singleton(SecureRandom, :random_number)
       vm&.dispose!
     end
 
@@ -518,8 +516,7 @@ describe Quickjs do
         vm = Quickjs::VM.new
         vm.define_function(:boom) { raise IOError, 'host' }
 
-        SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
-        SecureRandom.define_singleton_method(:random_number) { |_limit| drawn }
+        stub_singleton(SecureRandom, :random_number) { |_limit| drawn }
 
         _(vm.eval_code('try { boom() } catch (e) { "refused" }')).must_equal 'refused'
         _(vm.poisoned?).must_equal true
@@ -527,8 +524,7 @@ describe Quickjs do
         error = _ { vm.eval_code('1') }.must_raise Quickjs::RuntimeError
         _(error.message).must_match(/distinct usable integers/)
       ensure
-        SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
-        SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+        unstub_singleton(SecureRandom, :random_number)
         vm&.dispose!
       end
     end
@@ -537,16 +533,14 @@ describe Quickjs do
       vm = Quickjs::VM.new
       vm.define_function(:boom) { raise IOError, 'host' }
 
-      SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
-      SecureRandom.define_singleton_method(:random_number) { |_limit| nil }
+      stub_singleton(SecureRandom, :random_number) { |_limit| nil }
 
       _(vm.eval_code('try { boom() } catch (e) { "refused" }')).must_equal 'refused'
 
       error = _ { vm.eval_code('1') }.must_raise Quickjs::RuntimeError
       _(error.message).must_match(/distinct usable integers/)
     ensure
-      SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
-      SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      unstub_singleton(SecureRandom, :random_number)
       vm&.dispose!
     end
 
@@ -563,8 +557,7 @@ describe Quickjs do
       vm.define_function(:boom) { raise IOError, 'host' }
       vm.eval_code('globalThis.deep = (n) => n === 0 ? boom() : deep(n - 1); 1')
 
-      SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
-      SecureRandom.define_singleton_method(:random_number) { |_limit| raise Timeout::Error, 'host timeout' }
+      stub_singleton(SecureRandom, :random_number) { |_limit| raise Timeout::Error, 'host timeout' }
 
       # The evaluation in flight finishes rather than unwinding through QuickJS.
       _(vm.eval_code('try { deep(5) } catch (e) { "caught" }')).must_equal 'caught'
@@ -579,8 +572,7 @@ describe Quickjs do
       _(error.message).must_equal 'host timeout'
 
       # A passing raise is not a broken handle source, so the VM recovers.
-      SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
-      SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      unstub_singleton(SecureRandom, :random_number)
       _(vm.eval_code('1 + 1')).must_equal 2
       _(vm.poisoned?).must_equal false
 
@@ -589,10 +581,7 @@ describe Quickjs do
       _(other.eval_code("try { throw new Error('x') } catch (e) { e.message }")).must_equal 'x'
       other.dispose!
     ensure
-      if SecureRandom.singleton_class.method_defined?(:random_number_before_stub)
-        SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
-        SecureRandom.singleton_class.remove_method(:random_number_before_stub)
-      end
+      unstub_singleton(SecureRandom, :random_number) if stubbed_singleton?(SecureRandom, :random_number)
       vm&.dispose!
     end
 
@@ -622,15 +611,13 @@ describe Quickjs do
       vm.define_function(:boom) { raise IOError, 'host' }
       _(vm.poisoned?).must_equal false
 
-      SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
-      SecureRandom.define_singleton_method(:random_number) { |_limit| nil }
+      stub_singleton(SecureRandom, :random_number) { |_limit| nil }
       vm.eval_code('try { boom() } catch (e) {} 1') rescue nil
 
       _(vm.poisoned?).must_equal true
       _(vm.memory_poisoned?).must_equal false
     ensure
-      SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
-      SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      unstub_singleton(SecureRandom, :random_number)
       vm&.dispose!
     end
 
@@ -657,11 +644,9 @@ describe Quickjs do
       vm.define_function(:boom) { |n| raise IOError, "e#{n}" }
       vm.eval_code('globalThis.deep = (n) => n === 0 ? boom(1) : deep(n - 1); 1')
 
-      SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
-      SecureRandom.define_singleton_method(:random_number) { |_limit| 4 }
+      stub_singleton(SecureRandom, :random_number) { |_limit| 4 }
       4.times { vm.eval_code('try { deep(30) } catch (e) {} 1') rescue nil }
-      SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
-      SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      unstub_singleton(SecureRandom, :random_number)
 
       # Poisoned now, so a fresh VM is what carries on. The point of the test is
       # that the process reached this line at all.

@@ -272,8 +272,7 @@ describe "crypto.subtle key management" do
       late = Class.new { def to_str = raise(ArgumentError, 'late') }
       malformed = Class.new(::Quickjs::CryptoKey)
 
-      ::Quickjs::SubtleCrypto.singleton_class.alias_method(:generate_key_before_stub, :generate_key)
-      ::Quickjs::SubtleCrypto.define_singleton_method(:generate_key) do |_algo, _extractable, _usages|
+      stub_singleton(::Quickjs::SubtleCrypto, :generate_key) do |_algo, _extractable, _usages|
         malformed.allocate.tap do |k|
           k.instance_variable_set(:@key_data, 'x' * 16)
           k.instance_variable_set(:@type, 'secret')
@@ -294,8 +293,7 @@ describe "crypto.subtle key management" do
 
       _(before - ObjectSpace.each_object(malformed).count).must_equal 0
     ensure
-      ::Quickjs::SubtleCrypto.singleton_class.alias_method(:generate_key, :generate_key_before_stub)
-      ::Quickjs::SubtleCrypto.singleton_class.remove_method(:generate_key_before_stub)
+      unstub_singleton(::Quickjs::SubtleCrypto, :generate_key)
       vm&.dispose! unless vm&.disposed?
     end
 
@@ -305,8 +303,7 @@ describe "crypto.subtle key management" do
         def type = 42
       end
 
-      ::Quickjs::SubtleCrypto.singleton_class.alias_method(:generate_key_before_stub, :generate_key)
-      ::Quickjs::SubtleCrypto.define_singleton_method(:generate_key) do |_algo, _extractable, _usages|
+      stub_singleton(::Quickjs::SubtleCrypto, :generate_key) do |_algo, _extractable, _usages|
         malformed.new('secret', type: 'secret', extractable: false, algorithm: { 'name' => 'AES-GCM' }, usages: ['encrypt'])
       rescue ArgumentError
         malformed.allocate.tap do |k|
@@ -328,8 +325,7 @@ describe "crypto.subtle key management" do
 
       _(before - ObjectSpace.each_object(malformed).count).must_equal 0
     ensure
-      ::Quickjs::SubtleCrypto.singleton_class.alias_method(:generate_key, :generate_key_before_stub)
-      ::Quickjs::SubtleCrypto.singleton_class.remove_method(:generate_key_before_stub)
+      unstub_singleton(::Quickjs::SubtleCrypto, :generate_key)
       vm&.dispose! unless vm&.disposed?
     end
 
@@ -337,8 +333,7 @@ describe "crypto.subtle key management" do
       vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
       vm.define_function(:boom) { raise IOError, 'host' }
 
-      SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
-      SecureRandom.define_singleton_method(:random_number) { |_limit| 4 }
+      stub_singleton(SecureRandom, :random_number) { |_limit| 4 }
       # Takes the one handle that source can draw, so the key cannot have one.
       vm.eval_code('try { boom() } catch (e) {} 1')
 
@@ -351,8 +346,7 @@ describe "crypto.subtle key management" do
 
       _(single).must_equal 'rejected'
     ensure
-      SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
-      SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      unstub_singleton(SecureRandom, :random_number)
       vm&.dispose!
     end
 
@@ -360,8 +354,7 @@ describe "crypto.subtle key management" do
       vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
       vm.define_function(:boom) { raise IOError, 'host' }
 
-      SecureRandom.singleton_class.alias_method(:random_number_before_stub, :random_number)
-      SecureRandom.define_singleton_method(:random_number) { |_limit| 4 }
+      stub_singleton(SecureRandom, :random_number) { |_limit| 4 }
       vm.eval_code('try { boom() } catch (e) {} 1')
 
       pair = vm.eval_code(<<~JS)
@@ -373,8 +366,7 @@ describe "crypto.subtle key management" do
 
       _(pair).must_equal 'rejected'
     ensure
-      SecureRandom.singleton_class.alias_method(:random_number, :random_number_before_stub)
-      SecureRandom.singleton_class.remove_method(:random_number_before_stub)
+      unstub_singleton(SecureRandom, :random_number)
       vm&.dispose!
     end
 
