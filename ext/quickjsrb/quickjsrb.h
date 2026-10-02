@@ -48,7 +48,7 @@ typedef struct EvalTime
   struct timespec started_at;
 } EvalTime;
 
-static int64_t eval_elapsed_ms(const EvalTime *eval_time)
+static inline int64_t eval_elapsed_ms(const EvalTime *eval_time)
 {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
@@ -335,7 +335,7 @@ static void *vm_create_no_gvl(void *p)
   return NULL;
 }
 
-static VALUE vm_alloc(VALUE r_self)
+static inline VALUE vm_alloc(VALUE r_self)
 {
   VMData *data;
   VALUE obj = TypedData_Make_Struct(r_self, VMData, &vm_type, data);
@@ -630,7 +630,7 @@ static inline VALUE alive_objects_register(VMData *data, VALUE r_object, bool *c
   return r_handle;
 }
 
-static void random_filename(char buf[QUICKJSRB_GENERATED_NAME_SIZE])
+static inline void random_filename(char buf[QUICKJSRB_GENERATED_NAME_SIZE])
 {
   VALUE r_rand = rb_funcall(
       rb_const_get(rb_cClass, rb_intern("SecureRandom")),
@@ -645,7 +645,7 @@ static void random_filename(char buf[QUICKJSRB_GENERATED_NAME_SIZE])
   RB_GC_GUARD(r_rand);
 }
 
-static bool is_native_error_name(const char *error_name)
+static inline bool is_native_error_name(const char *error_name)
 {
   for (int i = 0; i < num_native_errors; i++)
   {
@@ -657,7 +657,7 @@ static bool is_native_error_name(const char *error_name)
 
 // Constants
 
-static void r_define_constants(VALUE r_parent_class)
+static inline void r_define_constants(VALUE r_parent_class)
 {
   rb_define_const(r_parent_class, "MODULE_STD", QUICKJSRB_SYM(featureStdId));
   rb_define_const(r_parent_class, "MODULE_OS", QUICKJSRB_SYM(featureOsId));
@@ -700,7 +700,7 @@ static VALUE r_log_m_to_s(VALUE r_self)
   return rb_funcall(r_ary, rb_intern("join"), 1, rb_str_new2(" "));
 }
 
-static VALUE r_define_log_class(VALUE r_parent_class)
+static inline VALUE r_define_log_class(VALUE r_parent_class)
 {
   VALUE r_log_class = rb_define_class_under(r_parent_class, "Log", rb_cObject);
   rb_define_attr(r_log_class, "severity", 1, 0);
@@ -711,7 +711,7 @@ static VALUE r_define_log_class(VALUE r_parent_class)
   return r_log_class;
 }
 
-static VALUE r_log_new(const char *severity, VALUE r_row)
+static inline VALUE r_log_new(const char *severity, VALUE r_row)
 {
   VALUE r_log_class = rb_const_get(rb_const_get(rb_const_get(rb_cClass, rb_intern("Quickjs")), rb_intern("VM")), rb_intern("Log"));
   VALUE r_log = rb_funcall(r_log_class, rb_intern("new"), 0);
@@ -720,7 +720,7 @@ static VALUE r_log_new(const char *severity, VALUE r_row)
   return r_log;
 }
 
-static VALUE r_log_body_new(VALUE r_raw, VALUE r_c)
+static inline VALUE r_log_body_new(VALUE r_raw, VALUE r_c)
 {
   VALUE r_log_body = rb_hash_new();
   rb_hash_aset(r_log_body, ID2SYM(rb_intern("raw")), r_raw);
@@ -745,7 +745,7 @@ static VALUE vm_m_initialize_quickjs_error(VALUE self, VALUE r_message, VALUE r_
   return self;
 }
 
-static void r_define_exception_classes(VALUE r_parent_class)
+static inline void r_define_exception_classes(VALUE r_parent_class)
 {
   VALUE r_runtime_error = rb_define_class_under(r_parent_class, QUICKJSRB_ROOT_RUNTIME_ERROR, rb_eRuntimeError);
   rb_define_method(r_runtime_error, "initialize", vm_m_initialize_quickjs_error, 2);
