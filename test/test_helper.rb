@@ -9,6 +9,67 @@ require_relative 'support/cpu_workload'
 module QuickjsTestHelpers
   include QuickjsCpuWorkload
 
+  # Rake::TestTask runs with -w, so every singleton method a test swaps out
+  # and puts back was reported twice: aliasing the original back is itself a
+  # redefinition of the stub. Two dozen lines a run, which buried the
+  # warnings worth reading.
+  #
+  # Removing before defining is what the class_eval swaps in these tests
+  # already do. The original is carried on an alias either way, because
+  # whether it belongs to the singleton class (def self.x) or is only
+  # inherited there (SecureRandom's random_number comes from
+  # Random::Formatter) decides whether there is anything to remove.
+  # Whether the singleton class owns the method decides both halves. An owned
+  # one (def self.x) is carried on an alias and put back. One that is only
+  # inherited there has nothing to carry, and aliasing it back would leave the
+  # singleton owning a copy: SecureRandom#random_number would answer from
+  # #<Class:SecureRandom> rather than Random::Formatter, and a later patch to
+  # the module would no longer be seen.
+  def stub_singleton(owner, name, &replacement)
+    singleton = owner.singleton_class
+    owned = singleton_owns?(singleton, name)
+    if owned
+      singleton.alias_method(:"__#{name}_before_stub", name)
+      singleton.remove_method(name)
+    end
+    owner.define_singleton_method(name, &replacement)
+    singleton_stubs[[owner, name]] = owned
+  end
+
+  def unstub_singleton(owner, name)
+    owned = singleton_stubs.delete([owner, name])
+    singleton = owner.singleton_class
+    singleton.remove_method(name)
+    return unless owned
+
+    singleton.alias_method(name, :"__#{name}_before_stub")
+    singleton.remove_method(:"__#{name}_before_stub")
+  end
+
+  def stubbed_singleton?(owner, name)
+    singleton_stubs.key?([owner, name])
+  end
+
+  def singleton_stubs
+    @singleton_stubs ||= {}
+  end
+
+  def singleton_owns?(singleton, name)
+    singleton.instance_methods(false).include?(name) ||
+      singleton.private_instance_methods(false).include?(name)
+  end
+
+  # Ruby objects to redefining object_id however it is done, and says so
+  # whatever -w is set to. These tests redefine it on purpose: the point is
+  # that the conversions must not ask an object for its own identity.
+  def deliberately
+    verbose = $VERBOSE
+    $VERBOSE = nil
+    yield
+  ensure
+    $VERBOSE = verbose
+  end
+
   # Asserts the block releases the GVL while it works, which is the point of
   # the GVL release work (#56, #59, #63, #75, #76).
   #
