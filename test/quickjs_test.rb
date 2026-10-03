@@ -3621,15 +3621,67 @@ end
       _ { Quickjs::VM.new(max_pending_rejections: "10") }.must_raise ArgumentError
     end
 
-    it "keeps handled rejections cheap in a long loop" do
-      @vm.on_unhandled_rejection { |_err| }
-      _(@vm.eval_code("for (let i = 0; i < 16000; i++) { Promise.reject(i).catch(() => {}); } 'done'")).must_equal "done"
-      _(@vm.eval_code(<<~JS)).must_equal "done"
-        const ps = [];
-        for (let i = 0; i < 16000; i++) ps.push(Promise.reject(i));
-        for (const p of ps) p.catch(() => {});
-        'done'
-      JS
+    # Removing a handled rejection is O(1); an O(n) scan of the pending list
+    # makes either loop quadratic. A slow removal still produces the right
+    # answer, so there is nothing to observe here but the time it takes.
+    #
+    # This used to assert that 16000 rejections fit in the default 100ms
+    # budget. That measured the runner as much as the code: the work takes
+    # about 18ms on a development machine, and a shared macOS runner walked
+    # past 100ms on a commit that was fine.
+    #
+    # Four times the rejections should cost about four times as much, where
+    # quadratic would be sixteen. Repeated locally the ratio sits between 3.1
+    # and 4.4, so eight separates the two with room on both sides and no
+    # absolute number in it: a runner that is half the speed moves both
+    # measurements together.
+    #
+    # Each size is the best of three rounds. Noise only ever adds time, so
+    # inflating the larger measurement past eight has to beat every one of
+    # its rounds while leaving the smaller one alone.
+    def best_rejection_loop(count, &shape)
+      Array.new(3) do
+        vm = Quickjs::VM.new(timeout_msec: 60_000)
+        vm.on_unhandled_rejection { |_err| }
+        # Warm up the paths outside the measurement.
+        vm.eval_code("for (let i = 0; i < 200; i++) { Promise.reject(i).catch(() => {}); } 1")
+
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        result = vm.eval_code(shape.call(count))
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+        _(result).must_equal "done"
+        elapsed
+      ensure
+        vm&.dispose!
+      end.min
+    end
+
+    def assert_scales_linearly(label, &shape)
+      small = best_rejection_loop(4_000, &shape)
+      large = best_rejection_loop(16_000, &shape)
+
+      assert_operator large, :<, small * 8,
+        "#{label}: 4x the rejections cost #{(large / small).round(1)}x the time " \
+        "(#{(small * 1000).round(1)}ms to #{(large * 1000).round(1)}ms) — linear is " \
+        "about 4x and quadratic about 16x, so removing a handled rejection is no longer O(1)"
+    end
+
+    it "keeps removing a handled rejection O(1) when each is caught at once" do
+      assert_scales_linearly('caught at once') do |n|
+        "for (let i = 0; i < #{n}; i++) { Promise.reject(i).catch(() => {}); } 'done'"
+      end
+    end
+
+    it "keeps removing a handled rejection O(1) when the list is drained later" do
+      assert_scales_linearly('drained later') do |n|
+        <<~JS
+          const ps = [];
+          for (let i = 0; i < #{n}; i++) ps.push(Promise.reject(i));
+          for (const p of ps) p.catch(() => {});
+          'done'
+        JS
+      end
     end
 
     it "still reports when the eval raises a JS error, with $! cleared for the handler" do
