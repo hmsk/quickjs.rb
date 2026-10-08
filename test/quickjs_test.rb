@@ -3538,7 +3538,9 @@ end
 
     it "gives the list's storage back once a checkpoint empties it" do
       growth = lambda do |handler|
-        vm = Quickjs::VM.new
+        # Sixteen thousand rejections is real work, and how long it takes is
+        # not what this measures.
+        vm = Quickjs::VM.new(timeout_msec: 10_000)
         vm.on_unhandled_rejection { |_err| } if handler
         vm.eval_code("0")
         vm.gc!
