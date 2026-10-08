@@ -2287,6 +2287,18 @@ end
       vm.dispose!
     end
 
+    # A delay is a wait the script asked for, not the script running. Charged
+    # to the budget, any delay at or over timeout_msec failed once the budget
+    # began to be read where the evaluation ends.
+    it "does not charge a setTimeout delay to the budget" do
+      vm = Quickjs::VM.new(features: [::Quickjs::FEATURE_TIMEOUT], timeout_msec: 50)
+
+      _(vm.eval_code("await new Promise(r => setTimeout(r, 150)); 'done'")).must_equal 'done'
+      _ { vm.eval_code("await new Promise(r => setTimeout(r, 150)); #{SLOW_NATIVE_SCAN % 20}") }.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
     # Zero has never meant "no budget", but it has never meant "refuse
     # everything" either: only what QuickJS polls was held to it.
     it "leaves a budget of zero to QuickJS's own polls" do

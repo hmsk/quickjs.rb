@@ -2244,7 +2244,16 @@ static JSValue js_delay_and_eval_job(JSContext *ctx, int argc, JSValueConst *arg
 {
   VALUE rb_delay_msec = to_rb_value(ctx, argv[1]);
   VALUE rb_delay_sec = rb_funcall(rb_delay_msec, rb_intern("/"), 1, rb_float_new(1000));
+  // The delay is a wait the script asked for, not the script running, so the
+  // clock is moved past it. Charged, every delay at or over timeout_msec was
+  // an InterruptedError once the budget began to be read where the evaluation
+  // ends. Whether a pending timer should count is #88's question.
+  VMData *data = JS_GetContextOpaque(ctx);
+  struct timespec waited_from, waited_until;
+  clock_gettime(CLOCK_MONOTONIC, &waited_from);
   rb_thread_wait_for(rb_time_interval(rb_delay_sec));
+  clock_gettime(CLOCK_MONOTONIC, &waited_until);
+  eval_clock_skip(data->eval_time, &waited_from, &waited_until);
   JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
 
   return JS_UNDEFINED;

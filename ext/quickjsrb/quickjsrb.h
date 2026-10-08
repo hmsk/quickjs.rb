@@ -56,6 +56,23 @@ static inline int64_t eval_elapsed_ms(const EvalTime *eval_time)
        + (now.tv_nsec - eval_time->started_at.tv_nsec) / 1000000;
 }
 
+// Moves the clock past a stretch that is not the evaluation's to pay for.
+static inline void eval_clock_skip(EvalTime *eval_time, const struct timespec *from, const struct timespec *until)
+{
+  eval_time->started_at.tv_sec += until->tv_sec - from->tv_sec;
+  eval_time->started_at.tv_nsec += until->tv_nsec - from->tv_nsec;
+  if (eval_time->started_at.tv_nsec < 0)
+  {
+    eval_time->started_at.tv_sec -= 1;
+    eval_time->started_at.tv_nsec += 1000000000L;
+  }
+  else if (eval_time->started_at.tv_nsec >= 1000000000L)
+  {
+    eval_time->started_at.tv_sec += 1;
+    eval_time->started_at.tv_nsec -= 1000000000L;
+  }
+}
+
 // A rejected promise and its reason, converted when it was rejected.
 // error_handle names the bridged exception the reason was, if any: peeked
 // rather than taken, so it is taken only if this is reported.
