@@ -1679,11 +1679,14 @@ describe Quickjs::VM do
       vm = Quickjs::VM.new(timeout_msec: 50)
       seen = []
       vm.on_unhandled_rejection {|err| seen << err }
-      vm.eval_code(<<~JS)
-        const e = new Error('r');
-        Object.defineProperty(e, 'name', {get() { const t = Date.now(); while (Date.now() - t < 1000) {}; return 'X' }});
-        void Promise.reject(e);
-      JS
+      # The evaluation is over budget too, and says so itself.
+      _ do
+        vm.eval_code(<<~JS)
+          const e = new Error('r');
+          Object.defineProperty(e, 'name', {get() { const t = Date.now(); while (Date.now() - t < 1000) {}; return 'X' }});
+          void Promise.reject(e);
+        JS
+      end.must_raise Quickjs::InterruptedError
 
       _(seen.map(&:class)).must_equal [Quickjs::InterruptedError]
     ensure
@@ -2179,6 +2182,86 @@ end
     # configured 200ms. Widen the window so the test catches "timer wildly
     # wrong" (orders of magnitude off) without flapping on normal noise.
     assert_in_delta(started + 200, Time.now.to_f * 1000, 100)
+  end
+
+  # QuickJS asks the interrupt handler once in ten thousand polls, and neither
+  # its parser nor its native builtins poll at all. An evaluation that spent
+  # its budget in either was interrupted or not depending on where that
+  # counter stood when it began, and on a fresh VM it completed (#146). The
+  # clock is asked where the evaluation hands control back, so the answer no
+  # longer depends on the counter. None of this stops the overrun: it has
+  # already happened by the time anything can look.
+  describe "a budget spent where QuickJS does not poll" do
+    SLOW_NATIVE_SCAN = "const s = 'a'.repeat(2e7); let n = 0; for (let i = 0; i < %d; i++) n += s.indexOf('b'); n"
+
+    it "stops a source that spent the budget being parsed before any of it runs" do
+      vm = Quickjs::VM.new(timeout_msec: 10)
+      ran = 0
+      vm.define_function(:mark) { ran += 1 }
+
+      _ { vm.eval_code("mark(); const z = [#{Array.new(1_000_000, 0).join(',')}]; 1") }.must_raise Quickjs::InterruptedError
+      _(ran).must_equal 0
+    ensure
+      vm.dispose!
+    end
+
+    [true, false].each do |async|
+      it "reports a native builtin that outran the budget, async: #{async}" do
+        vm = Quickjs::VM.new(timeout_msec: 10)
+
+        _ { vm.eval_code(SLOW_NATIVE_SCAN % 20, async: async) }.must_raise Quickjs::InterruptedError
+      ensure
+        vm.dispose!
+      end
+    end
+
+    # What the evaluation went on to throw does not change that it was over
+    # budget, and the class it threw with is the guest's to choose.
+    it "reports it when the evaluation ends in a throw of its own" do
+      vm = Quickjs::VM.new(timeout_msec: 10)
+
+      _ { vm.eval_code("#{SLOW_NATIVE_SCAN % 20}; throw new Error('boom')") }.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
+    # The report is carried out of JS as an InternalError, whose name is read
+    # off a prototype the guest can write. The clock decides, not the name.
+    it "reports it as InterruptedError whatever the guest renames InternalError to" do
+      vm = Quickjs::VM.new(timeout_msec: 10)
+
+      _ { vm.eval_code("InternalError.prototype.name = 'TypeError'; #{SLOW_NATIVE_SCAN % 20}") }.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
+    it "reports it when a getter read while converting the result is what ran over" do
+      vm = Quickjs::VM.new(timeout_msec: 10)
+
+      _ { vm.eval_code("({ get a() { #{SLOW_NATIVE_SCAN % 20}; return 1 } })") }.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
+    # Zero has never meant "no budget", but it has never meant "refuse
+    # everything" either: only what QuickJS polls was held to it.
+    it "leaves a budget of zero to QuickJS's own polls" do
+      vm = Quickjs::VM.new(timeout_msec: 0)
+
+      _(vm.eval_code('1 + 1')).must_equal 2
+      _ { vm.eval_code('for (;;) {}') }.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
+    it "leaves the VM usable for the next evaluation" do
+      vm = Quickjs::VM.new(timeout_msec: 100)
+      _ { vm.eval_code(SLOW_NATIVE_SCAN % 40) }.must_raise Quickjs::InterruptedError
+
+      _(vm.eval_code('1 + 1')).must_equal 2
+    ensure
+      vm.dispose!
+    end
   end
 
   # compile arms the eval timer, which resets the clock the enclosing eval is

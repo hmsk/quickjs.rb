@@ -160,6 +160,9 @@ typedef struct VMData
   // off a stale clock — an unbudgeted polyfill load disarms deliberately and
   // would otherwise look infinitely overdue.
   bool eval_timer_armed;
+  // Set for the one evaluation whose overrun is not reported: see
+  // vm_m_evalDeclaration.
+  bool overrun_unreported;
   // Set by VM#dispose! to release the multi-MB JS heap before Ruby GC sees
   // enough pressure to collect the wrapper. Doubles as a double-free guard
   // for the dfree handler.
@@ -356,6 +359,7 @@ static inline VALUE vm_alloc(VALUE r_self)
   data->handle_source_broken = false;
   data->r_registrar_error = Qnil;
   data->eval_timer_armed = false;
+  data->overrun_unreported = false;
   data->disposed = false;
   data->gvl_released_js = false;
   data->evals_in_flight = 0;

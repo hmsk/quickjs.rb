@@ -905,6 +905,38 @@ bool eval_budget_lapsed_now(JSContext *ctx)
   return eval_budget_lapsed(JS_GetContextOpaque(ctx));
 }
 
+// QuickJS consults the interrupt handler once in ten thousand polls, and only
+// bytecode polls: the parser and the native builtins never do. So a budget can
+// lapse with nothing having noticed, and whether the evaluation is then
+// interrupted or completes depends on where the counter happened to stand
+// (#146). Asking the clock at the points an evaluation hands control back
+// makes the answer the same every time. It bounds nothing, since the stretch
+// has already run.
+//
+// A budget of zero is left to QuickJS's own polls, as it was: read here it
+// would have lapsed before the first instruction, and every evaluation on
+// such a VM would be refused.
+//
+// Pure C, because the released path asks without the GVL.
+static bool eval_budget_overran(VMData *data)
+{
+  return !data->overrun_unreported && data->eval_time->limit_ms > 0 && eval_budget_lapsed(data);
+}
+
+// For a value still in JS hands. What it throws is only a carrier: the
+// renderer decides by the clock, not by this error's name or message, both of
+// which the guest can rewrite on InternalError.prototype. An exception already
+// pending is passed through for the same reason, since the renderer asks the
+// same question of it.
+static JSValue interrupt_if_budget_lapsed(JSContext *ctx, JSValue j_val)
+{
+  if (JS_IsException(j_val) || !eval_budget_overran(JS_GetContextOpaque(ctx)))
+    return j_val;
+
+  JS_FreeValue(ctx, j_val);
+  return JS_ThrowInternalError(ctx, "interrupted");
+}
+
 // JS_ToCString converts through the value's own toString, so it answers NULL
 // whenever that throws — a getter that raises, a Symbol, a Proxy that refuses —
 // and not only when it runs out of memory. This keeps the NULL, for the two
@@ -1021,7 +1053,10 @@ static VALUE r_interrupted_error(void)
 
 static void raise_if_interrupted(JsHold *hold)
 {
-  if (hold->interrupted)
+  // Or outside them: an evaluation that outran its budget and then threw is
+  // over budget whatever it threw, and the class it threw with is the guest's
+  // to choose.
+  if (hold->interrupted || eval_budget_overran(JS_GetContextOpaque(hold->ctx)))
     rb_exc_raise(r_interrupted_error());
 }
 
@@ -2808,7 +2843,11 @@ static VALUE to_rb_return_value_body(VALUE r_owned)
     rb_exc_raise(rb_funcall(QUICKJSRB_ERROR_FOR(QUICKJSRB_NO_AWAIT_ERROR), rb_intern("new"), 2, r_error_message, Qnil));
     return Qnil;
   }
-  return to_rb_value(owned->ctx, owned->j_val);
+  VALUE r_value = to_rb_value(owned->ctx, owned->j_val);
+  // Converting runs the result's getters and toJSON, on the same budget.
+  if (eval_budget_overran(JS_GetContextOpaque(owned->ctx)))
+    rb_exc_raise(r_interrupted_error());
+  return r_value;
 }
 
 static VALUE to_rb_return_value_release(VALUE r_owned)
@@ -2933,7 +2972,11 @@ static void *eval_code_job_run(void *p)
 {
   struct eval_code_job *job = p;
   int eval_flags = job->async_mode ? (JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC) : JS_EVAL_TYPE_GLOBAL;
-  JSValue j_codeResult = JS_Eval(job->ctx, job->code, job->code_len, job->filename, eval_flags);
+  // Compiled and run as two steps so the clock can be asked between them: a
+  // source that spent the budget being parsed stops before any of it runs.
+  JSValue j_compiled = JS_Eval(job->ctx, job->code, job->code_len, job->filename, eval_flags | JS_EVAL_FLAG_COMPILE_ONLY);
+  j_compiled = interrupt_if_budget_lapsed(job->ctx, j_compiled);
+  JSValue j_codeResult = JS_IsException(j_compiled) ? j_compiled : JS_EvalFunction(job->ctx, j_compiled); // frees j_compiled
   if (job->async_mode)
   {
     JSValue j_awaitedResult = quickjsrb_host_await(job->ctx, j_codeResult); // frees j_codeResult
@@ -2944,6 +2987,7 @@ static void *eval_code_job_run(void *p)
   {
     job->result = j_codeResult;
   }
+  job->result = interrupt_if_budget_lapsed(job->ctx, job->result);
   return NULL;
 }
 
@@ -3498,6 +3542,46 @@ static VALUE vm_m_evalCode(int argc, VALUE *argv, VALUE r_self)
   };
   // No checkpoint on the GVL-free path: it is not taken with a handler set.
   return run_held_js_checkpoint_entry(data, eval_code_job_run_body, (VALUE)&job);
+}
+
+struct declaration_eval
+{
+  VMData *data;
+  VALUE r_self;
+  VALUE r_code;
+  bool was_unreported;
+};
+
+static VALUE declaration_eval_run(VALUE p)
+{
+  struct declaration_eval *eval = (struct declaration_eval *)p;
+  return vm_m_evalCode(1, &eval->r_code, eval->r_self);
+}
+
+static VALUE declaration_eval_done(VALUE p)
+{
+  struct declaration_eval *eval = (struct declaration_eval *)p;
+  eval->data->overrun_unreported = eval->was_unreported;
+  return Qnil;
+}
+
+// For the statements define_const / define_let / define_var generate. Their
+// source is a literal the host built from its own value, so there is no guest
+// in it to hold to a budget, and the caller reads an InterruptedError as a
+// binding QuickJS created and never initialised. Reporting an overrun after
+// the statement had finished, or before it had started, told it that about a
+// name that was live or had never existed, and the name was refused from then
+// on. An interrupt that QuickJS itself delivers mid-statement still arrives,
+// which is what bounds the one piece of guest code the assignment form can
+// reach, a setter installed for the name.
+static VALUE vm_m_evalDeclaration(VALUE r_self, VALUE r_code)
+{
+  VMData *data;
+  TypedData_Get_Struct(r_self, VMData, &vm_type, data);
+
+  struct declaration_eval eval = {data, r_self, r_code, data->overrun_unreported};
+  data->overrun_unreported = true;
+  return rb_ensure(declaration_eval_run, (VALUE)&eval, declaration_eval_done, (VALUE)&eval);
 }
 
 struct compile_job
@@ -4744,6 +4828,7 @@ RUBY_FUNC_EXPORTED void Init_quickjsrb(void)
   rb_define_alloc_func(r_class_vm, vm_alloc);
   rb_define_method(r_class_vm, "initialize", vm_m_initialize, -1);
   rb_define_method(r_class_vm, "eval_code", vm_m_evalCode, -1);
+  rb_define_private_method(r_class_vm, "_eval_declaration", vm_m_evalDeclaration, 1);
   rb_define_private_method(r_class_vm, "_compile_to_bytecode", vm_m_compile, -1);
   rb_define_private_method(r_class_vm, "_compile_module_to_bytecode", vm_m_compileModule, 2);
   rb_define_private_method(r_class_vm, "_preload_module_bytecode", vm_m_preloadModuleBytecode, 2);
