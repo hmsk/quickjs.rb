@@ -2215,6 +2215,41 @@ end
       end
     end
 
+    it "reports it from call" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+      vm.eval_code("globalThis.scan = () => { #{SLOW_NATIVE_SCAN % 20} }; 1")
+
+      _ { vm.call(:scan) }.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
+    it "reports it from a compiled run" do
+      runnable = Quickjs.compile(SLOW_NATIVE_SCAN % 20)
+      vm = Quickjs::VM.new(timeout_msec: 10)
+
+      _ { runnable.run(on: vm) }.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
+    it "reports it from import" do
+      vm = Quickjs::VM.new(timeout_msec: 10)
+
+      _ { vm.import('* as m', from: "#{SLOW_NATIVE_SCAN % 20}; export const x = 1;") }.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
+    it "reports it from drain_jobs!" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+      vm.eval_code("Promise.resolve().then(() => { #{SLOW_NATIVE_SCAN % 20} }); void 0")
+
+      _ { vm.drain_jobs! }.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
     # What the evaluation went on to throw does not change that it was over
     # budget, and the class it threw with is the guest's to choose.
     it "reports it when the evaluation ends in a throw of its own" do
@@ -2239,6 +2274,15 @@ end
       vm = Quickjs::VM.new(timeout_msec: 10)
 
       _ { vm.eval_code("({ get a() { #{SLOW_NATIVE_SCAN % 20}; return 1 } })") }.must_raise Quickjs::InterruptedError
+    ensure
+      vm.dispose!
+    end
+
+    it "reports it from define_function when a getter on the path ran over" do
+      vm = Quickjs::VM.new(timeout_msec: 50)
+      vm.eval_code("globalThis.lib = { get slow() { #{SLOW_NATIVE_SCAN % 20}; return {} } }; 1")
+
+      _ { vm.define_function([:lib, :slow, :f]) { 1 } }.must_raise Quickjs::InterruptedError
     ensure
       vm.dispose!
     end
@@ -2508,8 +2552,12 @@ end
         void 0
       JS
 
+      # The interrupt lands inside a reaction job, where it becomes a rejection
+      # of the promise that job was settling and the chain simply stops. The
+      # drain used to return its count as though the queue had emptied by
+      # itself; the lapse is what it reports now.
       started = Time.now.to_f * 1000
-      vm.drain_jobs!
+      _ { vm.drain_jobs! }.must_raise Quickjs::InterruptedError
       elapsed = Time.now.to_f * 1000 - started
       assert_operator elapsed, :>=, 50
       assert_operator elapsed, :<, 300

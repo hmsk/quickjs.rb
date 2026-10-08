@@ -2575,7 +2575,7 @@ static void *bytecode_eval_await_job_run(void *p)
 {
   struct bytecode_load_job *job = p;
   bytecode_load_job_run(job);
-  job->result = quickjsrb_host_await(job->ctx, job->result);
+  job->result = interrupt_if_budget_lapsed(job->ctx, quickjsrb_host_await(job->ctx, job->result));
   return NULL;
 }
 
@@ -4283,6 +4283,9 @@ static VALUE define_function_resolve_and_install(VALUE p)
       install->j_parent = j_next;
       check_path_segment(ctx, j_next, seg);
     }
+    // Before anything is installed, so the report leaves nothing half done.
+    if (eval_budget_overran(data))
+      rb_exc_raise(r_interrupted_error());
   }
   else
   {
@@ -4616,7 +4619,7 @@ static VALUE call_global_function_run(VALUE p)
   JS_FreeValue(data->context, j_this);
 
   // js_std_await handles both async (promise) and sync results; frees j_result
-  return to_rb_return_value(data->context, quickjsrb_host_await(data->context, j_result));
+  return to_rb_return_value(data->context, interrupt_if_budget_lapsed(data->context, quickjsrb_host_await(data->context, j_result)));
 }
 
 static VALUE vm_m_callGlobalFunction(int argc, VALUE *argv, VALUE r_self)
@@ -4779,7 +4782,7 @@ static VALUE import_body(VALUE p)
   // Module eval returns a Promise. Awaiting it surfaces top-level throws,
   // rejected dynamic imports, and rejected top-level awaits as Ruby
   // exceptions instead of silently dropping them.
-  JSValue j_awaited = quickjsrb_host_await(data->context, j_codeResult);
+  JSValue j_awaited = interrupt_if_budget_lapsed(data->context, quickjsrb_host_await(data->context, j_codeResult));
   if (JS_IsException(j_awaited))
     return to_rb_value(data->context, j_awaited);
   JS_FreeValue(data->context, j_awaited);
@@ -4903,6 +4906,8 @@ static VALUE drain_jobs_body(VALUE p)
         return to_rb_value(data->context, JS_EXCEPTION); // raises
       executed++;
     }
+    if (eval_budget_overran(data))
+      rb_exc_raise(r_interrupted_error());
   }
   return INT2NUM(executed);
 }
