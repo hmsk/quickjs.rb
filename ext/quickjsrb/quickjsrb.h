@@ -56,6 +56,23 @@ static inline int64_t eval_elapsed_ms(const EvalTime *eval_time)
        + (now.tv_nsec - eval_time->started_at.tv_nsec) / 1000000;
 }
 
+// Moves the clock past a stretch that is not the evaluation's to pay for.
+static inline void eval_clock_skip(EvalTime *eval_time, const struct timespec *from, const struct timespec *until)
+{
+  eval_time->started_at.tv_sec += until->tv_sec - from->tv_sec;
+  eval_time->started_at.tv_nsec += until->tv_nsec - from->tv_nsec;
+  if (eval_time->started_at.tv_nsec < 0)
+  {
+    eval_time->started_at.tv_sec -= 1;
+    eval_time->started_at.tv_nsec += 1000000000L;
+  }
+  else if (eval_time->started_at.tv_nsec >= 1000000000L)
+  {
+    eval_time->started_at.tv_sec += 1;
+    eval_time->started_at.tv_nsec -= 1000000000L;
+  }
+}
+
 // A rejected promise and its reason, converted when it was rejected.
 // error_handle names the bridged exception the reason was, if any: peeked
 // rather than taken, so it is taken only if this is reported.
@@ -160,6 +177,9 @@ typedef struct VMData
   // off a stale clock — an unbudgeted polyfill load disarms deliberately and
   // would otherwise look infinitely overdue.
   bool eval_timer_armed;
+  // Set for the one evaluation whose overrun is not reported: see
+  // vm_m_evalDeclaration.
+  bool overrun_unreported;
   // Set by VM#dispose! to release the multi-MB JS heap before Ruby GC sees
   // enough pressure to collect the wrapper. Doubles as a double-free guard
   // for the dfree handler.
@@ -356,6 +376,7 @@ static inline VALUE vm_alloc(VALUE r_self)
   data->handle_source_broken = false;
   data->r_registrar_error = Qnil;
   data->eval_timer_armed = false;
+  data->overrun_unreported = false;
   data->disposed = false;
   data->gvl_released_js = false;
   data->evals_in_flight = 0;
