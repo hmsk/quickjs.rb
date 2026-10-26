@@ -54,6 +54,10 @@ Quickjs.eval_code(code, filename: 'my_script.js')
 Quickjs.eval_code(code, timeout_msec: 1_000)
 ```
 
+An evaluation that is over budget when it hands control back raises `Quickjs::InterruptedError`, whatever it returned or threw. That is not always the moment the budget ends: QuickJS can only be interrupted while it is running JavaScript bytecode, so a long stretch inside its parser or a native builtin (`indexOf` over a very large string, say) finishes first and is reported afterwards. Treat `timeout_msec` as a guarantee that an overrun is reported, not as a hard ceiling on wall-clock time, and do not read an `InterruptedError` as "nothing ran": the evaluation may have completed before it was reported.
+
+The budget is wall-clock time for the evaluation, host work included: parsing the source, a `define_function` block, an `on_log` listener, a module loader, and `crypto.subtle`. Generating an RSA key, or PBKDF2 with a high iteration count, often takes longer than the default 100 msec, so give such evaluations a larger budget. A `setTimeout` delay (`FEATURE_TIMEOUT`) is a wait the script asked for and is not counted; `os.sleep` and `os.setTimeout` from `MODULE_OS` are.
+
 #### Features
 
 ```rb

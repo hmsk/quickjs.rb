@@ -233,10 +233,10 @@ module Quickjs
           # the prototype chain, and a setter inherited from Object.prototype
           # takes the value while the guard above, which asks only about own
           # properties, reports a clean global.
-          eval_code("var #{key};")
+          _eval_declaration("var #{key};")
         elsif !_live_lexical?(key)
           begin
-            eval_code("#{JS_KEYWORDS.fetch(kind)} #{key};")
+            _eval_declaration("#{JS_KEYWORDS.fetch(kind)} #{key};")
             # It just made the binding, so say so. Only _declare recorded this,
             # and the two are not the same moment: a guest can fix a global of
             # this name afterwards, and then a later redefine, unable to tell
@@ -309,7 +309,7 @@ module Quickjs
     # parsed is the one this file just built and has no call in it, so a parse
     # error about it comes from the engine and describes our own literal.
     def _eval_generated(source)
-      eval_code(source)
+      _eval_declaration(source)
     rescue Quickjs::SyntaxError => e
       raise unless e.message.include?("stack overflow")
 

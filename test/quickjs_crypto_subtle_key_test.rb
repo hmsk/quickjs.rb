@@ -443,7 +443,7 @@ describe "crypto.subtle key management" do
     # that throws. It is built directly now, so what the guest does to that
     # name cannot reach the description.
     it "describes the key in full even when Uint8Array is gone" do
-      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO], timeout_msec: 10_000)
       vm.eval_code('globalThis.PE = new Uint8Array([1, 0, 1]); delete globalThis.Uint8Array; 1')
 
       described = vm.eval_code(<<~JS)
@@ -460,7 +460,7 @@ describe "crypto.subtle key management" do
     # A replacement that reaches a Ruby bridge used to have its exception
     # swallowed and left parked in alive_objects.
     it "does not run a replaced Uint8Array at all" do
-      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO])
+      vm = Quickjs::VM.new(features: [::Quickjs::POLYFILL_CRYPTO], timeout_msec: 10_000)
       calls = 0
       vm.define_function(:boom) { calls += 1; raise ArgumentError, 'host' }
       vm.eval_code('globalThis.PE = new Uint8Array([1, 0, 1]); globalThis.Uint8Array = function () { boom() }; 1')

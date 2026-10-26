@@ -4,7 +4,9 @@ require_relative "test_helper"
 
 describe "crypto.subtle RSA" do
   before do
-    @options = { features: [::Quickjs::POLYFILL_CRYPTO] }
+    # Generating an RSA key is host work that counts against the budget, and
+    # the prime search does not reliably fit in the default.
+    @options = { features: [::Quickjs::POLYFILL_CRYPTO], timeout_msec: 10_000 }
     @rsa_algo = "{name: 'RSASSA-PKCS1-v1_5', modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256'}"
     @pss_algo = "{name: 'RSA-PSS', modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256'}"
   end

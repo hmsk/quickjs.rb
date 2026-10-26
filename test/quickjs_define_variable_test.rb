@@ -528,13 +528,13 @@ describe "a value that expands past what the VM could hold" do
     # this interrupts never took. One shot, so the define after it is ordinary.
     fired = false
     vm.singleton_class.prepend(Module.new do
-      define_method(:eval_code) do |source, **options|
+      define_method(:_eval_declaration) do |source|
         if !fired && source.start_with?("let x =")
           fired = true
           raise ThreadError, "injected"
         end
 
-        super(source, **options)
+        super(source)
       end
     end)
     _ { vm.define_let(:x, 2) }.must_raise ThreadError
@@ -1479,7 +1479,26 @@ describe "values the serializer must not take at face value" do
       # been invented as a global by sloppy mode.
       _(vm.eval_code("typeof globalThis.cfg")).must_equal "undefined"
     end
-  end  # Thread.handle_interrupt defers Timeout and Thread#raise. It does not defer
+  end
+
+  # The declaration is the host's own literal, so an overrun of timeout_msec
+  # while it is parsed or built is not reported the way a guest's is. Reported,
+  # it read as a binding left uninitialised: a define of a large value on a
+  # slow machine raised, and the name was refused for the life of the VM
+  # although it was live, or had never been declared at all.
+  it "declares a value that takes longer than the budget to parse and build" do
+    vm = Quickjs::VM.new(timeout_msec: 50)
+
+    vm.define_let(:cfg, Array.new(1_000_000) { |i| i })
+    _(vm.eval_code("cfg.length")).must_equal 1_000_000
+
+    vm.define_let(:cfg, 1)
+    _(vm.eval_code("cfg")).must_equal 1
+  ensure
+    vm.dispose!
+  end
+
+  # Thread.handle_interrupt defers Timeout and Thread#raise. It does not defer
   # a trap handler: that runs at the checkpoint regardless of the mask, and a
   # raise inside it is an ordinary raise from that point. So the record goes in
   # before the eval rather than after, and this is the case that says so.
