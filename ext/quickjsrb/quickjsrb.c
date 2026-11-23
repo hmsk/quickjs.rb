@@ -2212,11 +2212,76 @@ static void quickjsrb_promise_rejection_tracker(
   entry->error_handle = error_handle;
 }
 
+static JSValue throw_unsettleable_await(JSContext *ctx)
+{
+  JSValue j_error = JS_NewError(ctx);
+  if (JS_IsException(j_error))
+    return j_error;
+  int flags = JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE;
+  JS_DefinePropertyValueStr(ctx, j_error, "name", JS_NewString(ctx, "Quickjs::InterruptedError"), flags);
+  JS_DefinePropertyValueStr(ctx, j_error, "message",
+                            JS_NewString(ctx, "Awaited Promise can never settle: no job, timer or I/O is left to resolve it"), flags);
+  // Raised with no JS on the stack; left unset, the log row would read "undefined".
+  JS_DefinePropertyValueStr(ctx, j_error, "stack", JS_NewString(ctx, ""), flags);
+  return JS_Throw(ctx, j_error);
+}
+
+// js_std_await, with the idle branch in our hands: there it retries forever,
+// out of reach of timeout_msec because no JS runs to poll the interrupt handler.
+// A wait on a live timer may still outlast the budget, as it always has. Frees
+// promise; a non-promise, including JS_EXCEPTION, passes through.
+static JSValue await_promise(JSContext *ctx, JSValue promise)
+{
+  JSRuntime *runtime = JS_GetRuntime(ctx);
+  for (;;)
+  {
+    JSValue ret;
+    switch (JS_PromiseState(ctx, promise))
+    {
+    case JS_PROMISE_FULFILLED:
+      ret = JS_PromiseResult(ctx, promise);
+      JS_FreeValue(ctx, promise);
+      return ret;
+    case JS_PROMISE_REJECTED:
+      ret = JS_Throw(ctx, JS_PromiseResult(ctx, promise));
+      JS_FreeValue(ctx, promise);
+      return ret;
+    case JS_PROMISE_PENDING:
+      break;
+    default:
+      return promise;
+    }
+
+    int err = JS_ExecutePendingJob(runtime, NULL);
+    if (err < 0)
+      js_std_dump_error(ctx);
+    if (err == 0)
+    {
+      if (!quickjsrb_os_has_event_source(ctx))
+      {
+        JS_FreeValue(ctx, promise);
+        return throw_unsettleable_await(ctx);
+      }
+      if (quickjsrb_os_poll(ctx) != 0)
+      {
+        // Only a signal handler is left, and poll returns at once for those.
+        if (eval_budget_lapsed(JS_GetContextOpaque(ctx)))
+        {
+          JS_FreeValue(ctx, promise);
+          return JS_ThrowInternalError(ctx, "interrupted");
+        }
+        struct timespec nap = {0, 1000000};
+        nanosleep(&nap, NULL);
+      }
+    }
+  }
+}
+
 // A promise the host awaits is handled by the host: its rejection is raised.
 static JSValue quickjsrb_host_await(JSContext *ctx, JSValue promise)
 {
   JSValue held = JS_DupValue(ctx, promise);
-  JSValue ret = js_std_await(ctx, promise); // frees promise
+  JSValue ret = await_promise(ctx, promise); // frees promise
   pending_rejections_remove(JS_GetContextOpaque(ctx), held);
   JS_FreeValue(ctx, held);
   return ret;
@@ -2867,7 +2932,7 @@ static JSValue js_console_error(JSContext *ctx, JSValueConst this, int argc, JSV
 //      gvl_released_js re-acquire either way.
 //
 //   3. vm_m_evalBytecode — user bytecode via Runnable#run, same gate and
-//      buffer copy as 2, but with the awaiting runner: js_std_await's job
+//      buffer copy as 2, but with the awaiting runner: await_promise's job
 //      drain is bridge-free under the gate, the same argument eval_code's
 //      released path relies on.
 //
@@ -2910,11 +2975,11 @@ static void *bytecode_load_job_run(void *p)
   return NULL;
 }
 
-// Awaiting variant of the core, for vm_m_evalBytecode: js_std_await drains
+// Awaiting variant of the core, for vm_m_evalBytecode: await_promise drains
 // the job queue until the eval's promise settles. Same MUST-NOT-touch-Ruby
 // constraint — on a pure VM (can_eval_gvl_free) every drained job is
 // bridge-free JS, the same argument eval_code's released path relies on.
-// js_std_await passes a non-promise — including an exception preserved by
+// await_promise passes a non-promise — including an exception preserved by
 // the JS_ReadObject short-circuit — through untouched.
 static void *bytecode_eval_await_job_run(void *p)
 {
@@ -3098,7 +3163,7 @@ static VALUE vm_m_initialize(int argc, VALUE *argv, VALUE r_self)
   {
     // setTimeout itself only enqueues, but js_delay_and_eval_job (the
     // enqueued callback) calls rb_funcall and rb_thread_wait_for
-    // synchronously while js_std_await drains the queue — so this counts
+    // synchronously while await_promise drains the queue — so this counts
     // as a Ruby bridge and eval must keep the GVL.
     JS_SetPropertyStr(
         data->context, j_global, "setTimeout",
@@ -3335,7 +3400,7 @@ struct eval_code_job
   JSValue result;
 };
 
-// Shared eval core: JS_Eval (+ js_std_await and the {value, done} unwrap for
+// Shared eval core: JS_Eval (+ await_promise and the {value, done} unwrap for
 // async). Pure C over JSValues — MUST NOT touch the Ruby VM, because the
 // pure path runs it with the GVL released (see js_quickjsrb_log's dispatcher
 // for how console.log re-acquires). The bridged path calls it directly with
@@ -3773,7 +3838,7 @@ static VALUE eval_code_job_run_body(VALUE p)
   return to_rb_return_value(job->ctx, job->result);
 }
 
-// Unwraps js_std_await's {value, done}, or raises the JS exception.
+// Unwraps await_promise's {value, done}, or raises the JS exception.
 static VALUE bytecode_eval_result_to_rb(JSContext *ctx, JSValue j_result)
 {
   if (JS_IsException(j_result))
@@ -4964,7 +5029,7 @@ static VALUE call_global_function_run(VALUE p)
   JS_FreeValue(data->context, j_func);
   JS_FreeValue(data->context, j_this);
 
-  // js_std_await handles both async (promise) and sync results; frees j_result
+  // await_promise handles both async (promise) and sync results; frees j_result
   return to_rb_return_value(data->context, quickjsrb_host_await(data->context, j_result));
 }
 

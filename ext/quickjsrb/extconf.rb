@@ -11,7 +11,7 @@ $srcs = [
   'libregexp.c',
   'cutils.c',
   'quickjs.c',
-  'quickjs-libc.c',
+  'quickjsrb_libc.c',
   'polyfill-file.min.c',
   'polyfill-encoding.min.c',
   'polyfill-url.min.c',

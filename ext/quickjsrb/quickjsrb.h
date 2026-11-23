@@ -7,6 +7,7 @@
 
 #include "quickjs.h"
 #include "quickjs-libc.h"
+#include "quickjsrb_libc.h"
 #include "cutils.h"
 
 #include <pthread.h>
