@@ -69,6 +69,22 @@ describe "awaiting a promise" do
     _(outcome).must_equal [:returned, ['fired']]
   end
 
+  it "logs the failure without a stack placeholder" do
+    outcome = outcome_within do
+      logs = []
+      vm = Quickjs::VM.new
+      vm.on_log { |log| logs << log.raw.first }
+      begin
+        vm.eval_code(never_settles)
+      rescue Quickjs::InterruptedError
+        logs
+      end
+    end
+    _(outcome[1].size).must_equal 1
+    _(outcome[1].first).must_match(/can never settle/)
+    _(outcome[1].first).wont_match(/undefined/)
+  end
+
   it "raises from VM#call" do
     outcome = outcome_within do
       vm = Quickjs::VM.new

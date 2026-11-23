@@ -2221,6 +2221,8 @@ static JSValue throw_unsettleable_await(JSContext *ctx)
   JS_DefinePropertyValueStr(ctx, j_error, "name", JS_NewString(ctx, "Quickjs::InterruptedError"), flags);
   JS_DefinePropertyValueStr(ctx, j_error, "message",
                             JS_NewString(ctx, "Awaited Promise can never settle: no job, timer or I/O is left to resolve it"), flags);
+  // Raised with no JS on the stack; left unset, the log row would read "undefined".
+  JS_DefinePropertyValueStr(ctx, j_error, "stack", JS_NewString(ctx, ""), flags);
   return JS_Throw(ctx, j_error);
 }
 
