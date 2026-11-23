@@ -7,4 +7,8 @@
 // nonzero when it had nothing to wait on.
 int quickjsrb_os_poll(JSContext *ctx);
 
+// Whether a timer, I/O handler, worker port or signal handler could still run
+// JS on this runtime.
+int quickjsrb_os_has_event_source(JSContext *ctx);
+
 #endif

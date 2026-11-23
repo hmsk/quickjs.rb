@@ -2212,8 +2212,22 @@ static void quickjsrb_promise_rejection_tracker(
   entry->error_handle = error_handle;
 }
 
-// js_std_await, with the idle branch in our hands. Frees promise; a non-promise,
-// including JS_EXCEPTION, passes through.
+static JSValue throw_unsettleable_await(JSContext *ctx)
+{
+  JSValue j_error = JS_NewError(ctx);
+  if (JS_IsException(j_error))
+    return j_error;
+  int flags = JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE;
+  JS_DefinePropertyValueStr(ctx, j_error, "name", JS_NewString(ctx, "Quickjs::InterruptedError"), flags);
+  JS_DefinePropertyValueStr(ctx, j_error, "message",
+                            JS_NewString(ctx, "Awaited Promise can never settle: no job, timer or I/O is left to resolve it"), flags);
+  return JS_Throw(ctx, j_error);
+}
+
+// js_std_await, with the idle branch in our hands: there it retries forever,
+// out of reach of timeout_msec because no JS runs to poll the interrupt handler.
+// A wait on a live timer may still outlast the budget, as it always has. Frees
+// promise; a non-promise, including JS_EXCEPTION, passes through.
 static JSValue await_promise(JSContext *ctx, JSValue promise)
 {
   JSRuntime *runtime = JS_GetRuntime(ctx);
@@ -2240,7 +2254,14 @@ static JSValue await_promise(JSContext *ctx, JSValue promise)
     if (err < 0)
       js_std_dump_error(ctx);
     if (err == 0)
+    {
+      if (!quickjsrb_os_has_event_source(ctx))
+      {
+        JS_FreeValue(ctx, promise);
+        return throw_unsettleable_await(ctx);
+      }
       quickjsrb_os_poll(ctx);
+    }
   }
 }
 
