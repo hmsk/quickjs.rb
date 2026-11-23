@@ -135,4 +135,30 @@ describe "awaiting a promise" do
     end
     assert_unsettleable(outcome)
   end
+
+  it "settles from a signal handler" do
+    outcome = outcome_within do
+      vm = Quickjs::VM.new(features: [Quickjs::MODULE_OS], timeout_msec: 3_000)
+      Thread.new do
+        sleep 0.05
+        Process.kill('USR1', Process.pid)
+      end
+      vm.eval_code('await new Promise(resolve => os.signal(os.SIGUSR1, () => resolve(1)))')
+    end
+    _(outcome).must_equal [:returned, 1]
+  end
+
+  it "gives up on a signal at the budget without burning CPU" do
+    outcome = outcome_within do
+      vm = Quickjs::VM.new(features: [Quickjs::MODULE_OS], timeout_msec: 300)
+      cpu_before = Process.clock_gettime(Process::CLOCK_PROCESS_CPUTIME_ID)
+      begin
+        vm.eval_code('await new Promise(resolve => os.signal(os.SIGUSR1, resolve))')
+      rescue Quickjs::InterruptedError => e
+        [e.class.name, Process.clock_gettime(Process::CLOCK_PROCESS_CPUTIME_ID) - cpu_before]
+      end
+    end
+    _(outcome[1][0]).must_equal 'Quickjs::InterruptedError'
+    _(outcome[1][1]).must_be :<, 0.15
+  end
 end

@@ -2260,7 +2260,17 @@ static JSValue await_promise(JSContext *ctx, JSValue promise)
         JS_FreeValue(ctx, promise);
         return throw_unsettleable_await(ctx);
       }
-      quickjsrb_os_poll(ctx);
+      if (quickjsrb_os_poll(ctx) != 0)
+      {
+        // Only a signal handler is left, and poll returns at once for those.
+        if (eval_budget_lapsed(JS_GetContextOpaque(ctx)))
+        {
+          JS_FreeValue(ctx, promise);
+          return JS_ThrowInternalError(ctx, "interrupted");
+        }
+        struct timespec nap = {0, 1000000};
+        nanosleep(&nap, NULL);
+      }
     }
   }
 }
